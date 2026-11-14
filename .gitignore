@@ -1,0 +1,15 @@
+# Build output and the IDF/toolchain pointers: rebuilt, never committed.
+build/
+.IDF_PATH
+.IDF_TOOLS_PATH
+sdkconfig_tanmatsu
+sdkconfig_*.old
+.submodules_update_done
+
+# Fetched by the component manager from main/idf_component.yml (33 MB, and versions are pinned in the lock).
+managed_components/
+
+# The BadgeLink tool clone (make badgelink).
+badgelink/
+
+*.log
