@@ -222,34 +222,143 @@ void test_pan_and_zoom() {
     CHECK_EQ(om::map::zoomTo(17, 25, &zx, &zy, 800, 480), om::map::kMaxZoom);
 }
 
+// S506: the cache grew a state machine, because decoding moved to another task. Three rules matter and each of
+// them fails silently on the glass: a pending slot must not be drawn, must not be evicted, and a tile the pack
+// does not have must not be asked for again and again.
 void test_tile_cache() {
     om::map::TileCache c;
     c.reset();
     CHECK_EQ(c.find(16, 1, 1), -1);                       // nothing cached yet
+    CHECK_EQ((int)c.stateOf(16, 1, 1), (int)om::map::SlotState::Empty);
 
     for (uint32_t i = 0; i < (uint32_t)om::map::kCacheSlots; i++) {
         const int slot = c.take(16, i, 0);
         CHECK(slot >= 0 && slot < om::map::kCacheSlots);
+        // Pending is not a hit: this is what the drawing task sees while the decoder works.
+        CHECK_EQ(c.find(16, i, 0), -1);
+        CHECK_EQ((int)c.stateOf(16, i, 0), (int)om::map::SlotState::Pending);
+        c.commit(slot, true);
     }
-    CHECK_EQ(c.find(16, 0, 0), 0);                        // all eight are held
+    CHECK_EQ(c.find(16, 0, 0), 0);                        // all twenty are held
     CHECK_EQ(c.find(16, 7, 0), 7);
 
-    // Touch slot 0 so slot 1 is now the least recently used, then take a ninth tile.
+    // Touch slot 0 so slot 1 is now the least recently used, then take one more tile.
     CHECK_EQ(c.find(16, 0, 0), 0);
-    c.take(16, 8, 0);
+    const int s20 = c.take(16, 20, 0);
+    c.commit(s20, true);
     CHECK_EQ(c.find(16, 1, 0), -1);                       // evicted: least recently used
     CHECK_EQ(c.find(16, 0, 0), 0);                        // kept: it was touched
-    CHECK_EQ(c.find(16, 8, 0) >= 0, true);
+    CHECK_EQ(c.find(16, 20, 0) >= 0, true);
 
     // A different zoom is a different key, and the victim is whatever is least recently used AT THAT MOMENT:
-    // after touching 16/0/0 twice and inserting 16/8/0, the stale one is 16/2/0 (never touched since insertion).
-    c.take(17, 0, 0);
+    // after touching 16/0/0 twice and inserting 16/20/0, the stale one is 16/2/0 (never touched since insertion).
+    const int s17 = c.take(17, 0, 0);
+    c.commit(s17, true);
     CHECK_EQ(c.find(16, 2, 0), -1);                       // the true LRU
     CHECK_EQ(c.find(16, 0, 0) >= 0, true);                // touched, so kept
     CHECK_EQ(c.find(17, 0, 0) >= 0, true);                // the new key is in
 
     c.reset();
     CHECK_EQ(c.find(17, 0, 0), -1);
+}
+
+void test_cache_pending_is_untouchable() {
+    om::map::TileCache c;
+    c.reset();
+
+    // One tile being decoded in the oldest slot, the rest full and newer: an eviction must pass it by.
+    const int pending = c.take(16, 100, 100);              // slot 0, the oldest use stamp
+    CHECK_EQ((int)c.stateOf(16, 100, 100), (int)om::map::SlotState::Pending);
+    for (uint32_t i = 0; i < (uint32_t)om::map::kCacheSlots - 1; i++) {
+        c.commit(c.take(16, 200 + i, 0), true);
+    }
+    CHECK_EQ((int)c.stateOf(16, 100, 100), (int)om::map::SlotState::Pending);   // still reserved
+    const int other = c.take(16, 300, 0);
+    CHECK(other >= 0);
+    CHECK(other != pending);                              // the victim is a ready tile, never the pending one
+    CHECK_EQ((int)c.stateOf(16, 100, 100), (int)om::map::SlotState::Pending);
+    c.commit(other, true);
+
+    // Every slot pending at once: say -1 rather than hand out a buffer that is being written.
+    om::map::TileCache full;
+    full.reset();
+    for (int i = 0; i < om::map::kCacheSlots; i++) CHECK(full.take(16, (uint32_t)i, 9) >= 0);
+    CHECK_EQ(full.take(16, 999, 9), -1);
+
+    // A failed decode frees the slot and is remembered, so a hole is not retried for ever.
+    om::map::TileCache f;
+    f.reset();
+    const int s = f.take(16, 5, 5);
+    CHECK_EQ(f.isFailed(16, 5, 5), false);
+    f.commit(s, false);
+    CHECK_EQ((int)f.stateOf(16, 5, 5), (int)om::map::SlotState::Empty);
+    CHECK_EQ(f.find(16, 5, 5), -1);
+    CHECK_EQ(f.isFailed(16, 5, 5), true);
+    CHECK_EQ(f.isFailed(16, 5, 6), false);                // only that exact tile
+    f.reset();
+    CHECK_EQ(f.isFailed(16, 5, 5), false);                // a new pack forgets the holes
+}
+
+void test_plan_tiles_order() {
+    // A 4x3 view (the panel's 800x386 at some offsets) starting at tile (10, 20). Nothing cached.
+    om::map::ViewTiles vt;
+    vt.x0    = 10;
+    vt.y0    = 20;
+    vt.cols  = 4;
+    vt.rows  = 3;
+    vt.count = 12;
+
+    om::map::TileCache c;
+    c.reset();
+    om::map::TileRequest req[om::map::kMaxRequests];
+    const int            n = om::map::planTiles(vt, 16, c, req, om::map::kMaxRequests);
+    CHECK_EQ(n, 12);
+
+    // Centre-out, ties in row-major order: the 4x3 grid has no single middle tile, so the two tiles nearest the
+    // middle come first (cols 1-2, row 1), then the same two columns in the rows above and below, then the side
+    // columns, and the four corners last. Distance = (2*col-(cols-1))^2 + (2*row-(rows-1))^2: d=1, 5, 9, 13.
+    static const uint32_t wx[12] = {11, 12, 11, 12, 11, 12, 10, 13, 10, 13, 10, 13};
+    static const uint32_t wy[12] = {21, 21, 20, 20, 22, 22, 21, 21, 20, 20, 22, 22};
+    for (int i = 0; i < 12; i++) {
+        CHECK_EQ(req[i].z, 16);
+        CHECK_EQ(req[i].x, wx[i]);
+        CHECK_EQ(req[i].y, wy[i]);
+    }
+
+    // A tile that is ready is not requested; a tile being decoded is not requested twice; a tile the pack does
+    // not have is not requested at all. Each of those removes exactly one entry from the plan.
+    c.commit(c.take(16, 11, 21), true);    // ready
+    const int s2 = c.take(16, 12, 21);     // pending, never committed
+    c.markFailed(16, 10, 20);
+    CHECK_EQ((int)c.stateOf(16, 12, 21), (int)om::map::SlotState::Pending);
+    CHECK(s2 >= 0);
+    const int n2 = om::map::planTiles(vt, 16, c, req, om::map::kMaxRequests);
+    CHECK_EQ(n2, 9);
+    for (int i = 0; i < n2; i++) {
+        CHECK(!(req[i].x == 11 && req[i].y == 21));
+        CHECK(!(req[i].x == 12 && req[i].y == 21));
+        CHECK(!(req[i].x == 10 && req[i].y == 20));
+    }
+    CHECK_EQ(req[0].x, 11);               // the next-nearest tile (col 1, row 0) still comes first
+    CHECK_EQ(req[0].y, 20);
+
+    // A cap too small for the view is refused, not silently truncated (which would leave the edges blank).
+    CHECK_EQ(om::map::planTiles(vt, 16, c, req, 11), -1);
+    CHECK_EQ(om::map::planTiles(vt, 16, c, req, 12), 9);
+    CHECK_EQ(om::map::planTiles(vt, 16, c, nullptr, 12), -1);
+
+    // A 15-tile view (5x3, the real panel) still fits the queue: the middle of the middle row is first.
+    om::map::ViewTiles big;
+    big.x0    = 100;
+    big.y0    = 200;
+    big.cols  = 5;
+    big.rows  = 3;
+    big.count = 15;
+    om::map::TileCache empty;
+    empty.reset();
+    CHECK_EQ(om::map::planTiles(big, 16, empty, req, om::map::kMaxRequests), 15);
+    CHECK_EQ(req[0].x, 102);
+    CHECK_EQ(req[0].y, 201);
 }
 
 }  // namespace
@@ -263,6 +372,8 @@ int main() {
     test_view_tiles();
     test_pan_and_zoom();
     test_tile_cache();
+    test_cache_pending_is_untouchable();
+    test_plan_tiles_order();
 
     printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

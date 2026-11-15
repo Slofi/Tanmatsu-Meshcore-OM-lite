@@ -15,6 +15,96 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-15 · S506 · the zoom no longer freezes, and the hardware codec is used only when it proves itself (v34 → v36)
+
+> Written by DeepSeek, S506, with Filip at the device. Two asks in one session: *"also fix the zoom lag problem,
+> it takes too long to change zoom on the map"*, then, after v34, *"zoom is good now, but the map colours are weird
+> and not correct!"*. The second half of this entry is that defect, its cause, and the check that now decides it
+> at every boot.
+
+### Slice 1 (v34): decoding left the drawing task
+
+- **`core/map_view.*`** — the tile cache grew a state machine, because a slot can now be *being written*:
+  `SlotState::Empty/Pending/Ready`. `find()` hands out **Ready only**; `take()` never evicts a **Pending** slot
+  (the worker holds a raw pointer into that buffer); `commit(slot, ok)` and a 24-slot **failed ring** so a hole at
+  the edge of the pack is not asked for on every repaint. New pure function **`planTiles()`**: the tiles still
+  missing, in **centre-out** order (so what is under the middle of the screen is decoded first), with the exact
+  order pinned by the host tests.
+- **`main/map_link.*`** — one **worker task** (`om-map`, priority 2, 12 KiB stack). The mutex covers the cache,
+  the queue and the slot array; it is **never held during a decode**. `showView()` plans the missing tiles and
+  rings the doorbell; the worker picks and reserves a slot in one critical section (so a re-plan can never pair a
+  tile with the wrong zoom's pack); `drawTile()` blits a ready tile under the lock so it cannot be evicted
+  mid-copy; `busy()` / `takeLanded()` drive the page's repainting.
+- **`main/map_page.*`** — draws cached tiles only, never decodes, and calls `showView()` on every compose (cheap
+  and idempotent). Logs `N of M drawn, K queued` so a fill is visible in the log, not just on the glass.
+- **`main/main.cpp`** — while the map is filling, the input poll drops **250 ms → 30 ms** and a landing sets
+  `dirty`, so a tile reaches the panel within a frame. The panel blit is now measured: `map frame: present N ms`.
+- **Host tests: 245 checks, 0 failures** (was 176). Five deliberate mutations, each red at a named line:
+  `find()` handing out a pending slot, evicting a pending slot, a row-major plan instead of centre-out, planning a
+  known-missing tile, and a failed decode staying drawable. **Two of those first went red by failing to *compile*
+  (unused-variable under `-Werror`), which is not a guard** — they were re-armed so the only way to red is an
+  assertion.
+
+**On the glass (v34):** `fill: 14 tile(s) in 525 ms`, `12 tile(s) in 551 ms`, `4 tile(s) in 328 ms`;
+per frame `composed in 6-26 ms` plus `present 21-41 ms`; steady-state pan frames `12 of 12 drawn, 0 queued,
+composed in 14 ms`. The first frame after a zoom reads `0 of 8 drawn, 8 queued` and the map fills in from the
+middle with the keys still answering. **Filip: "zoom is good now".**
+
+### The colour defect in v34, and the boot check that caught it
+
+The same log carried, at boot:
+
+    decoder check: tile 256x256, JPEG sampling 942682966
+    decoder check: RGB/BT601 -> 2 ms, distance 11 (px0 0xFFFF vs 0xF7DD)
+    decoder check: RGB/BT709 -> 2 ms, distance 12 (px0 0xFFFF vs 0xF7DD)
+    decoder check: BGR/BT601 -> 2 ms, distance 6  (px0 0xFFFF vs 0xF7DD)
+    decoder check: BGR/BT709 -> 2 ms, distance 5  (px0 0xFFFF vs 0xF7DD)
+    decoder check: using hardware decode, BGR/BT709 (distance 5, 2 ms vs sw 41 ms)
+
+Two of my own mistakes, found by measurement rather than by eye:
+
+1. **The compressed input buffer was a plain `heap_caps_malloc(MALLOC_CAP_SPIRAM)`.** The P4 codec's DMA reads
+   the JPEG back out of PSRAM, and the IDF's own example allocates **both** directions with
+   `jpeg_alloc_decoder_mem` (input = `JPEG_DEC_ALLOC_INPUT_BUFFER`), which is what gives the cache-line
+   alignment. On v34 the codec was decoding from a buffer it could not safely read: 991 of 1024 sampled pixels
+   differed from the software decoder, which is the "weird colours", with the shapes intact.
+2. **`rgb_order` was hard-wired to RGB.** Against the software reference, BGR scores 5-6 and RGB scores 11-12,
+   i.e. the order that was assumed was the wrong one for this codec.
+
+Driver fact read in the source, not assumed: for RGB565 output the colour conversion is hard-wired to
+**YUV420 → RGB565** and is chosen from the *output* format, not from the tile's own sampling
+(`esp_driver_jpeg/jpeg_decode.c:544-553`).
+
+### Slice 2 (v35/v36): the software decoder is the referee
+
+- **`verifyDecoders()`** runs at boot: one real tile is decoded **four ways** (RGB/BGR × BT601/BT709), each scored
+  against the **software** decoder (the one whose pixels were confirmed on the glass in S503) by mean per-pixel
+  channel distance over 4096 samples. The best option is used **only if it is within 12**; otherwise the engine is
+  deleted, a flag keeps it deleted, and the log says hardware decode is DISABLED and the software path is in use
+  (~41 ms a tile). **A fast wrong map is worse than a slow right one, and the choice is measured at every boot.**
+- **The same check caught the defect** before Filip had to describe it, and it is the only reason the cause could
+  be named instead of guessed.
+- **v35 on the glass: `works!` (Filip).** The card-read number in the same log exposed one more defect of mine:
+  **the index hint saved nothing** — `fill: 14 tile(s) in 525 ms (249 card reads)` is ~18 reads per tile, i.e. a
+  full binary search each time. It was keyed by `y & 3` while the centre-out plan alternates columns inside a row,
+  so each request overwrote the hint it needed. **v36** keys it by column (`x & 7`, 8 slots), expects ~3-4 reads
+  per tile, and also drops the sampling field from the boot line (this IDF leaves it unset: it printed
+  `942682966`, so only the tile size is reported).
+
+### What could NOT be checked
+
+- **Tile joins are not proven pixel-exact.** In the same tile, the corner pixel still differs between the two
+  decoders (`px0 0xFFFF` hardware vs `0xF7DD` software) while the sampled mean distance is 5, which is consistent
+  with an edge/padding artefact of the codec. Filip sees no seams, but "no seams seen" is not "no seam exists".
+- **The v36 card-read count** was not measured before this entry was written (the install needed Filip's hands).
+- The status-refresh compose every 2 s still recomposes the whole page; it is 14 ms and was left alone.
+
+### Next
+
+1. **v36's numbers**: `fill: N tile(s) in X ms (M card reads)` should show ~3-4 reads per tile instead of ~18.
+2. The corner-pixel question above, if a seam ever shows up.
+3. Then the rest of step 6: **RPTR, Settings**, the clean card unmount, and the advert schedule in Settings.
+
 ## 2026-11-15 · S503 (continued) · step 6 slice 2: the Map page draws the offline map (v32)
 
 > Written by DeepSeek, S503, the same night. Slice 1 proved a tile could be found, read and decoded; this slice

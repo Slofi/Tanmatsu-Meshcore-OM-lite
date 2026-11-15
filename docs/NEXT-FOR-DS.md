@@ -117,13 +117,27 @@ DS's sandbox (`paperclip-pilot/ds-fence.sh`) can write `pocket-mesh/firmware/` b
   attribution**, arrows pan, `+`/`-` zoom z9-17). **Measured on the glass:** pan **14 ms** a press, zoom **1345 ms**
   (12 misses x ~112 ms). The first v32 felt laggy because the cache was **8 slots for a 15-tile view** (my bug);
   v33 raised it to 20 (2.5 MB PSRAM) and that is when panning became instant.
-- [ ] **THE NEXT TICKET — a non-blocking compose (the zoom fix):** draw the cached tiles, then let a background task
-  decode the rest and repaint as each tile lands, so 1.3 s of work is seen as a map filling in instead of a frozen
-  screen. It also removes the pan hitch on every fourth press (the one that reveals a column). Considered and
-  rejected for now: the index in RAM (saves ~30 ms of each 112), half-scale first pass (blocky), scaling the old
-  frame 2x as a stopgap (more code than the task).
-- [ ] **Then:** the clean card unmount (`sync()` does not exist on this target and the BSP keeps the card handle;
-  every data write already flushes and closes per record), RPTR, Settings.
+- [x] **A non-blocking compose (the zoom fix) — DONE 2026-11-15 (S506, DeepSeek), on the glass as v34 → v36.** The
+  tile cache became a state machine (`Empty/Pending/Ready`: a pending slot is never drawn and never evicted), a
+  worker task (`om-map`, priority 2) decodes what the view is missing **centre-out** while the page draws only
+  decoded tiles, the input poll drops to 30 ms while a fill is running, and the panel blit is measured. Host
+  **245 checks**, five named mutations each red at a line. **Measured:** `fill: 14 tile(s) in 525 ms`, frames
+  `composed in 6-26 ms` + `present 21-41 ms`, pan 14 ms; the first frame after a zoom reads `0 of 8 drawn,
+  8 queued` and fills from the middle. **Filip: "zoom is good now".**
+- [x] **The v34 colour defect — fixed in v35 (S506), and now decided by measurement at every boot.** The hardware
+  JPEG codec was 2 ms a tile but decoded from a buffer it could not safely read (my compressed-input buffer was a
+  plain `heap_caps_malloc`; the IDF example allocates it with `jpeg_alloc_decoder_mem`) and the colour order was
+  hard-wired to RGB when BGR is the right one. `verifyDecoders()` now decodes one real tile four ways at boot,
+  scores each against the software decoder, keeps the best only if it matches, and otherwise **disables the
+  codec**: `distance 5 → using hardware decode, BGR/BT709 (2 ms vs sw 41 ms)`. **Filip: "works!".**
+- [ ] **NEXT: v36's numbers, then step 6's remaining pages.** v36 (built, NOT installed — the upload needs Filip's
+  purple diamond) keys the index hint by column instead of row; v35 still read ~18 records per tile
+  (`249 card reads` for 14 tiles) because the centre-out plan kept overwriting the row-keyed hint. Expect ~3-4.
+  Then **RPTR, Settings**, the clean card unmount (`sync()` does not exist on this target and the BSP keeps the
+  card handle; every data write already flushes and closes per record).
+- [ ] **Open observation, not a bug report yet:** in the same tile the corner pixel differs between the two
+  decoders (`px0 0xFFFF` hardware vs `0xF7DD` software) while the sampled mean distance is 5. Consistent with an
+  edge/padding artefact of the codec. Filip sees no seams; "no seams seen" is not "no seam exists".
 - [ ] **3b slice 3 (old text, kept for the record):** an Ed25519 keypair on the device and a signed
   `PAYLOAD_TYPE_ADVERT` carrying the name `EDCT` (MeshCore: pubkey + timestamp + signature), so other nodes see it
   in their contact lists; then store reply paths. After that, step 4 (Chat/Nodes screens) makes it usable and the

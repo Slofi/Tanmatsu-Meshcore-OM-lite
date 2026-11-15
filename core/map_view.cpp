@@ -109,7 +109,8 @@ int zoomTo(int from_z, int to_z, int64_t* wx, int64_t* wy, int w, int h) {
 
 int TileCache::find(uint8_t z, uint32_t x, uint32_t y) {
     for (int i = 0; i < kCacheSlots; i++) {
-        if (key[i].valid && key[i].z == z && key[i].x == x && key[i].y == y) {
+        // Ready only: a pending slot's pixels are being written by the decoder right now.
+        if (key[i].state == SlotState::Ready && key[i].z == z && key[i].x == x && key[i].y == y) {
             use[i] = ++tick;
             return i;
         }
@@ -117,17 +118,32 @@ int TileCache::find(uint8_t z, uint32_t x, uint32_t y) {
     return -1;
 }
 
-int TileCache::take(uint8_t z, uint32_t x, uint32_t y) {
-    int victim = -1;
+SlotState TileCache::stateOf(uint8_t z, uint32_t x, uint32_t y) const {
     for (int i = 0; i < kCacheSlots; i++) {
-        if (!key[i].valid) {
-            victim = i;
-            break;
+        if (key[i].state != SlotState::Empty && key[i].z == z && key[i].x == x && key[i].y == y) {
+            return key[i].state;
         }
-        if (victim < 0 || use[i] < use[victim]) victim = i;
     }
-    if (victim < 0) victim = 0;
-    key[victim].valid = true;
+    return SlotState::Empty;
+}
+
+int TileCache::take(uint8_t z, uint32_t x, uint32_t y) {
+    int empty = -1;
+    int lru   = -1;
+    for (int i = 0; i < kCacheSlots; i++) {
+        if (key[i].state == SlotState::Empty) {
+            if (empty < 0) empty = i;
+            continue;
+        }
+        // A Pending slot is never a victim: the decoder holds a raw pointer into its buffer.
+        if (key[i].state == SlotState::Ready) {
+            if (lru < 0 || use[i] < use[lru]) lru = i;
+        }
+    }
+    const int victim = (empty >= 0) ? empty : lru;
+    if (victim < 0) return -1;   // everything is pending; the caller must wait, not overwrite
+
+    key[victim].state = SlotState::Pending;
     key[victim].z     = z;
     key[victim].x     = x;
     key[victim].y     = y;
@@ -135,12 +151,81 @@ int TileCache::take(uint8_t z, uint32_t x, uint32_t y) {
     return victim;
 }
 
+void TileCache::commit(int slot, bool ok) {
+    if (slot < 0 || slot >= kCacheSlots) return;
+    if (slot < kCacheSlots && key[slot].state != SlotState::Pending) return;   // not ours to commit
+    if (!ok) {
+        // Do not leave a half-decoded tile where a draw could find it AND remember the hole, so the worker does
+        // not ask for it again on the next repaint.
+        markFailed(key[slot].z, key[slot].x, key[slot].y);
+        key[slot] = CacheKey{};
+        use[slot] = 0;
+        return;
+    }
+    key[slot].state = SlotState::Ready;
+    use[slot]       = ++tick;
+}
+
+void TileCache::markFailed(uint8_t z, uint32_t x, uint32_t y) {
+    failed[failed_next].used = true;
+    failed[failed_next].z    = z;
+    failed[failed_next].x    = x;
+    failed[failed_next].y    = y;
+    failed_next              = (failed_next + 1) % kFailedSlots;
+}
+
+bool TileCache::isFailed(uint8_t z, uint32_t x, uint32_t y) const {
+    for (int i = 0; i < kFailedSlots; i++) {
+        const FailedKey& f = failed[i];
+        if (f.used && f.z == z && f.x == x && f.y == y) return true;
+    }
+    return false;
+}
+
 void TileCache::reset() {
     for (int i = 0; i < kCacheSlots; i++) {
         key[i] = CacheKey{};
         use[i] = 0;
     }
-    tick = 0;
+    for (int i = 0; i < kFailedSlots; i++) failed[i] = FailedKey{};
+    failed_next = 0;
+    tick        = 0;
+}
+
+int planTiles(const ViewTiles& vt, uint8_t z, const TileCache& cache, TileRequest* out, int cap) {
+    if (out == nullptr || cap <= 0) return -1;
+    if (vt.count > cap) return -1;   // cannot name every tile: say so instead of planning a view with holes
+
+    const int cc = vt.cols - 1;
+    const int rr = vt.rows - 1;
+    int       n  = 0;
+    for (int row = 0; row < vt.rows; row++) {
+        for (int col = 0; col < vt.cols; col++) {
+            const uint32_t tx = vt.x0 + (uint32_t)col;
+            const uint32_t ty = vt.y0 + (uint32_t)row;
+            if (cache.stateOf(z, tx, ty) != SlotState::Empty) continue;   // cached, or the worker is on it
+            if (cache.isFailed(z, tx, ty)) continue;                      // a hole in the pack: stop asking
+            const int dx2   = 2 * col - cc;
+            const int dy2   = 2 * row - rr;
+            const int score = dx2 * dx2 + dy2 * dy2;
+            // Insertion sort, stable: equal scores keep the row-major order they were added in, so the plan is
+            // the same list on every call (a test can pin it, and the worker's behaviour does not wander).
+            int i = n++;
+            while (i > 0) {
+                const int pcol = (int)(out[i - 1].x - vt.x0);
+                const int prow = (int)(out[i - 1].y - vt.y0);
+                const int pc2  = 2 * pcol - cc;
+                const int pr2  = 2 * prow - rr;
+                if (pc2 * pc2 + pr2 * pr2 <= score) break;
+                out[i] = out[i - 1];
+                --i;
+            }
+            out[i].z = z;
+            out[i].x = tx;
+            out[i].y = ty;
+        }
+    }
+    return n;
 }
 
 }  // namespace map

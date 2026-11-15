@@ -38,6 +38,7 @@ idf_component_register(
         esp_lcd
         fatfs
         esp_jpeg
+        esp_driver_jpeg   # S506: the P4's hardware JPEG codec, with esp_jpeg as the fallback
         nvs_flash
         bt
         badge-bsp

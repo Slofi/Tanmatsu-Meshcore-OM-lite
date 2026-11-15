@@ -497,6 +497,9 @@ extern "C" void app_main(void) {
     // because it is where this device actually is. No UI yet: the numbers in the log are the result.
     om::maplink::begin();
     if (g_sd_mounted) om::maplink::probe(46.15, 14.99);
+    // S506: the map is only fast because the P4's hardware JPEG codec does the tiles. Prove at boot that it agrees
+    // with the software decoder, which is the one whose pixels were checked on the glass in S503.
+    if (g_sd_mounted) om::maplink::verifyDecoders(46.15, 14.99);
 
     // ---- the core: one owner, the registry, the router
     static tm::Core core;
@@ -755,7 +758,10 @@ extern "C" void app_main(void) {
     bool dirty = true;
     for (;;) {
         bsp_input_event_t ev = {};
-        if (g_input_queue && xQueueReceive(g_input_queue, &ev, pdMS_TO_TICKS(250)) == pdTRUE) {
+        // While the map is filling in, wake up often so a decoded tile reaches the panel within a frame instead of
+        // waiting for the next 250 ms poll (S506). With nothing being fetched this is the old 250 ms.
+        const TickType_t wait = om::maplink::busy() ? pdMS_TO_TICKS(30) : pdMS_TO_TICKS(250);
+        if (g_input_queue && xQueueReceive(g_input_queue, &ev, wait) == pdTRUE) {
             logInputEvent(ev);
             const tm::Page page_now = core.router().current();
             const tm::Key  k        = mapKey(ev);
@@ -937,6 +943,9 @@ extern "C" void app_main(void) {
             }
         }
 
+        // A tile the worker finished: repaint, so the map fills in from the centre out while the keys stay live.
+        if (om::maplink::takeLanded() && core.router().current() == tm::Page::Map) dirty = true;
+
         if (xTaskGetTickCount() - lastPoll > pdMS_TO_TICKS(2000)) {
             lastPoll = xTaskGetTickCount();
             batteryPoll();
@@ -978,7 +987,14 @@ extern "C" void app_main(void) {
                     drawPlaceholder(core.router().current());
                     break;
             }
+            const int64_t present_t0 = esp_timer_get_time();
             g_screen.present();
+            const long present_us = (long)(esp_timer_get_time() - present_t0);
+            // On the Map page the panel blit is a big share of a frame (it transposes 384k pixels on the CPU), so
+            // it is measured, not assumed: a fill-in only looks smooth if compose + present stays short.
+            if (core.router().current() == tm::Page::Map) {
+                ESP_LOGI(TAG, "map frame: present %ld ms", present_us / 1000);
+            }
             dirty = false;
         }
     }
