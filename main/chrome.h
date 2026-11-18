@@ -46,6 +46,12 @@ void noticeClear();
 // The live text, or nullptr. Returns a copy taken under the lock, so the string cannot change while it is drawn.
 const char* noticeText();
 
+// S513 (Claude): does the screen need a repaint for the notice? True once after a notice was set or cleared, and
+// once when a live notice runs out. The radio task sets "Advert sent" / "New node" with no key press behind it,
+// so without this the strip only appeared if something else happened to repaint within its 3 s (Filip: "a sends
+// an ADV, but still no pop-up"). Main task only; call it every loop pass.
+bool noticeNeedsRepaint();
+
 // The five symbol keys as vectors (BRIEF § 5). kind: 0 triangle, 1 square, 2 circle, 3 cloud, 4 diamond.
 void drawSymbolSigil(Screen& s, int kind, int cx, int cy, int r, uint16_t c, bool active);
 

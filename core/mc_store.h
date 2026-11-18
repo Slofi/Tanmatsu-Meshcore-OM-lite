@@ -76,6 +76,28 @@ size_t contactsOrder(const ContactStore& s, int* out, size_t max_out);
 // "2 in the last hour": how many were heard within `window_s` of `now`.
 size_t contactsHeardWithin(const ContactStore& s, uint32_t now, uint32_t window_s);
 
+// ---- S513/EST-441: a contact is born ONLY from a verified advert --------------------------------------------------
+// A DM log's name is `dm-<pubkey[0..3] 8 hex>.log`, so a thread restored from the card knows four bytes of its
+// peer and nothing else. v41 turned those four bytes into a contact, and that invented row was then used for the
+// shared secret and as the only RX candidate — a DM that could not be opened and a MAC that could not match.
+// These four rules are the fix, and they are pure so the host tests can pin them.
+//
+// True when the key is only a prefix: a null key, or bytes 4..31 all zero. No real Ed25519 key looks like that.
+bool contactKeyIncomplete(const uint8_t pub[32]);
+
+// Drop every incomplete row (used straight after the NVS blob is decoded, so a bogus record already on a device
+// is cleaned on the next boot). Returns how many were removed; the rest keep their order.
+size_t contactsDropIncomplete(ContactStore& s);
+
+// The ONE full-key contact whose key starts with these four bytes, -1 when there is none — and also -1 when two
+// of them share the prefix. Two keys can start with the same byte (ours and ERA-3's both started 0x42), so a
+// prefix that is not unique names nobody and the thread stays unbound until its advert arrives.
+int contactsFindUniquePrefix(const ContactStore& s, const uint8_t prefix[4]);
+
+// May a DM be composed to this peer? Only when it is a contact with a FULL key: the shared secret needs all 32
+// bytes, and a prefix-only key would produce a secret the peer cannot derive. Fills `name` (may be empty).
+bool dmPeerKey(const ContactStore& s, const uint8_t pub[32], char* name, size_t name_cap);
+
 struct Message {
     uint32_t seq = 0;           // assigned by messagesPush: monotonic, the thing unread is counted against
     uint8_t  channel = 0;

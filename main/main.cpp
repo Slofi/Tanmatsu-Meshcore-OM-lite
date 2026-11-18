@@ -613,9 +613,11 @@ extern "C" void app_main(void) {
     char   composer[120] = {0};
     size_t composer_len  = 0;
     // S513: a short-lived line for the one thing the composer cannot say by itself — that a send was REFUSED
-    // because the radio's queue is full. The text stays in the composer; this says why nothing left.
+    // because the radio's queue is full, or because a DM's peer has no key yet. The text stays in the composer;
+    // this says why nothing left. `chat_notice_buf` holds the one message that has to name the peer (EST-441).
     const char* chat_notice          = nullptr;
     int64_t     chat_notice_until_us = 0;
+    char        chat_notice_buf[80]  = {0};
 
     auto clockText = []() { return om::time_source::hhmm(); };
 
@@ -765,6 +767,10 @@ extern "C" void app_main(void) {
                 } else {
                     snprintf(cv.channel_name, sizeof(cv.channel_name), "%s",
                              om::mc::channelName((size_t)chat_focus));
+                    // S513/EST-440: the open channel's scope, in the ticket's words on the head's dim
+                    // right side ("scope #si" / "no scope"; empty = unscoped). Read through the live
+                    // hash and cached after the first read, so this is not a flash read per redraw.
+                    om::mc::channelScopeHead((size_t)chat_focus, cv.scope, sizeof(cv.scope));
                     n = om::mc::messagesForChannel(msgs, (uint8_t)chat_focus, idx, om::mc::kMaxMessages);
                     for (size_t i = 0; i < n; i++) {
                         const om::mc::Message* m = om::mc::messagesAt(msgs, (size_t)idx[i]);
@@ -939,8 +945,22 @@ extern "C" void app_main(void) {
                             // S513/EST-439: a DM goes through queueDm (compose + pending + the radio queue), a
                             // channel through queueText. Both refuse rather than replace when the queue is full,
                             // so a refusal leaves the text in the composer and says why for three seconds.
-                            const bool queued = chat_dm_open ? om::mc::queueDm(chat_dm_pub, composer)
-                                                             : om::mc::queueText((size_t)chat_focus, composer);
+                            // S513/EST-441: a DM to a thread restored from the card has no KEY yet. That is a
+                            // different refusal from "radio busy", so it is asked first and named.
+                            bool ready = true;
+                            if (chat_dm_open) {
+                                char peer_name[24] = {0};
+                                ready = om::mc::dmPeerReady(chat_dm_pub, peer_name, sizeof(peer_name));
+                                if (!ready) {
+                                    snprintf(chat_notice_buf, sizeof(chat_notice_buf),
+                                             "No key for %s yet: waiting for its advert",
+                                             peer_name[0] != '\0' ? peer_name : "this contact");
+                                }
+                            }
+                            const bool queued =
+                                !ready ? false
+                                       : (chat_dm_open ? om::mc::queueDm(chat_dm_pub, composer)
+                                                       : om::mc::queueText((size_t)chat_focus, composer));
                             if (queued) {
                                 ESP_LOGI(TAG, "chat: queued %s (%u chars)", chat_dm_open ? "a DM" : "a channel text",
                                          (unsigned)composer_len);
@@ -949,11 +969,13 @@ extern "C" void app_main(void) {
                                 chat_notice           = nullptr;   // a send that worked clears the last refusal
                                 chat_notice_until_us  = 0;
                             } else {
-                                // S513: the queue is FULL (four requests waiting). Nothing is replaced, so the
-                                // text stays in the composer and the page says why for three seconds.
-                                chat_notice          = "radio busy, not sent";
+                                // S513: the queue is FULL (four requests waiting), or the DM peer has no key yet
+                                // (EST-441). Nothing is replaced, so the text stays in the composer and the page
+                                // says why for three seconds.
+                                chat_notice          = ready ? "radio busy, not sent" : chat_notice_buf;
                                 chat_notice_until_us = esp_timer_get_time() + 3 * 1000 * 1000;
-                                ESP_LOGW(TAG, "chat: the send queue is full; the text is kept in the composer");
+                                ESP_LOGW(TAG, "chat: not sent (%s); the text is kept in the composer",
+                                         ready ? "queue full" : "no key for the peer yet");
                             }
                         }
                         handled = true;
@@ -1156,6 +1178,7 @@ extern "C" void app_main(void) {
 
         // A tile the worker finished: repaint, so the map fills in from the centre out while the keys stay live.
         if (om::maplink::takeLanded() && core.router().current() == tm::Page::Map) dirty = true;
+        if (om::ui::noticeNeedsRepaint()) dirty = true;   // S513 (Claude): a notice set by the radio task, or one that ran out
 
         if (xTaskGetTickCount() - lastPoll > pdMS_TO_TICKS(2000)) {
             lastPoll = xTaskGetTickCount();

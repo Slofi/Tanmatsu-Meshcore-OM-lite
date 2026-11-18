@@ -25,9 +25,11 @@ DMASAN="$(mktemp /tmp/tm-dm-asan.XXXXXX)"
 DMSEND="$(mktemp /tmp/tm-dm-send.XXXXXX)"
 DMSENDASAN="$(mktemp /tmp/tm-dm-send-asan.XXXXXX)"
 CONTACT="$(mktemp /tmp/tm-contact-blob.XXXXXX)"
+SCOPE="$(mktemp /tmp/tm-channel-scope.XXXXXX)"
+GUARD="$(mktemp /tmp/tm-dm-guard.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT"; rm -rf "$ED" "$EDASAN"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD"; rm -rf "$ED" "$EDASAN"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -192,3 +194,29 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
     ../../core/contact_blob.cpp \
     -o "$CONTACT"
 "$CONTACT"
+
+# The per-channel flood scope (S513/EST-440): the modes and the region name rules, the resolution
+# channel -> node default -> unscoped, the sha256 region key and MeshCore's HMAC transport code against
+# vectors from an independent Python oracle, and the TRANSPORT_FLOOD frame byte for byte (the decoder
+# already skips those 4 bytes on RX, so the same test opens the frame it built).
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_channel_scope.cpp \
+    ../../core/channel_scope.cpp ../../core/mc_wire.cpp ../../core/mc_crypto_psa.cpp \
+    -lmbedcrypto \
+    -o "$SCOPE"
+"$SCOPE"
+
+# The two DM defects found ON THE AIR (S513/EST-441). A restored thread is a THREAD, not a contact (a contact is
+# born from a verified advert); a prefix-only record in the NVS blob is dropped on load; queueDm's peer must have a
+# full key; and a frame WE transmitted is dropped when it comes back — also when a repeater added a path hash to it,
+# and also when our pub_key[0] equals the peer's. The last three cases are the v41 log line for line, on real
+# Ed25519 keys and the real DM codec.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core -I ../../core/ed25519 \
+    test_dm_guard.cpp \
+    ../../core/mc_wire.cpp ../../core/mc_crypto_psa.cpp ../../core/mc_store.cpp \
+    ../../core/mc_history.cpp ../../core/contact_blob.cpp ../../core/mc_identity.cpp \
+    ../../core/mc_dm.cpp ../../core/dm_send.cpp \
+    "$ED"/*.o \
+    -lmbedcrypto \
+    -o "$GUARD"
+"$GUARD"

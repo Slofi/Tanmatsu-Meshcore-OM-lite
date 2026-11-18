@@ -83,6 +83,9 @@ struct ChatView {
     int  channel = 0;
     char channel_name[32] = "";
     bool dm_open = false;               // S513/EST-434: the open chat is a DM thread, not a channel
+    // S513/EST-440: the open CHANNEL's send scope as the head words — "scope #si" / "no scope", or
+    // empty when it is unscoped (Default with no node default, the state today). Unused for a DM.
+    char scope[32] = "";
     int  msg_count = 0;
     // A channel's messages, oldest first, already windowed to what fits (S503: the window moves with `scroll`).
     struct Msg {

@@ -209,4 +209,50 @@ bool openGroupText(const Channel& ch, const View& pkt, char* sender, size_t send
     return parsePlain(plain, n, sender, sender_size, text, text_size, timestamp);
 }
 
+// ---- S513/EST-441: the seen-ring ------------------------------------------------------------------------------
+uint32_t frameFingerprint(const View& pkt) {
+    if (pkt.payload == nullptr) return 0;
+    uint8_t full[32];
+    if (!sha256(pkt.payload, pkt.payload_len, full)) return 0;
+    return (uint32_t)full[0] | ((uint32_t)full[1] << 8) | ((uint32_t)full[2] << 16) |
+           ((uint32_t)full[3] << 24);
+}
+
+bool SeenRing::seen(uint32_t f, bool* ours_out) {
+    if (ours_out != nullptr) *ours_out = false;
+    if (f == 0) return false;   // nothing hashed: never a match, never stored (it would poison the ring)
+    for (size_t i = 0; i < kSeenSlots; i++) {
+        if (fp[i] != f) continue;
+        if (ours_out != nullptr) *ours_out = ours[i];
+        return true;
+    }
+    fp[next]   = f;
+    ours[next] = false;
+    next       = (uint8_t)((next + 1) % kSeenSlots);
+    return false;
+}
+
+void SeenRing::noteOurs(uint32_t f) {
+    if (f == 0) return;
+    // An echo can arrive after the same payload was heard as a duplicate, or a retry can produce the same
+    // payload twice: re-using the slot instead of adding a second one keeps the ring honest and buys no
+    // duplicate entries. `ours` is set either way — the frame IS ours.
+    for (size_t i = 0; i < kSeenSlots; i++) {
+        if (fp[i] != f) continue;
+        ours[i] = true;
+        return;
+    }
+    fp[next]   = f;
+    ours[next] = true;
+    next       = (uint8_t)((next + 1) % kSeenSlots);
+}
+
+void SeenRing::reset() {
+    for (size_t i = 0; i < kSeenSlots; i++) {
+        fp[i]   = 0;
+        ours[i] = false;
+    }
+    next = 0;
+}
+
 }  // namespace meshcore

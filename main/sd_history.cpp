@@ -303,32 +303,24 @@ size_t restoreDmThreads(mc::DmRing& ring, mc::ContactStore& contacts) {
         char label[24];
         snprintf(label, sizeof(label), "%.*s", 8, name + 3);
 
-        uint32_t max_log_id = 0;
-        const size_t n = loadDm(pub, label, loaded, mc::kMaxDms, &max_log_id);
+        // The label is the thread's own fallback name; dmRestoreThread() replaces it with the first incoming
+        // record's name when there is one, and computes the file's next id itself.
+        const size_t n = loadDm(pub, label, loaded, mc::kMaxDms, nullptr);
         if (n == 0) continue;
-        // The first incoming record carries the peer's name; a thread with only our own messages keeps the prefix.
-        for (size_t i = 0; i < n; i++) {
-            if (!loaded[i].outgoing && loaded[i].peer_name[0] != '\0') {
-                snprintf(label, sizeof(label), "%s", loaded[i].peer_name);
-                break;
-            }
-        }
-        const int idx = contactsUpsert(contacts, pub, label, 0, 0, 0, 0, 0, 0);
-        // The Meta record names the last READ log id. Load it BEFORE pushing and remember the NEW seq dmPush gives
-        // the newest record at or before that id; an old record's `seq` is the previous boot's, not ours.
+        // The Meta record names the last READ log id. It is read before the messages are pushed: core/mc_history
+        // maps that log id onto the seq dmPush gives the records.
         const mc::SeenPoint sp = loadDmSeen(pub);
-        uint32_t           seen_seq = 0;
-        for (size_t i = 0; i < n; i++) {
-            const uint32_t seq = mc::dmPush(ring, loaded[i]);
-            if (sp.found && loaded[i].log_id != 0 && loaded[i].log_id <= sp.seen_log_id) seen_seq = seq;
-        }
-        if (idx >= 0) {
-            contacts.c[idx].dm_seen     = sp.found ? seen_seq : 0;   // no Meta record: all unread, honestly
-            contacts.c[idx].dm_log_next = max_log_id + 1;           // continue the file's own numbering
-        }
+        // S513/EST-441: this creates a THREAD, never a contact. Four bytes out of a file name are not a key: v41
+        // upserted them, and that invented row was then used for the shared secret and as the only RX candidate —
+        // a DM ERA-3 could not open, and a MAC that could not match its real frames. The thread keeps its prefix
+        // (named from its own records) until a verified advert rebinds it, or until a full-key row already in the
+        // table matches the prefix uniquely.
+        mc::RestoredDm r;
+        (void)mc::dmRestoreThread(ring, contacts, pub, loaded, n, sp, &r);
         restored++;
-        ESP_LOGI(TAG, "history: restored DM thread %s (%u message(s), %s)", label, (unsigned)n,
-                 sp.found ? "with a seen point" : "no seen point");
+        ESP_LOGI(TAG, "history: restored DM thread %s (%u message(s), %s%s)", r.label, (unsigned)r.messages,
+                 r.seen_found ? "with a seen point" : "no seen point",
+                 r.rebound ? ", bound to a known contact" : ", waiting for its advert");
     }
     closedir(d);
     return restored;

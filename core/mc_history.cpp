@@ -141,6 +141,65 @@ size_t historyLoadDm(const uint8_t* data, size_t len, const uint8_t peer_pub[32]
     return kept;
 }
 
+// ---- S513/EST-441: one restored thread, with no contact invented ---------------------------------------------
+size_t dmRestoreThread(DmRing& ring, ContactStore& contacts, const uint8_t pub[32], const DmMessage* recs,
+                       size_t n, const SeenPoint& sp, RestoredDm* out) {
+    RestoredDm r;
+    r.seen_found = sp.found;
+    if (pub == nullptr || (recs == nullptr && n > 0)) {
+        if (out != nullptr) *out = r;
+        return 0;
+    }
+
+    // The name comes from the thread's own records: an INCOMING record carries the peer's name, an outgoing one
+    // carries ours. With neither, the 8-hex prefix (the caller's label) is the honest answer.
+    for (size_t i = 0; i < n; i++) {
+        if (!recs[i].outgoing && recs[i].peer_name[0] != '\0') {
+            snprintf(r.label, sizeof(r.label), "%s", recs[i].peer_name);
+            break;
+        }
+    }
+    if (r.label[0] == '\0') {
+        snprintf(r.label, sizeof(r.label), "%02x%02x%02x%02x", pub[0], pub[1], pub[2], pub[3]);
+    }
+
+    uint8_t key[32];   // the public key's own width (mc_identity.h kPubKeyBytes; not included here)
+    memcpy(key, pub, sizeof(key));
+    int ci = contactsFind(contacts, key);
+    if (contactKeyIncomplete(key)) {
+        // Four bytes from a file name identify nothing. A row may already exist because a verified advert put a
+        // FULL key there; it can only be this thread's peer when there is exactly one such prefix.
+        ci = contactsFindUniquePrefix(contacts, key);
+        if (ci >= 0) {
+            memcpy(key, contacts.c[ci].pub, sizeof(key));
+            r.rebound = true;
+        } else {
+            ci = -1;
+        }
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        DmMessage m = recs[i];
+        memcpy(m.peer_pub, key, sizeof(m.peer_pub));   // the prefix, or the full key when one was found
+        if (m.peer_name[0] == '\0') snprintf(m.peer_name, sizeof(m.peer_name), "%s", r.label);
+        const uint32_t seq = dmPush(ring, m);
+        if (m.log_id > r.max_log_id) r.max_log_id = m.log_id;
+        if (sp.found && m.log_id != 0 && m.log_id <= sp.seen_log_id) r.seen_seq = seq;
+        r.messages++;
+    }
+
+    if (ci >= 0) {
+        // The contact row is the thread's seen point (item 3), so a rebound thread keeps its unread count.
+        contacts.c[ci].dm_seen     = sp.found ? r.seen_seq : 0;   // no Meta record: all unread, honestly
+        contacts.c[ci].dm_log_next = r.max_log_id + 1;            // continue the file's own numbering
+        if (r.label[0] != '\0' && contacts.c[ci].name[0] == '\0') {
+            snprintf(contacts.c[ci].name, sizeof(contacts.c[ci].name), "%s", r.label);
+        }
+    }
+    if (out != nullptr) *out = r;
+    return r.messages;
+}
+
 size_t historyLoad(const uint8_t* data, size_t len, uint8_t channel, Message* out, size_t max_out,
                    uint32_t* out_max_log_id) {
     if (out == nullptr || max_out == 0) return 0;

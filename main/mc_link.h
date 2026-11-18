@@ -28,6 +28,24 @@ void begin();
 size_t      channelCount();
 const char* channelName(size_t i);
 
+// S513/EST-440: the channel's stored flood scope, read from NVS "mcch" key "s<hh>" of the channel's LIVE
+// 1-byte hash (never a mirrored/legacy hash: S509's first defect). "" = Default, "!none" = No scope,
+// anything else = the region name without '#', which is the L2's stored form. A missing key is Default
+// and not an error; a corrupt/over-long value is also Default, never truncated into a different region.
+// The value is cached per channel after the first read (channels are provisioned at boot and there is no
+// editing UI yet); channelScopeSet() updates the cache.
+bool channelScopeStored(size_t i, char* out, size_t cap);
+
+// S513/EST-440: write one channel's scope. An empty value removes the key and goes back to Default; a key
+// that was never there is already Default, so NVS's NOT_FOUND on erase is SUCCESS (S509's second defect).
+// Values are stored raw, exactly as the L2's mcChannelSetScope() does; callers pass a canonical name.
+bool channelScopeSet(size_t i, const char* setting);
+
+// S513/EST-440: the open channel's head text in the ticket's words — "scope #si", "no scope", or "" when
+// the plan is unscoped. Resolves through core/channel_scope.* (channel -> node default -> unscoped; the
+// Tanmatsu has no node default, so Default is unscoped today).
+void channelScopeHead(size_t i, char* out, size_t cap);
+
 // Decode one received frame and print what it is: a channel text for us, a group text for a channel we do not
 // have, an advert (name + key prefix), or something else. Never throws, never blocks.
 void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db);
@@ -85,6 +103,12 @@ size_t restoreContacts();
 // dirty: an add/rename/route change on the next pass, last-heard/SNR at most once per 10 minutes. Never writes NVS
 // from the radio task; does nothing when there is nothing to write.
 void contactsPersistTick();
+
+// S513/EST-441: is this peer sendable, and what is it called? False when it is not a contact with a FULL key — a
+// DM thread restored from the card knows only four bytes of its peer's key, and a shared secret over those bytes
+// is one the peer cannot derive. The DM view keeps the text and says "No key for <name> yet: waiting for its
+// advert"; `name` is filled whatever the answer.
+bool dmPeerReady(const uint8_t pub[32], char* name, size_t cap);
 
 // S513/EST-439: send a direct message to `pub` (the open DM thread's contact). The MAIN task calls this: it
 // composes attempt 0 (a flood when the contact's route is OUT_PATH_UNKNOWN, a DIRECT frame down the route it

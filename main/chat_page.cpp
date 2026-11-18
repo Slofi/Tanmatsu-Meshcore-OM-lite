@@ -81,7 +81,7 @@ void drawChat(Screen& s, const ChatView& v) {
 
     // In open mode the head's right side says where the window is instead of counting: scrolled back, "how many
     // older / newer" is what the two Up/Down keys are FOR, and a bare count would hide that anything is missing.
-    char head_right[64];
+    char head_right[96];
     if (v.open) {
         if (v.hidden_above > 0 && v.hidden_below > 0)
             snprintf(head_right, sizeof(head_right), "%d older \xc2\xb7 %d newer", v.hidden_above, v.hidden_below);
@@ -94,6 +94,14 @@ void drawChat(Screen& s, const ChatView& v) {
         // S513: a refused send wins the slot for a few seconds — the composer still holds the text, and this is
         // the one place on the page that already says something short-lived.
         if (v.notice != nullptr && v.notice[0] != '\0') snprintf(head_right, sizeof(head_right), "%s", v.notice);
+        // S513/EST-440: the open CHANNEL's send scope leads the head's right text when it is not unscoped.
+        // "scope #si · 12 messages" / "no scope · ..."; drawPageHead already draws this line in the dim face.
+        // A DM thread has no channel scope, and an unscoped channel leaves the head exactly as it was.
+        if (!v.dm_open && v.scope[0] != '\0') {
+            char with_scope[128];
+            snprintf(with_scope, sizeof(with_scope), "%.31s \xc2\xb7 %.90s", v.scope, head_right);
+            snprintf(head_right, sizeof(head_right), "%.95s", with_scope);
+        }
     } else {
         if (v.dm_count > 0) {
             snprintf(head_right, sizeof(head_right), "%d channel%s \xc2\xb7 %d unread \xc2\xb7 %d DM thread%s",

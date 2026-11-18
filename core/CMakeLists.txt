@@ -42,6 +42,9 @@ idf_component_register(
          # S513/EST-437: the contact table's one versioned NVS blob — encode/decode only, so the host tests
          # round-trip the exact bytes the device stores and refuse a wrong version, width or length.
          "contact_blob.cpp"
+         # S513/EST-440: per-channel flood scope (ported from the L2's S509) — the modes, the region name,
+         # the sha256 region key, MeshCore's HMAC transport code and the transport-flood frame.
+         "channel_scope.cpp"
          # Ed25519, vendored from firmware/lib/meshcore_ed25519 (orlp/ed25519, zlib licence): the same code
          # the L2 signs with, so the signatures match by construction rather than by hope.
          "ed25519/add_scalar.c" "ed25519/fe.c" "ed25519/ge.c" "ed25519/key_exchange.c"

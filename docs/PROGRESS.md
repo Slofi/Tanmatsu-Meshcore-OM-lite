@@ -15,6 +15,296 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-18 · S513 (EST-441) · DM fixes from the air
+
+> Written by **DeepSeek** for ticket **EST-441**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed or committed. On top of commit `8c8d25a` (v41) **plus EST-440's uncommitted work, kept as it is**.
+> **Version: 42.** This entry is written FIRST, as the ticket asks.
+
+### The evidence, read from the log — not from a memory of it
+
+`measurements/tanmatsu-v41-dm-send-fail-2026-11-18-S513.log` (lines with `tm/mc`):
+
+- 5292 `contacts: none stored yet (no "mcct" namespace)`; 5302 `restored DM thread ERA-3 (SI) (1 message(s),
+  with a seen point)`; **no advert from ERA-3 in the whole log**.
+- 55342 `DM: queued "t4" to "ERA-3 (SI)" (22 B, flood)` -> 56332 `DM from "ERA-3 (SI)": t4 (ts 1795011320, ...)`
+  — our own frame, our own timestamp, echoed back by a repeater.
+- 57672 `DM: route to "ERA-3 (SI)" stored (path_len 0x41, 1 hop(s))` and `PATH carried an ACK no pending message
+  expected` — we learned a route from **our own** echoed path return (0x41 is 2-byte hashes, count 1: a repeater
+  added its hash).
+- 57842/68272/71372 `contacts: 1 stored to NVS (152 B)` — the bogus row is **persisted**, so it survives a restart.
+- 74942 `DM: message 2 has NO CONFIRMATION after 3 attempts`; and ERA-3's real DMs are the `rx ... TXT_MSG, no
+  contact of ours opens it (src 0x42)` lines. Both keys begin `0x42` (ours `42a16070…`, ERA-3 `428b4979…`), so the
+  1-byte payload hashes collide and the wrong contact is the only one tried.
+
+### Root causes, as the code has them
+
+**A — a contact was invented from a file name.** `main/sd_history.cpp` `restoreDmThreads()` took the four bytes in
+`dm-<8 hex>.log` and called `contactsUpsert()` with them, leaving bytes 4..31 zero. That row then (1) is what
+`queueDm()` used for `identitySharedSecret()` — a secret ERA-3 cannot derive, so it cannot open our DM; (2) is the
+only `0x42` candidate the RX path tries, whose MAC fails on ERA-3's real frames; (3) is written to NVS.
+
+**B — our own frames were never registered as seen.** `payloadFingerprint()` existed and `doText()` used it for
+channel texts, but nothing on the DM/ACK/PATH/advert send path did. Upstream does exactly this, and says why:
+`firmware/lib/meshcore/Mesh.cpp:651, 680, 713, 723, 736` — `_tables->markSeen(packet); // mark this packet as
+already sent in case it is rebroadcast back to us` (in `sendFlood`, `sendFlood` with transport codes, `sendDirect`,
+`sendZeroHop` ×2), stored by `helpers/SimpleMeshTables.h:52-57` (`markSeen` writes the packet's hash; the ring is
+`MAX_PACKET_HASHES = 128+32` slots), computed by `Packet::calculatePacketHash` (`Packet.cpp:41-50`) as
+`sha256(payload_type || payload)[0..7]` — **the payload, never the path**, which is precisely why a repeater's echo
+of our frame must match: it adds path bytes and changes nothing else. The L2 goes further and keeps its own-send
+hashes separately (`src/mesh_link.cpp:408-425`).
+
+### 1. A contact comes only from a verified advert (fix A)
+
+- `restoreDmThreads()` no longer creates contacts. The thread lives in the DM ring alone, named from its own
+  records (the first incoming record's `peer_name`, else the 8-hex prefix), until a real advert rebinds it.
+- New pure rules in `core/mc_store.*`: `contactKeyIncomplete()` (bytes 4..31 all zero), `contactsDropIncomplete()`
+  and `dmPeerKey()`. `restoreContacts()` runs the drop straight after `contactsDecode()` and logs once,
+  `contacts: dropped N record(s) without a full key`; if anything was dropped the table is marked structurally dirty
+  so the next main-task pass rewrites NVS **without** the bogus row — that is what cleans Filip's device.
+- If a restored thread's 4-byte prefix matches **exactly one** full-key contact already in NVS (a row that came
+  from a verified advert), the thread is rebound to that full key at restore time (`contactsFindUniquePrefix`);
+  with none, or with an ambiguous prefix (the `0x42` collision is exactly that), it keeps the prefix and stays
+  orphaned rather than guessing.
+- `queueDm()` asks `dmPeerKey()` first and refuses a peer that is not a full-key contact — `identitySharedSecret()`
+  is never called on a prefix-only key. The DM view (`main.cpp`) then keeps the text and says
+  `No key for <name> yet: waiting for its advert`.
+
+### 2. Every frame we transmit is registered before it goes out (fix B)
+
+- `core/mc_wire.*` gains `frameFingerprint(const View&)` (the old `payloadFingerprint`, moved) and `SeenRing`: 32
+  slots, each a fingerprint **plus one flag** `ours`, and `seen()` is the atomic check-and-insert the old
+  `seenBefore()` was.
+- Registration happens at the three points where a frame leaves: `queueFrame()` (DMs, retries, ACKs, path returns,
+  adverts queued by the main task), `doText()` and `doAdvert()` (they call `om::radio::send()` directly). The
+  channel-text registration moved from **after** the send to **before** it.
+- RX checks the ring once, immediately after `decode()`, so every type is covered; a match is dropped with
+  `rx N B type T: our own echo, dropped`, and a match that is NOT ours keeps the old `duplicate, already shown`.
+- **The ring is 32, not 8:** every transmit now costs a slot as well as every receive, and one DM attempt alone
+  produces a path return + an ACK on the air, a flood retry repeats them, and an advert goes out on the same ring.
+  At 8 slots a retry burst pushed our own echo out before the repeater returned it — the exact defect. 32 slots ×
+  5 bytes = 160 B, and it covers a full 3-attempt cycle with its replies and duplicates. Upstream keeps 160 slots
+  of 8-byte hashes because a repeater forwards for many nodes; a leaf node knows only its own traffic.
+
+### 3. Tests (`test/host/test_dm_guard.cpp`, new, in `run.sh`)
+
+**ARMED — this is what they say against v41's behaviour.** The same test file was run against a `/tmp` copy with
+the four old behaviours put back (no `noteOurs` on the send path, ring 8, no drop on load, any key accepted for the
+secret, and `contactsUpsert()` inside the restore) — the new API kept so it compiles:
+
+```
+FAIL test_dm_guard.cpp:106  contacts.count == 0          <- A: a restored thread created a contact
+FAIL test_dm_guard.cpp:107  om::mc::contactsFind(contacts, pub) < 0
+FAIL test_dm_guard.cpp:134  contacts.count == 0
+FAIL test_dm_guard.cpp:160  contacts.count == 1          <- a rebound thread added a SECOND row
+FAIL test_dm_guard.cpp:214  dropped == 1                 <- B/NVS: the prefix-only record survived the load
+FAIL test_dm_guard.cpp:215  loaded.count == 1
+FAIL test_dm_guard.cpp:224  again.count == 1
+FAIL test_dm_guard.cpp:231  om::mc::contactsDropIncomplete(only_bogus) == 1
+FAIL test_dm_guard.cpp:232  only_bogus.count == 0
+FAIL test_dm_guard.cpp:242  !om::mc::dmPeerKey(s, prefix, name, sizeof(name))   <- a 4-byte "contact" was sendable
+FAIL test_dm_guard.cpp:246  !om::mc::dmPeerKey(s, prefix, name, sizeof(name))
+FAIL test_dm_guard.cpp:254  !om::mc::dmPeerKey(s, prefix, name, sizeof(name))
+FAIL test_dm_guard.cpp:257  got "" want "ERA-3 (SI)"
+FAIL test_dm_guard.cpp:263  !om::mc::dmPeerKey(bad, prefix, name, sizeof(name))
+FAIL test_dm_guard.cpp:335  ring.seen(meshcore::frameFingerprint(echo), &ours)   <- our own echo was NOT recognised
+FAIL test_dm_guard.cpp:336  ours
+FAIL test_dm_guard.cpp:350  ours2
+FAIL test_dm_guard.cpp:420  meshcore::kSeenSlots == 32
+FAIL test_dm_guard.cpp:428  ring.seen(1, &ours)
+FAIL test_dm_guard.cpp:431  !ring.seen(1, &ours)
+FAIL test_dm_guard.cpp:449  ring.seen(7, &ours)
+FAIL test_dm_guard.cpp:450  ours
+FAIL test_dm_guard.cpp:455  ours
+dm guard: 23 of 169 checks FAILED
+```
+
+With the fixes in place: **`dm guard: 169 checks passed`**. What it pins, case by case:
+
+- `dmRestoreThread()`: a prefix-only log creates **no** contact, the thread is named from its records (or the 8-hex
+  prefix when only our own messages are there), the Meta point lands on the first record's new `seq`; a UNIQUE
+  full-key row is bound to the thread (one row, not two); two rows sharing the prefix leave it orphaned.
+- `contactsDecode()` + `contactsDropIncomplete()`: the real NVS blob with a prefix-only record loads and the row is
+  gone; the cleaned table re-encodes and re-decodes to one row; a table of only bogus rows comes back empty.
+- `dmPeerKey()`: refused with no contact, refused for the four bytes even when a full key with the same prefix
+  exists, refused when the stored row IS the prefix, allowed for the full key (with its name).
+- `SeenRing` + `frameFingerprint`: a DM we composed **and registered** is dropped when it comes back byte for byte
+  **and** through a repeater (same payload, `path_len 0x41` + 2 path bytes); the same frame with our own timestamp
+  and text DOES open against the colliding peer (proving why the drop is needed); a genuine DM from that peer is
+  new, is not dropped, and `dmOpen()` reads it; a peer's duplicate is dropped as a duplicate, not as our echo;
+  the ring is 32; `noteOurs` is idempotent and can upgrade a heard entry to "ours".
+
+`pub[0] == peer.pub[0]` is not assumed: the test derives seeds until it finds a **real** Ed25519 key whose first
+byte equals ours (the arithmetic seed family used first turned out correlated — 3000 such seeds reached only 147
+of the 256 first-byte values — so it uses an xorshift; the comment says so).
+
+### Results
+
+- `sh test/host/run.sh` → **exit 0**, every stage green:
+  `core 192 · clock 91 · store 127 · history 84 · layout 62 · mc 115 · dm 45 · mc-asan 115 · dm-asan 45 ·
+  dm-send 140 · dm-send-asan 140 · map 267 · txqueue 93 · chat-cards 99 · menu-cards 23 · advert 162 ·
+  contact-blob 1190 · channel-scope 94 · dm guard 169` — **3253 checks, 0 failures**, and the two ASan+UBSan
+  stages clean (the `runtime error: left shift of negative value` lines are the vendored Ed25519 C, present before
+  this ticket and not our code).
+- `make build` → **exit 0**; `application.bin` **0x166300 = 1 467 136 B**, smallest app partition 0x200000,
+  **0x99d00 (30%) free**.
+- **Nothing was installed, flashed or committed**; EST-440's uncommitted work is untouched.
+
+### Files
+
+- `core/mc_wire.h/.cpp` — `kSeenSlots = 32`, `frameFingerprint()`, `SeenRing{seen,noteOurs,reset}`.
+- `core/mc_store.h/.cpp` — `contactKeyIncomplete()`, `contactsDropIncomplete()`, `contactsFindUniquePrefix()`,
+  `dmPeerKey()`.
+- `core/mc_history.h/.cpp` — `RestoredDm`, `dmRestoreThread()` (the per-thread restore, no contact).
+- `main/mc_link.cpp` — the ring and `markOwnFrame()`; `queueFrame`/`doText`/`doAdvert` register before the frame
+  goes out; one RX check after `decode()`; the drop on contacts load with its one log line; `rebindRestoredDmPeer`
+  rebinds threads only; `dmPeerReady()`; `queueDm()` refuses a peer without a full key.
+- `main/sd_history.cpp` — `restoreDmThreads()` restores threads through `dmRestoreThread()`, and no longer calls
+  `contactsUpsert()` (the `prefixOnlyKey()` helper there is gone).
+- `main/mc_link.h`, `main/main.cpp` — `dmPeerReady()` declared; the DM view keeps the text and says
+  `No key for <name> yet: waiting for its advert` instead of "radio busy".
+- `test/host/test_dm_guard.cpp` (new), `test/host/run.sh` (one stage).
+
+### What could NOT be checked here
+
+- **The air.** Nothing was flashed, so the two defects are fixed in code and pinned on the host, not observed on a
+  radio. The checks to run on the next flash: a DM to ERA-3 completes (ACK + `DELIVERED`), ERA-3's DMs open
+  (`src 0x42` is no longer "no contact of ours opens it"), and the log shows `our own echo, dropped` where it used
+  to show `DM from "ERA-3 (SI)"` for our own text.
+- **NVS on the device.** The drop runs on the decoded table; that the written-back blob really loses the row on
+  Filip's unit is a device check (`contacts: dropped 1 record(s) without a full key`, then nothing on the next boot).
+- **`main/` on the host.** `mc_link.cpp`, `sd_history.cpp` and `main.cpp` need the IDF and the card, so their
+  compile is `make build` and their behaviour is reviewed, not unit-tested; the DECISIONS they call are the ones
+  the new test pins.
+
+### Next
+
+1. Claude: review, then flash v42 and run the three checks above.
+2. A DM thread restored from the card is now unread-blind until it is rebound (no contact row holds `dm_seen`); the
+   DM column shows it with no badge rather than a wrong one. If that bothers, the fix is a thread-level seen point,
+   not a contact.
+
+## 2026-11-18 · S513 (EST-438) · per-channel flood scope
+
+> Written by DeepSeek for ticket **EST-440** (it replaces EST-438, stopped before it changed a file): fenced
+> Paperclip run, no session start/end, nothing installed, flashed or committed. On top of commit `8c8d25a`
+> (v41). **Version: 42.** This entry is written FIRST, as the ticket asks; Results is filled in as the work finishes.
+
+### Read before writing anything
+
+- The L2's implementation, not a memory of it: `firmware/src/ui/channel_scope.h/.cpp` (the modes and the name
+  rules), `firmware/src/mesh_link.cpp` `sendChannelText()` (S509), `firmware/src/channels.cpp`
+  `mcChannelScope()/mcChannelSetScope()` (NVS), the S509 entry in `firmware/docs/PROGRESS.md` (including its two
+  found defects: read with the **LIVE** channel hash, and `remove()` answers NOT_FOUND for a key that never
+  existed), and the MeshCore sources it cites: `helpers/TransportKeyStore.cpp` (`calcTransportCode`,
+  `getAutoKeyFor`), `helpers/RegionMap.cpp:182-203`, `Mesh.cpp:664-677` (`sendFlood` with transport codes),
+  `Packet.cpp:37-80` (`writeTo`/`readFrom`) and `Packet.h:14` (`ROUTE_TYPE_TRANSPORT_FLOOD`).
+- On the Tanmatsu side: `BRIEF.md`, this PROGRESS, `core/mc_wire.*` (the decoder already skips 4 transport
+  bytes for route 0/3), `main/mc_link.cpp` (channel load, `doText`), `main/chat_page.*` and `main.cpp`'s
+  `ChatView` fill.
+
+### 1. The model (`core/channel_scope.*`, pure and ported)
+
+- The three modes are the L2's: **Default** (channel never set), **No scope** (the stored sentinel `!none`;
+  send unscoped even if the node has a default) and **Region** (a `#tag` name). Resolution is
+  **channel -> node default -> unscoped** (`scopePlanFor`). The Tanmatsu node has no stored default scope, so
+  Default currently resolves to **unscoped**; the parameter exists so the rule is the L2's, not a second rule.
+- The name rules are ported byte-for-byte from `channel_scope.cpp`: leading spaces and one `#` dropped, then
+  spaces; a leading `$` is refused (a private region's key cannot be derived from its name); 1..30 characters,
+  every one passing MeshCore's `RegionMap::is_name_char` (`rptr_model.h:68-75` in the L2); a refused name writes
+  nothing. **Case is kept**, so `#si` and `#SI` are different regions.
+- The region key is `sha256("#name")[0..15]` (`TransportKeyStore::getAutoKeyFor`, called with `#name` by
+  `RegionMap::getTransportKeysFor`), and the 2-byte code is
+  `HMAC-SHA256(key, payload_type || payload)[0..1]`, interpreted little-endian as MeshCore's
+  `finalizeHMAC(..., &code, 2)` does, with `0x0000 -> 0x0001` and `0xFFFF -> 0xFFFE`.
+- The frame builder writes MeshCore's exact order (`Packet::writeTo`): `header` with
+  `ROUTE_TYPE_TRANSPORT_FLOOD` (0x00), **both 16-bit transport codes**, then `path_len`, path, payload. Codes
+  are `{this region's code, 0}` exactly as `sendChannelText()` and upstream's `sendFloodScoped()` do; the
+  second is "we carry no home region". No scope builds the plain flood through the existing
+  `meshcore::buildGroupText` (route 1, no codes).
+
+### 2. Storage — the L2's namespace, key and value format
+
+- Namespace **`mcch`**, key **`s<hh>`** (two lowercase hex digits) of the channel's **live** 1-byte hash, value
+  a string: absent/empty = **Default**, `!none` = **No scope**, anything else = the region name without the
+  leading `#` (what the L2's editor stores: `scopeNameCanonical()` then `mcChannelSetScope()`). The reader
+  canonicalises a value again and falls back to Default on a corrupt one, so a `#si` written by hand and the
+  L2's `si` are one rule.
+- Both directions use the live hash from the loaded table, never a mirrored copy from an older secret (S509's
+  first defect). Removing a value that is not there is **success**: NVS `NOT_FOUND` on erase is the Default
+  state, not a failure (S509's second defect).
+- No editing UI yet (Settings is later). Claude provisions the three values with BadgeLink `nvs` writes:
+
+```
+nvs write mcch s11 str !none
+nvs write mcch sec str si
+nvs write mcch s95 str europe
+```
+
+`0x11` = Public (no scope), `0xEC` = #slovenija (region `#si`), `0x95` = #slovenia (region `#europe`). The
+stored region text is canonical without `#`, as on the L2; a `#si`/`#europe` value is also accepted on read.
+(The channel names, order and keys are Claude's provisioning; no key is written in this repo or in a test.)
+
+### 3. Sending (`main/mc_link.cpp`)
+
+- `doText` resolves the channel's stored scope once per send and builds either the scoped transport-flood frame
+  or the plain flood. The TX log names the mode the way the L2 does:
+  `TX ch1 "#slovenija" ... scope=region "#si"` / `scope=none` / `scope=unscoped`.
+- Nothing else on the send path changed: still one owner of the radio, still queued by the main task.
+
+### 4. What is visible
+
+- The channel card's second line is unchanged. In the OPEN channel the page head's right-hand text (already
+  the dim face) gains the scope when it is not unscoped: `scope #si`, `scope #europe`, or `no scope`, before
+  the message/notice text. A DM thread and a Default/unscoped channel show no scope text.
+
+### Results — code, tests and build done (nothing installed)
+
+- **Host:** `sh test/host/run.sh` → **exit 0**, **17 stages, 3061 checks, 0 failures**. **Before: 2967
+  checks, 16 stages**; the new stage is `test_channel_scope` with **94 checks**, so the arithmetic is exact
+  (2967 + 94 = 3061). The ed25519 UBSan `left shift of negative value` lines are the pre-existing vendored
+  C, not ours. Logs: `paperclip-pilot/sweep/est440-baseline.log` and `est440-host-final2.log`.
+- **What the 94 checks pin:** the three modes in a `constexpr` context; the name rules (`#` dropped,
+  spaces trimmed, `$` refused, `si lj`/`si.lj` refused, 30 accepted / 31 refused, case kept, nothing written
+  on a refusal); resolution Default -> node default -> unscoped and No scope beating a node default; a
+  corrupt record falling back to Default; the head words; the region keys for `#si`/`#SI`/`#europe`; the
+  transport codes for two fixed payloads (`0xa609`, `0x321d`) and `#SI`'s different code (`0xe9e3`); the
+  complete 41-byte scoped frame byte for byte (header 0x14, codes `41 f2`, path_len 0x40, payload), the
+  decoder reading those 4 bytes and `openGroupText` opening the frame; `#si` and `si` producing the same
+  frame; No scope / Default / a null node key producing the plain flood, byte-identical to
+  `buildGroupText` (route 1, no codes); a too-small buffer and hash_size 4 refused.
+- **ARM:** two deliberately broken copies in `paperclip-pilot/sweep/est440/arm/` and `arm2/`, each compiled
+  against the real test. Break 1 (region key hashed without `#`): **ARM_EXIT=1, 59 checks, 2 FAILURES**
+  (the `#si` key vector and the fixed frame). Break 2 (the 2-byte code read big-endian): **ARM_EXIT=1, 68
+  checks, 2 FAILURES** (`code == 0xa609` got 2470, and the fixed frame). The real tree is **94 checks, 0
+  failures**.
+- **Build:** the first `make build` returned **exit 2** — two `-Werror=format-truncation` errors of mine
+  (`chat_page.cpp:102-103` composing scope + head text, `mc_link.cpp:968` composing `region "#name"` into a
+  40-byte buffer). Fixed with a 96/128-byte head buffer and bounded `%.31s`/`%.90s` (plus a 48-byte scope
+  log buffer), then **`make build` → exit 0**, **0 `warning:`/`error:` lines**. `application.bin` =
+  **0x165a10 = 1,464,848 B**; **0x9a5f0 = 632,816 B (30 %) of the 2 MB app partition free**. That is
+  **+2,608 B** over EST-439's 1,462,240 B (the ported model, the builder, the NVS glue and the head text).
+  Logs: `paperclip-pilot/sweep/est440-build.log` (the failure) and `est440-build2.log` (green).
+- **Files:** `core/channel_scope.{h,cpp}` (new, pure), `core/mc_wire.h` (`kRouteTransportFlood`),
+  `core/CMakeLists.txt`, `main/mc_link.{h,cpp}` (NVS `mcch` `s<hh>` + `doText`), `main/chat_page.{h,cpp}`
+  (the head text), `main/main.cpp` (fills it), `test/host/test_channel_scope.cpp` (new),
+  `test/host/run.sh` (the new stage), `docs/PROGRESS.md`.
+- **Checked for rule 9:** no channel key, real or otherwise, is in the code, notes or test. The only key in
+  the test is the synthetic `00 01 ... 0f` used to pin the frame bytes. The three values in the NVS commands
+  are a mode sentinel and two public `#tag` names; the channel hashes are the ones the ticket gives.
+- **Not checked:** nothing ran on hardware, so no repeater has yet forwarded or refused one of these scoped
+  floods and the NVS writes below have not been executed on a device. No PNG: this ticket changes one line
+  of existing head text and asks for no preview.
+
+### Next
+
+- Install v42, provision the three scopes with the `nvs write` lines above, then send one text on each
+  channel. The device log must read `scope=none` (Public), `scope=region "#si"` (#slovenija) and
+  `scope=region "#europe"` (#slovenia); opening each channel must show the same words on the head. A
+  repeater that carries the region should forward it; one that does not must drop it (S509's own open item
+  1, still unproven on the L2 too).
+
+
 ## 2026-11-18 · S513 (EST-439) · DM send, wired
 
 > Written by DeepSeek for ticket EST-439 (fenced Paperclip run: no session start/end, nothing installed, flashed or

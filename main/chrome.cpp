@@ -28,6 +28,7 @@ struct NoticeSlot {
 };
 
 NoticeSlot g_notice;
+uint32_t   g_notice_gen = 0;   // bumped by every set/clear, under the same lock (S513, Claude)
 char       g_notice_copy[64] = {0};   // the reader's own copy: drawn text never changes under the drawer
 
 }  // namespace
@@ -39,6 +40,7 @@ void noticeSet(const char* text, uint32_t ttl_ms) {
     // "Newest wins": a second notice replaces the first and restarts its life, so the strip can never show a
     // stale sentence next to a fresh one.
     g_notice.until_us = esp_timer_get_time() + (int64_t)ttl_ms * 1000;
+    ++g_notice_gen;
     taskEXIT_CRITICAL(&g_notice_mux);
 }
 
@@ -46,6 +48,7 @@ void noticeClear() {
     taskENTER_CRITICAL(&g_notice_mux);
     g_notice.text[0] = '\0';
     g_notice.until_us = 0;
+    ++g_notice_gen;
     taskEXIT_CRITICAL(&g_notice_mux);
 }
 
@@ -56,6 +59,21 @@ const char* noticeText() {
     if (live) snprintf(g_notice_copy, sizeof(g_notice_copy), "%s", g_notice.text);
     taskEXIT_CRITICAL(&g_notice_mux);
     return live ? g_notice_copy : nullptr;
+}
+
+bool noticeNeedsRepaint() {
+    static uint32_t seen_gen  = 0;
+    static bool     was_live  = false;
+    const int64_t   now       = esp_timer_get_time();
+    taskENTER_CRITICAL(&g_notice_mux);
+    const uint32_t gen  = g_notice_gen;
+    const bool     live = g_notice.text[0] != '\0' && now < g_notice.until_us;
+    taskEXIT_CRITICAL(&g_notice_mux);
+    const bool changed = gen != seen_gen;   // a new notice (or a clear) since the last pass
+    const bool expired = was_live && !live; // the live one just ran out: take it off the glass
+    seen_gen = gen;
+    was_live = live;
+    return changed || expired;
 }
 
 

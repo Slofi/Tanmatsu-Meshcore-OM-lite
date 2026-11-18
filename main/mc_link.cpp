@@ -22,6 +22,7 @@
 #include "mc_identity.h"
 #include "mc_crypto.h"
 #include "mc_wire.h"
+#include "channel_scope.h"   // S513/EST-440: per-channel flood scope, ported from the L2's S509
 #include "mc_dm.h"      // S513/EST-433/434: TXT_MSG open + the two reply frames
 #include "dm_send.h"    // S513/EST-436/439: compose, the PATH parser, the pending/ACK table and the retry rule
 #include "radio_link.h"
@@ -80,6 +81,11 @@ uint32_t nextAdvertTimestamp() {
 
 meshcore::ChannelSet g_set;
 bool                 g_loaded = false;
+
+// S513/EST-440: the channel scopes as last read from NVS "mcch" ("s<hh>" by the LIVE hash). The cache
+// only saves a flash read per redraw; the key is still the loaded table's hash, never a legacy copy.
+char g_scope[meshcore::kMaxChannels][meshcore::kScopeNameMax + 1];
+bool g_scope_loaded[meshcore::kMaxChannels] = {};
 
 // The store the pages read (S502, step 4). The radio task writes it, the UI reads it; the mutex is created in
 // begin() and the guard below is the ONLY way in.
@@ -147,10 +153,16 @@ SemaphoreHandle_t  g_tx_lock = nullptr;   // created once in begin()
 meshcore::DmPendingTable g_dm_pending;
 SemaphoreHandle_t        g_dm_lock = nullptr;   // created once in begin()
 
+// S513/EST-441: defined with the seen-ring below, needed here first (queueFrame registers every frame it queues).
+bool markOwnFrame(const uint8_t* frame, size_t len);
+
 // A reply that was BUILT on the radio task (a DM ACK / path return) still leaves through the queue: the receive
 // path must not transmit, because a send inside receive handling is how the S501 two-writers race started.
+// S513/EST-441: every frame that passes here is registered as ours BEFORE it can reach the radio — this is the
+// path a DM, a retry, an ACK and a path return all take, and the echo of any of them must be recognised.
 bool queueFrame(const uint8_t* frame, size_t len) {
     if (g_tx_lock == nullptr || frame == nullptr || len == 0) return false;
+    markOwnFrame(frame, len);
     xSemaphoreTake(g_tx_lock, portMAX_DELAY);
     const bool   ok    = g_txq.pushFrame(TxKind::Frame, frame, len);
     const size_t depth = g_txq.size();
@@ -167,26 +179,33 @@ om::mc::AdvertGate g_advert_gate;
 
 uint32_t monotonicMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 
-// Duplicate suppression: a flood can arrive over two paths, and MeshCore itself keeps a seen-table for the
-// same reason. Eight 4-byte fingerprints is plenty for one leaf node and costs 32 bytes.
-constexpr size_t kSeenSlots = 8;
-uint32_t         g_seen[kSeenSlots];
-uint8_t          g_seen_next = 0;
+// S513/EST-441: the seen-ring, so a frame WE transmitted that comes back over the mesh is not processed as
+// incoming. The rule and the ring are core/mc_wire.* (host-tested); this is only the instance the device uses.
+// It was 8 slots of 4-byte fingerprints with no idea whose frame an entry was. 8 was sized for receiving alone;
+// every TRANSMIT now costs a slot too, and one DM attempt puts a frame plus a path return or ACK on the air, a
+// retry repeats them, and adverts share the ring — so the echo of a retry could arrive after its own entry had
+// been pushed out, which is the v41 defect. 32 slots x 5 bytes = 160 B and covers a whole 3-attempt cycle.
+meshcore::SeenRing g_seen;
 
-uint32_t payloadFingerprint(const meshcore::View& v) {
-    uint8_t full[32];
-    if (!meshcore::sha256(v.payload, v.payload_len, full)) return 0;
-    return (uint32_t)full[0] | ((uint32_t)full[1] << 8) | ((uint32_t)full[2] << 16) |
-           ((uint32_t)full[3] << 24);
-}
-
-bool seenBefore(uint32_t fp) {
-    for (size_t i = 0; i < kSeenSlots; i++) {
-        if (g_seen[i] == fp && fp != 0) return true;
-    }
-    g_seen[g_seen_next] = fp;
-    g_seen_next         = (uint8_t)((g_seen_next + 1) % kSeenSlots);
-    return false;
+// The one place a frame of OURS is remembered, called BEFORE it goes out (the radio's send, or the queue that
+// leads to it). Upstream's own words for this are in Mesh.cpp:651/680/713/723/736 — "mark this packet as already
+// sent in case it is rebroadcast back to us" — and its hash is the payload, never the path (Packet.cpp:41-50),
+// which is exactly why a repeater's copy of our frame matches: it only adds path bytes.
+//
+// The ring is touched by BOTH tasks now (the main task composes DMs and retries into queueFrame; the radio task
+// receives and sends), so the few microseconds of an entry are taken under the existing transmit lock rather than
+// under a second one. A lost entry here would mean an echo processed as incoming — the very defect — so it is
+// worth the mutex.
+bool markOwnFrame(const uint8_t* frame, size_t len) {
+    if (frame == nullptr || len == 0) return false;
+    meshcore::View v;
+    if (!meshcore::decode(frame, len, &v)) return false;
+    const uint32_t fp = meshcore::frameFingerprint(v);
+    const bool     locked = g_tx_lock != nullptr;
+    if (locked) xSemaphoreTake(g_tx_lock, portMAX_DELAY);
+    g_seen.noteOurs(fp);
+    if (locked) xSemaphoreGive(g_tx_lock);
+    return true;
 }
 
 // ---- S513/EST-439: the DM send's shared state ---------------------------------------------------------------
@@ -280,6 +299,10 @@ void loadOrCreateIdentity() {
 
 void loadChannels() {
     g_set.count = 0;
+    for (size_t i = 0; i < meshcore::kMaxChannels; ++i) {
+        g_scope_loaded[i] = false;   // S513/EST-440: a reload re-reads by the new live hashes
+        g_scope[i][0]     = 0;
+    }
     nvs_handle_t h;
     if (nvs_open("mcch", NVS_READONLY, &h) != ESP_OK) {
         ESP_LOGW(TAG, "channels: no \"mcch\" namespace yet (nothing provisioned)");
@@ -356,10 +379,17 @@ size_t restoreContacts() {
                  (unsigned)len);
         return 0;
     }
+    // S513/EST-441: a stored row whose key is only four bytes and zeros is not a contact — v41 wrote exactly that
+    // from a DM log's file name, and it is on Filip's device now, so it is DROPPED here rather than merely not
+    // written again. The table is marked dirty so the next main-task pass rewrites NVS without it.
+    const size_t dropped = contactsDropIncomplete(g_contacts);
     // Nothing has changed since this was read: the first real mutation raises a flag again.
-    g_contacts_dirty_struct = false;
+    g_contacts_dirty_struct = dropped > 0;   // a dropped row must reach NVS, or it returns on the next boot
     g_contacts_dirty_soft   = false;
     g_contacts_write_failed = false;
+    if (dropped > 0) {
+        ESP_LOGW(TAG, "contacts: dropped %u record(s) without a full key", (unsigned)dropped);
+    }
     ESP_LOGI(TAG, "contacts: %u restored from NVS", (unsigned)g_contacts.count);
     return g_contacts.count;
 }
@@ -483,6 +513,105 @@ size_t channelCount() { return g_set.count; }
 
 const char* channelName(size_t i) { return (i < g_set.count) ? g_set.ch[i].name : ""; }
 
+// S513/EST-440: one read from NVS "mcch", key "s<hh>" of the LIVE hash. Missing is the Default state
+// and true; an unreadable/over-long value is also Default (never truncated into a shorter region, which
+// could silently be a DIFFERENT region), and only a real read error returns false.
+static bool scopeReadNvs(uint8_t hash, char* out, size_t cap) {
+    if (out == nullptr || cap == 0) return false;
+    out[0] = 0;
+    nvs_handle_t h;
+    if (nvs_open("mcch", NVS_READONLY, &h) != ESP_OK) return false;
+    char key[8];
+    snprintf(key, sizeof(key), "s%02x", hash);
+    size_t    len = 0;
+    esp_err_t r   = nvs_get_str(h, key, nullptr, &len);
+    if (r == ESP_ERR_NVS_NOT_FOUND) {
+        nvs_close(h);
+        return true;   // Default: a missing key is the state an unset channel is in
+    }
+    if (r == ESP_OK && len <= meshcore::kScopeNameMax + 1) {
+        char   raw[meshcore::kScopeNameMax + 1];
+        size_t got = sizeof(raw);
+        r          = nvs_get_str(h, key, raw, &got);
+        if (r == ESP_OK) snprintf(out, cap, "%s", raw);
+    } else if (r == ESP_OK) {
+        // Corrupt/over-long: Default, never truncated into a shorter (possibly different) region.
+        ESP_LOGW(TAG, "scope key %s is %u B, ignored as Default", key, (unsigned)len);
+    }
+    nvs_close(h);
+    return r == ESP_OK;
+}
+
+bool channelScopeStored(size_t i, char* out, size_t cap) {
+    if (out == nullptr || cap == 0) return false;
+    out[0] = 0;
+    if (i >= g_set.count || i >= meshcore::kMaxChannels) return false;
+    if (!g_scope_loaded[i]) {
+        if (!scopeReadNvs(g_set.ch[i].hash, g_scope[i], sizeof(g_scope[i]))) {
+            g_scope[i][0] = 0;   // never cache a guess; Default until a read succeeds
+            return false;
+        }
+        g_scope_loaded[i] = true;
+        if (g_scope[i][0] != 0)
+            ESP_LOGI(TAG, "ch%u scope stored: %s (key s%02x)", (unsigned)i, g_scope[i], g_set.ch[i].hash);
+    }
+    snprintf(out, cap, "%s", g_scope[i]);
+    return true;
+}
+
+bool channelScopeSet(size_t i, const char* setting) {
+    if (i >= g_set.count || i >= meshcore::kMaxChannels) return false;
+    const char* text = setting != nullptr ? setting : "";
+    if (strlen(text) > meshcore::kScopeNameMax) return false;   // one rule: the L2's 30-character cap
+
+    char key[8];
+    snprintf(key, sizeof(key), "s%02x", g_set.ch[i].hash);
+    nvs_handle_t h;
+    if (nvs_open("mcch", NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t r;
+    if (text[0] == 0) {
+        // S509's second defect: NVS answers NOT_FOUND for a key that never existed, and "nothing
+        // stored" IS Default. That is success, not a failed erase.
+        size_t len = 0;
+        r          = nvs_get_str(h, key, nullptr, &len);
+        if (r == ESP_ERR_NVS_NOT_FOUND) {
+            nvs_close(h);
+            g_scope[i][0]     = 0;
+            g_scope_loaded[i] = true;
+            return true;
+        }
+        if (r == ESP_OK) {
+            r = nvs_erase_key(h, key);
+            if (r == ESP_OK) r = nvs_commit(h);
+            else if (r == ESP_ERR_NVS_NOT_FOUND) r = ESP_OK;
+        }
+    } else {
+        r = nvs_set_str(h, key, text);
+        if (r == ESP_OK) r = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (r != ESP_OK) {
+        ESP_LOGW(TAG, "ch%u scope NOT %s (%s)", (unsigned)i, text[0] == 0 ? "cleared" : "saved",
+                 esp_err_to_name(r));
+        return false;
+    }
+    snprintf(g_scope[i], sizeof(g_scope[i]), "%s", text);
+    g_scope_loaded[i] = true;
+    ESP_LOGI(TAG, "ch%u scope %s (key s%02x)", (unsigned)i, text[0] == 0 ? "cleared" : "saved",
+             g_set.ch[i].hash);
+    return true;
+}
+
+void channelScopeHead(size_t i, char* out, size_t cap) {
+    if (out == nullptr || cap == 0) return;
+    out[0] = 0;
+    char stored[meshcore::kScopeNameMax + 1] = "";
+    if (!channelScopeStored(i, stored, sizeof(stored))) return;
+    const meshcore::ScopePlan plan = meshcore::scopePlanFor(stored, nullptr);   // no node default today
+    meshcore::scopeHeadText(plan, out, (int)cap);
+}
+
+
 // One place that both writes a message to the store and appends it to its channel's log, so an incoming and an
 // outgoing message can never be numbered by two different rules. The id goes up only when the record really
 // reached the card: a message that could not be written keeps log_id 0, which is exactly what tells the seen
@@ -499,32 +628,15 @@ static uint32_t pushAndLog(size_t idx, Message& m) {
 }
 
 // Item 4: a thread restored from the card knows only the first four bytes of its contact's key (the file name).
-// The first real advert for that contact fills in the rest, in the contact row AND in the thread's messages, so the
-// crypto (which needs all 32 bytes) can match the peer again. Called under the store lock, before contactsUpsert.
-bool prefixOnlyKey(const uint8_t* pub) {
-    for (size_t i = 4; i < 32; i++) {
-        if (pub[i] != 0) return false;
-    }
-    return true;
-}
-
+// S513/EST-441: a restored thread is NO LONGER a contact row, so this rebinds the THREAD only — the row, when
+// there is one, arrived from a verified advert and already carries the full key.
 void rebindRestoredDmPeer(const uint8_t pub[32], const char* name) {
-    if (pub == nullptr || contactsFind(g_contacts, pub) >= 0) return;   // already the full key: nothing to do
-    for (size_t i = 0; i < g_contacts.count; i++) {
-        Contact& c = g_contacts.c[i];
-        if (!prefixOnlyKey(c.pub) || memcmp(c.pub, pub, 4) != 0) continue;
-        // The row's identity changed from a 4-byte file name to a real key: that is a contact the next boot must
-        // find whole, not a last-heard detail (S513/EST-437).
-        markContactsDirty(true);
-        memcpy(c.pub, pub, sizeof(c.pub));
-        if (name != nullptr && name[0] != '\0') snprintf(c.name, sizeof(c.name), "%s", name);
-        for (size_t j = 0; j < g_dms.count; j++) {
-            DmMessage* m = &g_dms.m[(g_dms.head + j) % kMaxDms];
-            if (!prefixOnlyKey(m->peer_pub) || memcmp(m->peer_pub, pub, 4) != 0) continue;
-            memcpy(m->peer_pub, pub, sizeof(m->peer_pub));
-            if (name != nullptr && name[0] != '\0') snprintf(m->peer_name, sizeof(m->peer_name), "%s", name);
-        }
-        return;
+    if (pub == nullptr) return;
+    for (size_t j = 0; j < g_dms.count; j++) {
+        DmMessage* m = &g_dms.m[(g_dms.head + j) % kMaxDms];
+        if (!contactKeyIncomplete(m->peer_pub) || memcmp(m->peer_pub, pub, 4) != 0) continue;
+        memcpy(m->peer_pub, pub, sizeof(m->peer_pub));
+        if (name != nullptr && name[0] != '\0') snprintf(m->peer_name, sizeof(m->peer_name), "%s", name);
     }
 }
 
@@ -533,6 +645,24 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
     if (!meshcore::decode(buf, len, &v)) {
         ESP_LOGW(TAG, "rx %u B: not a MeshCore frame", (unsigned)len);
         return;
+    }
+    // S513/EST-441: ONE check for every type, before any of them is acted on. A frame whose payload we have
+    // already seen is either our OWN transmission heard back (registered by markOwnFrame before it went out) or a
+    // second copy of a flood. The path is not part of the fingerprint, so a repeater's copy — same payload, its
+    // hash added to the path — matches. This is what stopped v41 from opening its own DM as an incoming one.
+    {
+        bool ours = false;
+        bool seen = false;
+        // Same lock as markOwnFrame(): the ring is written by both tasks (see the comment there).
+        const bool locked = g_tx_lock != nullptr;
+        if (locked) xSemaphoreTake(g_tx_lock, portMAX_DELAY);
+        seen = g_seen.seen(meshcore::frameFingerprint(v), &ours);
+        if (locked) xSemaphoreGive(g_tx_lock);
+        if (seen) {
+            ESP_LOGI(TAG, "rx %u B type %u: %s, dropped", (unsigned)len, (unsigned)v.type(),
+                     ours ? "our own echo" : "duplicate, already shown");
+            return;
+        }
     }
     // ------------------------------------------------- S513/EST-439: the PATH answer and the delivered ACK
     // A PATH packet is the recipient's answer to a flooded DM: it carries the route back TO that contact and, when
@@ -622,10 +752,9 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
                      (unsigned)len, v.payload_len > 1 ? v.payload[1] : 0, rssi_dbm);
             return;
         }
-        if (seenBefore(payloadFingerprint(v))) {
-            ESP_LOGI(TAG, "rx %u B TXT_MSG: duplicate, already shown", (unsigned)len);
-            return;
-        }
+        // S513/EST-441: the seen-ring check at the top of onPacket already dropped our own echo and a duplicate
+        // flood copy, for every type — before the MAC was even tried, which is what stops our own DM opening as
+        // "from" a peer whose pub_key[0] happens to equal ours (ECDH is symmetric, so it DOES open).
 
         const uint8_t* peer_pub = &peer_pubs[(size_t)dm.peer * meshcore::kPubKeyBytes];
         char           peer_name[kNameBytes];
@@ -793,10 +922,8 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
                  (unsigned)len, v.payload_len > 0 ? v.payload[0] : 0, rssi_dbm);
         return;
     }
-    if (seenBefore(payloadFingerprint(v))) {
-        ESP_LOGI(TAG, "rx %u B on ch%u: duplicate, already shown", (unsigned)len, (unsigned)idx);
-        return;
-    }
+    // S513/EST-441: our own text and its duplicate flood copies were dropped by the seen-ring check at the top of
+    // onPacket, which now covers every type instead of this branch alone.
     ESP_LOGI(TAG, "MSG ch%u \"%s\" from \"%s\": %s  (ts %u, %d dBm, snr %d dB, %u B)",
              (unsigned)idx, g_set.ch[idx].name, sender, text, (unsigned)ts, rssi_dbm, snr_db,
              (unsigned)len);
@@ -836,22 +963,39 @@ static int doText(size_t i, const char* sender, const char* text) {
     // wrong node can no longer move it. Logged, so a wrong one is visible rather than silent.
     const uint32_t ts = (uint32_t)om::time_source::epochNow();
 
+    // S513/EST-440: the channel's own flood scope, resolved once per send (channel -> node default ->
+    // unscoped). A region becomes MeshCore's TRANSPORT_FLOOD frame with the two transport codes; No
+    // scope and Default-with-no-default stay the plain flood, byte for byte what was sent before.
+    char scopeStored[meshcore::kScopeNameMax + 1] = "";
+    if (!channelScopeStored(i, scopeStored, sizeof(scopeStored)))
+        ESP_LOGW(TAG, "tx: ch%u scope could not be read; sending unscoped", (unsigned)i);
+    const meshcore::ScopePlan plan = meshcore::scopePlanFor(scopeStored, nullptr);
+
     uint8_t      frame[256];
-    const size_t n = meshcore::buildGroupText(g_set.ch[i], ts, sender, text, 2, frame, sizeof(frame));
+    const size_t n = meshcore::buildScopedChannelText(g_set.ch[i], ts, sender, text, 2, plan, nullptr, frame,
+                                                      sizeof(frame));
     if (n == 0) {
         ESP_LOGE(TAG, "tx: build failed (text too long? %u chars)", (unsigned)strlen(text));
         return -1;
     }
+    // S513/EST-441: registered BEFORE the frame goes out. It used to be registered after the send, which left a
+    // window in which the echo could be processed as an incoming text; and it is `ours`, so the drop says why.
+    markOwnFrame(frame, n);
     const int sent = om::radio::send(frame, n);
-    ESP_LOGI(TAG, "TX ch%u \"%s\" %u B ts %u -> %s", (unsigned)i, g_set.ch[i].name, (unsigned)n,
-             (unsigned)ts, sent > 0 ? "ok" : "FAILED");
+    // The L2's words, with the region name the ticket names (a #tag is public); rule 9 still keeps the
+    // message text out of the log.
+    char scope_log[48];
+    if (plan.region[0] != 0)
+        snprintf(scope_log, sizeof(scope_log), "region \"#%.30s\"", plan.region);
+    else if (plan.mode == meshcore::ScopeMode::None)
+        snprintf(scope_log, sizeof(scope_log), "none");
+    else
+        snprintf(scope_log, sizeof(scope_log), "unscoped");
+    ESP_LOGI(TAG, "TX ch%u \"%s\" %u B ts %u scope=%s -> %s", (unsigned)i, g_set.ch[i].name, (unsigned)n,
+             (unsigned)ts, scope_log, sent > 0 ? "ok" : "FAILED");
     if (sent > 0) {
-        // Two things, both about our own message coming back to us over the mesh:
-        //   1. register the payload in the seen-ring BEFORE the echo arrives, so the flood copy is dropped as a
-        //      duplicate — otherwise every message shows twice, once as "you" and once under our node's name;
-        //   2. keep the outgoing line in the store ourselves, so the chat has it the instant Enter is pressed.
-        meshcore::View self;
-        if (meshcore::decode(frame, n, &self)) (void)seenBefore(payloadFingerprint(self));
+        // Keep the outgoing line in the store ourselves, so the chat has it the instant Enter is pressed. The echo
+        // is already accounted for: the frame was registered above, and RX drops it as our own.
         StoreLock l;
         Message   m;
         m.channel  = (uint8_t)i;
@@ -899,6 +1043,10 @@ static int doAdvert(const char* name) {
         resolve(false);
         return -1;
     }
+    // S513/EST-441: an advert is a frame of ours too, so it is registered before it goes out. The pub_key
+    // comparison in the advert branch still catches it (a second, independent guard), but the ring is what makes
+    // every type behave the same.
+    markOwnFrame(frame, n);
     const int sent = om::radio::send(frame, n);
     ESP_LOGI(TAG, "ADVERT TX \"%s\" %u B ts %u -> %s", name, (unsigned)n, (unsigned)ts,
              sent > 0 ? "ok" : "FAILED");
@@ -917,10 +1065,55 @@ bool queueText(size_t i, const char* text) {
     return ok;
 }
 
+// S513/EST-441: may a DM to this peer be sent, and what is it called? False when the peer is not a contact with a
+// FULL key — a restored thread carries four bytes from its file name and nothing else. The DM view uses this to
+// keep the text and say "No key for <name> yet: waiting for its advert"; queueDm() re-checks it and refuses.
+bool dmPeerReady(const uint8_t pub[32], char* name, size_t cap) {
+    if (name != nullptr && cap > 0) name[0] = '\0';
+    if (pub == nullptr) return false;
+    StoreLock l;
+    if (dmPeerKey(g_contacts, pub, name, cap)) return true;
+    // Not a full-key contact: name it the way its thread is named — the only matching full-key contact's name if
+    // the prefix is unique, else the name on the thread's own records, else the 8-hex prefix.
+    if (name != nullptr && cap > 0) {
+        const int ci = contactsFindUniquePrefix(g_contacts, pub);
+        if (ci >= 0) snprintf(name, cap, "%s", g_contacts.c[ci].name);
+        if (name[0] == '\0') {
+            for (size_t j = g_dms.count; j > 0; j--) {
+                const DmMessage* m = dmAt(g_dms, j - 1);
+                if (m == nullptr || memcmp(m->peer_pub, pub, sizeof(m->peer_pub)) != 0) continue;
+                if (m->peer_name[0] == '\0') continue;
+                snprintf(name, cap, "%s", m->peer_name);
+                break;
+            }
+        }
+        if (name[0] == '\0') snprintf(name, cap, "%02x%02x%02x%02x", pub[0], pub[1], pub[2], pub[3]);
+    }
+    return false;
+}
+
 bool queueDm(const uint8_t pub[32], const char* text) {
     if (pub == nullptr || text == nullptr || text[0] == '\0') return false;
     if (!g_has_id || g_tx_lock == nullptr || g_dm_lock == nullptr) return false;
     if (strlen(text) > meshcore::kMaxText) return false;
+
+    // S513/EST-441: before ANYTHING else, the peer must be a contact with a full key. A thread restored from the
+    // card carries only four bytes from its file name; a shared secret over those bytes is a secret the peer
+    // cannot derive (that is why ERA-3 could not open our DM in v41), so it is never computed. The caller keeps
+    // its text and the DM view says "waiting for its advert".
+    char known[kNameBytes] = {0};
+    {
+        StoreLock l;
+        if (!dmPeerKey(g_contacts, pub, known, sizeof(known))) {
+            const char* label = known[0] != '\0' ? known : "";
+            if (label[0] == '\0') {
+                const int ci = contactsFindUniquePrefix(g_contacts, pub);
+                if (ci >= 0) label = g_contacts.c[ci].name;
+            }
+            ESP_LOGW(TAG, "DM: no full key for \"%s\" yet; waiting for its advert", label[0] != '\0' ? label : "?");
+            return false;
+        }
+    }
 
     // The caller gets false only when nothing was stored and nothing was queued, so its text is still its own.
     xSemaphoreTake(g_tx_lock, portMAX_DELAY);

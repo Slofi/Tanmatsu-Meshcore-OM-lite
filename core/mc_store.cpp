@@ -81,6 +81,52 @@ size_t contactsHeardWithin(const ContactStore& s, uint32_t now, uint32_t window_
     return n;
 }
 
+// ---- S513/EST-441: no contact without a full key ------------------------------------------------------------
+bool contactKeyIncomplete(const uint8_t pub[32]) {
+    if (pub == nullptr) return true;
+    for (size_t i = 4; i < 32; i++) {
+        if (pub[i] != 0) return false;
+    }
+    return true;
+}
+
+size_t contactsDropIncomplete(ContactStore& s) {
+    size_t kept    = 0;
+    size_t dropped = 0;
+    for (size_t i = 0; i < s.count && i < kMaxContacts; i++) {
+        if (contactKeyIncomplete(s.c[i].pub)) {
+            dropped++;
+            continue;
+        }
+        if (kept != i) s.c[kept] = s.c[i];
+        kept++;
+    }
+    s.count = kept;
+    return dropped;
+}
+
+int contactsFindUniquePrefix(const ContactStore& s, const uint8_t prefix[4]) {
+    if (prefix == nullptr) return -1;
+    int found = -1;
+    for (size_t i = 0; i < s.count && i < kMaxContacts; i++) {
+        // An incomplete row is not a key at all: it can never be the answer, so it is not a second candidate.
+        if (contactKeyIncomplete(s.c[i].pub)) continue;
+        if (memcmp(s.c[i].pub, prefix, 4) != 0) continue;
+        if (found >= 0) return -1;   // two full keys share the prefix: refuse to guess which one it is
+        found = (int)i;
+    }
+    return found;
+}
+
+bool dmPeerKey(const ContactStore& s, const uint8_t pub[32], char* name, size_t name_cap) {
+    if (name != nullptr && name_cap > 0) name[0] = '\0';
+    if (pub == nullptr || contactKeyIncomplete(pub)) return false;   // never a shared secret from 4 bytes
+    const int i = contactsFind(s, pub);
+    if (i < 0 || i >= (int)s.count || contactKeyIncomplete(s.c[i].pub)) return false;
+    if (name != nullptr && name_cap > 0) snprintf(name, name_cap, "%s", s.c[i].name);
+    return true;
+}
+
 uint32_t messagesPush(MessageRing& r, const Message& msg) {
     size_t slot;
     if (r.count < kMaxMessages) {

@@ -38,6 +38,7 @@ constexpr size_t   kMaxPlain     = 168;   // MAX_PACKET_PAYLOAD - CIPHER_BLOCK_S
 constexpr size_t   kMaxNameChars = 31;
 
 // --- header bits (Packet.h:5-11, 25-40) ----------------------------------------
+constexpr uint8_t kRouteTransportFlood = 0x00;   // flood + two transport codes (Packet.h:14)
 constexpr uint8_t kRouteFlood     = 0x01;
 constexpr uint8_t kTypeGrpTxt     = 0x05;
 constexpr uint8_t kTypeAdvert     = 0x04;
@@ -98,5 +99,35 @@ size_t buildPlain(uint8_t* out, size_t out_size, uint32_t timestamp, const char*
                   const char* text);
 bool   parsePlain(const uint8_t* plain, size_t len, char* sender, size_t sender_size, char* text,
                   size_t text_size, uint32_t* timestamp);
+
+// ---- S513/EST-441: the seen-ring, so our own frame coming back is not "incoming" -------------------------
+// Upstream's rule, read in S513 (`firmware/lib/meshcore`): `Packet::calculatePacketHash` (Packet.cpp:41-50)
+// hashes `payload_type || payload` and NOT the path, and every send marks its packet as seen —
+// `Mesh.cpp:651, 680, 713, 723, 736` say it in as many words: *"mark this packet as already sent in case it is
+// rebroadcast back to us"*. Leaving the path out is the point: a repeater forwards our frame with its own hash
+// appended and changes nothing else, so the copy we hear back has the same payload and must match.
+// The ring itself is `helpers/SimpleMeshTables.h:52-57` (160 slots there, because a repeater forwards for the
+// whole mesh; a leaf node only needs its own traffic).
+constexpr size_t kSeenSlots = 32;
+
+// The fingerprint of a decoded frame: sha256(payload)[0..3], little-endian. The payload only — see above.
+uint32_t frameFingerprint(const View& pkt);
+
+struct SeenRing {
+    uint32_t fp[kSeenSlots]   = {0};
+    bool     ours[kSeenSlots] = {false};   // this entry was put there by US transmitting the frame
+    uint8_t  next             = 0;         // the slot the next entry reuses
+
+    // RX: true when this frame was already handled — drop it — and `ours_out` says whether it was our own frame
+    // heard back. False when it is new; the entry is then stored as "not ours", so a duplicate flood copy is
+    // caught the second time. A fingerprint of 0 is never matched (sha256 returning zero is not a frame).
+    bool seen(uint32_t f, bool* ours_out);
+
+    // TX: register a frame we are about to transmit, BEFORE it goes out. `ours` is what makes the echo
+    // distinguishable from a peer's duplicate.
+    void noteOurs(uint32_t f);
+
+    void reset();
+};
 
 }  // namespace meshcore

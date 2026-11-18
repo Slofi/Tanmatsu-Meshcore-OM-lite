@@ -64,6 +64,31 @@ struct SeenPoint {
 
 SeenPoint historyReadSeen(const uint8_t* data, size_t len);
 
+// ---- S513/EST-441: putting ONE restored thread into the store ------------------------------------------------
+// The per-thread half of `sdhistory::restoreDmThreads()`, here so the host test pins the rule instead of the FAT
+// call around it. The rule: a thread restored from `dm-<8 hex>.log` is a THREAD, never a contact. A contact is
+// born from a verified advert only, so this function does not call contactsUpsert() and cannot invent a row.
+//
+// What it does do:
+//   · names the thread from its own records (the first INCOMING record carries the peer's name); with none, the
+//     8-hex prefix the caller built from the file name;
+//   · if the key is prefix-only, looks for the ONE full-key contact already in the table (an NVS row that came
+//     from an advert) whose key starts with those four bytes and rebinds the thread's messages to that full key.
+//     None, or two with the same prefix, means it stays orphaned — guessing here is how v41 got it wrong;
+//   · pushes the messages oldest first and gives the contact row (when there is one) the seen point and the next
+//     log id. A record's `log_id` is the previous boot's; `seq` is dmPush's, and the Meta record names log ids.
+struct RestoredDm {
+    size_t   messages = 0;      // pushed into the ring
+    uint32_t max_log_id = 0;
+    uint32_t seen_seq = 0;      // the seq of the newest record the Meta point covers (0 = nothing read)
+    bool     seen_found = false;
+    bool     rebound = false;   // the prefix was matched to one full-key contact
+    char     label[kNameBytes] = {0};   // what the thread is called until an advert renames it
+};
+
+size_t dmRestoreThread(DmRing& ring, ContactStore& contacts, const uint8_t pub[32], const DmMessage* recs,
+                       size_t n, const SeenPoint& sp, RestoredDm* out);
+
 // The file name for one channel, in the L2's shape: "ch-<hash 2 hex>-<sanitised name>.log". The hash is what
 // identifies the channel; the name is a readable convenience and may change without breaking the history.
 void historyFileName(uint8_t hash, const char* name, char* out, size_t cap);
