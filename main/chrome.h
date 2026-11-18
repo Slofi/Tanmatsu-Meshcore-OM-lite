@@ -33,5 +33,14 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
 // The five symbol keys as vectors (BRIEF § 5). kind: 0 triangle, 1 square, 2 circle, 3 cloud, 4 diamond.
 void drawSymbolSigil(Screen& s, int kind, int cx, int cy, int r, uint16_t c, bool active);
 
+// The rounded card style of S513/EST-430: the Chat list's cards and now the start menu's three app cards.
+// `drawRoundedRect` is a per-row span fill with an integer corner (no float, no allocation); `drawCardPlate`
+// draws the outline as the outer plate and the fill inside it, so the ring follows the corners exactly
+// (thickness 1 = a resting card, 2 = the gold focus outline). One implementation, so the two card pages
+// cannot drift apart.
+void drawRoundedRect(Screen& s, int x, int y, int w, int h, int r, uint16_t c);
+void drawCardPlate(Screen& s, int x, int y, int w, int h, int radius, int thickness, uint16_t outline,
+                   uint16_t fill);
+
 }  // namespace ui
 }  // namespace om

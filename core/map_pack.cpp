@@ -88,6 +88,23 @@ uint32_t tileXForLon(double lon, int z) {
     return (uint32_t)v;
 }
 
+int64_t worldPxXForLon(double lon, int z) {
+    const double n = (double)(1u << z) * 256.0;
+    double       v = (lon + 180.0) / 360.0 * n;
+    if (v < 0) v = 0;
+    if (v >= n) v = n - 1;
+    return (int64_t)v;
+}
+
+int64_t worldPxYForLat(double lat, int z) {
+    const double n   = (double)(1u << z) * 256.0;
+    const double rad = lat * 3.14159265358979323846 / 180.0;
+    double       v   = (1.0 - log(tan(rad) + 1.0 / cos(rad)) / 3.14159265358979323846) / 2.0 * n;
+    if (v < 0) v = 0;
+    if (v >= n) v = n - 1;
+    return (int64_t)v;
+}
+
 uint32_t tileYForLat(double lat, int z) {
     const double n     = (double)(1u << z);
     const double rad   = lat * 3.14159265358979323846 / 180.0;

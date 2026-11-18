@@ -69,6 +69,41 @@ void drawSymbolSigil(Screen& s, int kind, int cx, int cy, int r, uint16_t c, boo
     (void)active;
 }
 
+void drawRoundedRect(Screen& s, int x, int y, int w, int h, int r, uint16_t c) {
+    if (w <= 0 || h <= 0) return;
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
+    if (r <= 0) {
+        s.fillRect(x, y, w, h, c);
+        return;
+    }
+    for (int row = 0; row < h; row++) {
+        int dy;
+        if (row < r)
+            dy = r - row;                 // top corners: distance from the corner circle's centre
+        else if (row >= h - r)
+            dy = row - (h - r - 1);
+        else {
+            s.fillRect(x, y + row, w, 1, c);
+            continue;
+        }
+        int v = r * r - dy * dy;
+        if (v < 0) v = 0;
+        int root = 0;
+        while ((root + 1) * (root + 1) <= v) ++root;
+        const int inset = r - root;
+        if (w - 2 * inset > 0) s.fillRect(x + inset, y + row, w - 2 * inset, 1, c);
+    }
+}
+
+void drawCardPlate(Screen& s, int x, int y, int w, int h, int radius, int thickness, uint16_t outline,
+                   uint16_t fill) {
+    drawRoundedRect(s, x, y, w, h, radius, outline);
+    if (thickness > 0 && h - 2 * thickness > 0)
+        drawRoundedRect(s, x + thickness, y + thickness, w - 2 * thickness, h - 2 * thickness,
+                        radius - thickness, fill);
+}
+
 void drawStatusBar(Screen& s, const char* clock, int battery_pct, bool charging) {
     const int W = kTmW;
     s.fillRect(0, 0, W, kTmStatusH, kBar);

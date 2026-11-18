@@ -15,50 +15,13 @@ namespace ui {
 namespace {
 
 // ---- rounded plates (S513/EST-430) ------------------------------------------------------------------------
-// A card is a rounded rectangle. `Screen` has no rounded fill, and the card is drawn thousands of times a session,
-// so this is a per-row span fill with an integer corner: for a corner row `dy` from the corner circle's centre the
-// row is inset by `r - floor(sqrt(r*r - dy*dy))`. No float, no allocation, no clip list — one fillRect per row.
-void fillRound(Screen& s, int x, int y, int w, int h, int r, uint16_t c) {
-    if (w <= 0 || h <= 0) return;
-    if (r > w / 2) r = w / 2;
-    if (r > h / 2) r = h / 2;
-    if (r <= 0) {
-        s.fillRect(x, y, w, h, c);
-        return;
-    }
-    for (int row = 0; row < h; row++) {
-        int dy;
-        if (row < r)
-            dy = r - row;                 // top corners: distance from the circle's centre
-        else if (row >= h - r)
-            dy = row - (h - r - 1);
-        else {
-            s.fillRect(x, y + row, w, 1, c);
-            continue;
-        }
-        int v = r * r - dy * dy;
-        if (v < 0) v = 0;
-        int root = 0;
-        while ((root + 1) * (root + 1) <= v) ++root;
-        const int inset = r - root;
-        if (w - 2 * inset > 0) s.fillRect(x + inset, y + row, w - 2 * inset, 1, c);
-    }
-}
-
-// A card: the outline colour is the plate, the fill is drawn inside it, so the ring follows the rounded corners
-// exactly (the app's focus ring is 2 px of kAcc, the resting card is 1 px of kLine).
-void drawCard(Screen& s, int x, int y, int w, int h, int thickness, uint16_t outline, uint16_t fill) {
-    fillRound(s, x, y, w, h, kTmCardRadius, outline);
-    if (thickness > 0 && h - 2 * thickness > 0)
-        fillRound(s, x + thickness, y + thickness, w - 2 * thickness, h - 2 * thickness, kTmCardRadius - thickness,
-                  fill);
-}
-
+// The rounded fill and the card plate now live in chrome.cpp (drawRoundedRect / drawCardPlate), because the
+// start menu's three app cards (S513/EST-432) draw the same style: one implementation, not two that can drift.
 // One card of the list: name (left, clipped), unread badge (right, only when > 0), then the newest message as
 // "sender: text" with its local HH:MM on the right. Both lines stay inside the card's padding.
 void drawChatCard(Screen& s, const ChatRowView& r, const mc::CardRect& rect, bool focused) {
-    drawCard(s, rect.x, rect.y, rect.w, rect.h, focused ? kTmRingW : 1,
-             focused ? (uint16_t)kAcc : (uint16_t)kLine, focused ? (uint16_t)kSelBg : (uint16_t)kPanel);
+    drawCardPlate(s, rect.x, rect.y, rect.w, rect.h, kTmCardRadius, focused ? kTmRingW : 1,
+                  focused ? (uint16_t)kAcc : (uint16_t)kLine, focused ? (uint16_t)kSelBg : (uint16_t)kPanel);
 
     const int pad  = 12;
     const int x0   = rect.x + pad;

@@ -34,6 +34,7 @@ extern "C" {
 
 #include "bootloader_common.h"   // bootloader_common_get_rtc_retain_mem() (AppFS boot select lives there)
 #include "core.h"
+#include "menu_cards.h"          // S513/EST-432: the start menu's pure key decisions
 #include "font.h"
 #include "launcher_page.h"
 #include "chat_page.h"           // step 4: the Chat page
@@ -271,6 +272,14 @@ tm::Module g_om_lite = {
     nullptr,              // onKey
 };
 
+// S513/EST-432: the two LATER modules are real registry rows with available = false, so the menu's LATER
+// chip comes from the registry and not from a string in the shell. They own nothing, have no pages and no
+// hooks: listed, never startable, and neither app is built.
+tm::Module g_ops_toc = {"ops-toc", "OPS-TOC", "field ops map & checklists", 0, false, tm::Resource::None,
+                        nullptr, nullptr, nullptr, nullptr, nullptr};
+tm::Module g_mesh_torry = {"mesh-torry", "Mesh-Torry", "the territory game", 0, false, tm::Resource::None,
+                           nullptr, nullptr, nullptr, nullptr, nullptr};
+
 // --------------------------------------------------------------------------------------------- helpers
 void batteryPoll() {
     g_batt = {};
@@ -504,44 +513,54 @@ extern "C" void app_main(void) {
     // ---- the core: one owner, the registry, the router
     static tm::Core core;
     core.registry().add(g_om_lite);
-    core.start("om-lite");   // the Launcher shows it running, like the approved preview
+    core.registry().add(g_ops_toc);       // LATER: listed, never startable
+    core.registry().add(g_mesh_torry);    // LATER: listed, never startable
+    core.start("om-lite");   // the menu shows it running, like the approved preview
+    int64_t om_started_us = esp_timer_get_time();
 
-    // ---- the Launcher's view (rows + detail from the registry, not hardcoded strings)
-    ModuleRow rows[3] = {
-        {"OM Lite", "mesh companion · 4 pages", "RUNNING", true, true},
-        {"Mesh-Torry", "game · Wi-Fi · later", "LATER", false, false},
-        {"OPS-TOC Lite", "ops console · later", "LATER", false, false},
+    // ---- the start menu's three app cards (S513/EST-432), Filip's names and order. `running` is kept in
+    // step with the registry by the key branch below; `memory`/`uptime` are the two numbers the old detail
+    // pane carried.
+    char om_mem[48]    = "";
+    char om_uptime[32] = "";
+    MenuCard cards[3] = {
+        {"OM Lite", "mesh companion", true, true, om_mem, om_uptime, "radio 868 · MeshCore session · SD history"},
+        {"OPS-TOC", "field ops map & checklists", false, false, nullptr, nullptr,
+         "not built yet"},
+        {"Mesh-Torry", "the territory game", false, false, nullptr, nullptr,
+         "not built yet"},
     };
-    int focused = 0;
+    const char* const kCardIds[3]  = {"om-lite", "ops-toc", "mesh-torry"};
+    const tm::Page    kCardHome[3] = {tm::Page::Nodes, tm::Page::Launcher, tm::Page::Launcher};
+    int               menu_focus   = 0;   // OM Lite, as Filip wants the focus to start
+
+    auto refreshOmNumbers = [&]() {
+        const size_t bytes = core.alloc().stats("om-lite").bytes;
+        snprintf(om_mem, sizeof(om_mem), "%.1f KB requested", (double)bytes / 1024.0);
+        if (!cards[0].running || om_started_us < 0) {
+            snprintf(om_uptime, sizeof(om_uptime), "up < 1 m");
+            return;
+        }
+        const int64_t secs = (esp_timer_get_time() - om_started_us) / 1000000;
+        if (secs < 60) snprintf(om_uptime, sizeof(om_uptime), "up < 1 m");
+        else if (secs < 3600) snprintf(om_uptime, sizeof(om_uptime), "up %d m", (int)(secs / 60));
+        else snprintf(om_uptime, sizeof(om_uptime), "up %d h %d m", (int)(secs / 3600), (int)((secs / 60) % 60));
+    };
+    refreshOmNumbers();
+
+    // S513/EST-432: the head's right slot can be taken by a short notice (the EST-428 pattern) — Enter on a
+    // LATER card says why nothing happened, for three seconds, and then the core line returns.
+    char    launcher_notice[64]      = {0};
+    int64_t launcher_notice_until_us = 0;
 
     char battery[8];
     bool charging = false;
     batteryStrings(battery, sizeof(battery), &charging);
 
-    ModuleDetail detail = {};
-    detail.title        = "OM Lite";
-    detail.meta         = "started just now";
-    detail.kv[0][0]     = "STATE";
-    detail.kv[0][1]     = "running";
-    detail.kv[1][0]     = "MEMORY";
-    detail.kv[1][1]     = "4.0 KB requested";
-    detail.kv[2][0]     = "OWNS";
-    // What the module actually owns, in the mesh's own numbers (step 3a started the radio above).
-    detail.kv[2][1]     = g_sd_mounted ? "radio 869.618 SF8 · SD mounted" : "radio 869.618 SF8 · no SD card";
-    // step 3b: how many MeshCore channels this device can actually read
-    static char owns[96];
-    snprintf(owns, sizeof(owns), "%s · %s", detail.kv[2][1], om::mc::statusText());
-    detail.kv[2][1]     = owns;
-    detail.kv[3][0]     = "HISTORY";
-    detail.kv[3][1]     = "not yet (step 5)";
-    detail.note         = "Stop ends the module's tasks and frees its memory; the core and the radio keep "
-                          "running, so no restart is needed.";
-
     LauncherView view;
-    view.rows       = rows;
-    view.row_count  = 3;
-    view.focused    = 0;
-    view.detail     = &detail;
+    view.cards      = cards;
+    view.card_count = 3;
+    view.focused    = menu_focus;
     view.right_head = om::radio::statusText();   // step 3a: live, rebuilt every 2 s in the loop
     snprintf(view.clock, sizeof(view.clock), "%s", om::time_source::hhmm());   // S502: real time or "--:--"
     view.battery_pct = g_batt.battery_available ? (int)(g_batt.remaining_percentage + 0.5f) : -1;
@@ -744,12 +763,12 @@ extern "C" void app_main(void) {
             mv.problem = "No card: the map packs live on the SD card.";
         } else {
             if (map_wx < 0 || map_wy < 0) {
-                // First draw: centre on central Slovenia, in world pixels. The bounds of the data are wider than the
-                // screen, so clamping here only matters if the pack covers less than a screen at this zoom.
-                const uint32_t tx = om::map::tileXForLon(14.99, map_z);
-                const uint32_t ty = om::map::tileYForLat(46.15, map_z);
-                map_wx = (int64_t)tx * om::map::kTilePx + om::map::kTilePx / 2 - om::ui::kMapAreaW / 2;
-                map_wy = (int64_t)ty * om::map::kTilePx + om::map::kTilePx / 2 - om::ui::kMapAreaH / 2;
+                // First draw: centre ON Ljubljana (Presernov trg, 46.0514 N 14.5060 E), Filip's ask in S513. It used
+                // to centre the TILE containing 46.15 N 14.99 E (near Litija), so the map opened somewhere else and
+                // up to half a tile off. The bounds of the data are wider than the screen, so clamping here only
+                // matters if the pack covers less than a screen at this zoom.
+                map_wx = om::map::worldPxXForLon(14.5060, map_z) - om::ui::kMapAreaW / 2;
+                map_wy = om::map::worldPxYForLat(46.0514, map_z) - om::ui::kMapAreaH / 2;
                 om::map::clampWorldPixel(map_z, &map_wx, &map_wy, om::ui::kMapAreaW, om::ui::kMapAreaH);
             }
             mv.wx = map_wx;
@@ -925,71 +944,79 @@ extern "C" void app_main(void) {
                         core.handleKey(k);   // the core's route: a module never sees a symbol key
                         dirty = true;
                     } else if (page_now == tm::Page::Launcher) {
-                        // 'a' still forces an advert early (the Nodes page points at it when its list is
-                        // empty). The three-hour schedule needs no key; the composer replaced the old 't'.
+                        // S513/EST-432: the menu is three app cards. The S499 two-area rule (Enter -> the
+                        // actions, Esc back to the list) is deliberately RETIRED here: there is no second area
+                        // any more, so Enter opens the focused app and Esc leaves the app. The exit path below
+                        // is S501's, untouched.
                         if (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD &&
                             ev.args_keyboard.ascii == 'a') {
-                            om::mc::queueAdvert();
-                        } else
-                        // Filip's focus rule (S499, on glass): the page has TWO areas. Enter on a row takes the
-                        // focus to the actions on the right, Esc brings it back to the list, and only from the
-                        // list does Esc leave the app. Inside the actions, Left/Right pick Open or Stop.
-                        if (k == tm::Key::Esc) {
-                            if (view.focus_actions) {
-                                view.focus_actions = false;
-                                dirty              = true;
-                            } else {
-                                ESP_LOGI(TAG, "leaving to the stock launcher");
-                                leaveToLauncher();
-                            }
-                        } else if (core.handleKey(k)) {
-                            dirty = true;
-                        } else if (view.focus_actions) {
-                            if (k == tm::Key::Left) {
-                                view.action_index = 0;
-                                dirty             = true;
-                            } else if (k == tm::Key::Right) {
-                                view.action_index = 1;
-                                dirty             = true;
-                            } else if (k == tm::Key::Enter) {
-                                const char* id  = "om-lite";
-                                ModuleRow&  row = rows[focused];
-                                if (view.action_index == 0) {          // Open
-                                    if (!row.available) {
-                                        ESP_LOGW(TAG, "open: %s is not available yet", row.name);
-                                    } else if (!row.running) {
-                                        tm::StartResult r = core.start(id);
-                                        ESP_LOGI(TAG, "open -> start %s: code=%d busy=%s", id, (int)r.code,
-                                                 tm::resource_name(r.busy));
-                                        row.running = (bool)r;
-                                        row.badge   = (bool)r ? "RUNNING" : "LATER";
-                                    } else {
-                                        ESP_LOGI(TAG, "open: %s is running; its pages arrive in steps 3-7", id);
-                                    }
-                                } else {                               // Stop
-                                    if (row.running) {
-                                        tm::StopResult r = core.stop(id);
-                                        char           leak[96];
-                                        core.leakLine(leak, sizeof(leak));
-                                        ESP_LOGI(TAG, "stop %s: code=%d leaked=%s %s", id, (int)r.code,
-                                                 r.leaked ? r.leaked : "none", leak);
-                                        row.running = false;
-                                        row.badge   = "STOPPED";
+                            om::mc::queueAdvert();   // the advert key still works on the menu
+                        } else if (k == tm::Key::Esc) {
+                            ESP_LOGI(TAG, "leaving to the stock launcher");
+                            leaveToLauncher();
+                        } else if (k == tm::Key::Left || k == tm::Key::Right || k == tm::Key::Up ||
+                                   k == tm::Key::Down) {
+                            // Left/Right (Up/Down aliases) move between the cards; core/menu_cards clamps at
+                            // both ends, so there is no wrap.
+                            const tm::MenuMove move = (k == tm::Key::Left)     ? tm::MenuMove::Left
+                                                      : (k == tm::Key::Right) ? tm::MenuMove::Right
+                                                      : (k == tm::Key::Up)    ? tm::MenuMove::Up
+                                                                              : tm::MenuMove::Down;
+                            menu_focus = tm::menuFocusMove(menu_focus, move, view.card_count);
+                            dirty      = true;
+                        } else if (k == tm::Key::Enter) {
+                            const tm::MenuAction act = tm::menuEnterAction(cards[menu_focus].available);
+                            if (act == tm::MenuAction::Open) {
+                                if (!cards[menu_focus].running) {
+                                    // Enter OPENS: a stopped app is started first, then the router goes to its
+                                    // home page (OM Lite: Nodes). Only OM Lite is available today.
+                                    const tm::StartResult r = core.start(kCardIds[menu_focus]);
+                                    ESP_LOGI(TAG, "open -> start %s: code=%d busy=%s", kCardIds[menu_focus],
+                                             (int)r.code, tm::resource_name(r.busy));
+                                    if ((bool)r) {
+                                        cards[menu_focus].running = true;
+                                        om_started_us             = esp_timer_get_time();
+                                        refreshOmNumbers();
                                     }
                                 }
+                                if (cards[menu_focus].running) {
+                                    core.goPage(kCardHome[menu_focus]);
+                                    dirty = true;
+                                }
+                            } else if (act == tm::MenuAction::ComingLater) {
+                                // A LATER card changes nothing visible except a three-second notice in the
+                                // head's right slot (the EST-428 pattern: main.cpp only passes it while live).
+                                snprintf(launcher_notice, sizeof(launcher_notice), "%s: coming later",
+                                         cards[menu_focus].name);
+                                launcher_notice_until_us = esp_timer_get_time() + 3 * 1000 * 1000;
+                                ESP_LOGI(TAG, "open: %s is not available yet", cards[menu_focus].name);
                                 dirty = true;
                             }
-                        } else if (k == tm::Key::Up && focused > 0) {
-                            focused--;
-                            dirty = true;
-                        } else if (k == tm::Key::Down && focused < view.row_count - 1) {
-                            focused++;
-                            dirty = true;
-                        } else if (k == tm::Key::Enter) {
-                            view.focus_actions = true;               // into the actions on the right
-                            view.action_index  = 0;
-                            dirty              = true;
+                        } else if (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD &&
+                                   ev.args_keyboard.ascii == 's') {
+                            // s STOPS the focused running app: no confirm, it is reversible. The leak line
+                            // is logged exactly as before.
+                            const tm::MenuAction act =
+                                tm::menuStopAction(cards[menu_focus].available, cards[menu_focus].running);
+                            if (act == tm::MenuAction::Stop) {
+                                const tm::StopResult r = core.stop(kCardIds[menu_focus]);
+                                char                 leak[96];
+                                core.leakLine(leak, sizeof(leak));
+                                ESP_LOGI(TAG, "stop %s: code=%d leaked=%s %s", kCardIds[menu_focus], (int)r.code,
+                                         r.leaked ? r.leaked : "none", leak);
+                                cards[menu_focus].running = false;
+                                refreshOmNumbers();
+                                dirty = true;
+                            }
+                        } else if (core.handleKey(k)) {
+                            dirty = true;   // a non-symbol key a module claimed (none on the menu today)
                         }
+                    } else if (page_now == tm::Page::Nodes && k == tm::Key::Char &&
+                               ev.type == INPUT_EVENT_TYPE_KEYBOARD && ev.args_keyboard.ascii == 'a') {
+                        // S513/EST-432: the advert key is on the Nodes page too (its empty-list text points at
+                        // it), so the page that shows who was heard can ask for a fresh advert without leaving.
+                        om::mc::queueAdvert();
+                        dirty = true;
                     } else if (k == tm::Key::Esc) {
                         core.handleKey(k);   // back one page through the router's history
                         dirty = true;
@@ -1020,13 +1047,18 @@ extern "C" void app_main(void) {
             snprintf(view.clock, sizeof(view.clock), "%s", om::time_source::hhmm());
             dirty = true;
             core.tick();
+            refreshOmNumbers();   // the running card's memory + uptime, refreshed with the rest of the chrome
         }
 
         if (dirty) {
             switch (core.router().current()) {
                 case tm::Page::Launcher:
-                    view.focused    = focused;
-                    detail.kv[0][1] = rows[0].running ? "running" : "stopped";
+                    view.focused = menu_focus;
+                    // The notice is only in the view while it is live (EST-428), so the drawer needs no clock:
+                    // when it lapses, the head's right slot is the core line again.
+                    view.notice = (launcher_notice[0] != '\0' && esp_timer_get_time() < launcher_notice_until_us)
+                                      ? launcher_notice
+                                      : nullptr;
                     drawLauncher(g_screen, view);
                     break;
                 case tm::Page::Nodes:

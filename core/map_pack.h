@@ -59,6 +59,11 @@ int findTile(uint32_t count, RecordReader read, void* ctx, uint8_t z, uint32_t x
 // Slippy-map tile coordinates for a coordinate, in degrees (lon positive east, lat positive north).
 uint32_t tileXForLon(double lon, int z);
 uint32_t tileYForLat(double lat, int z);
+// The same, as a WORLD PIXEL (256 px tiles): where the coordinate itself falls, not the corner of its tile. Used to
+// centre the map on a point (S513, Claude): centring on the tile instead put the view up to half a tile off,
+// which at z9 is about 0.35 degrees.
+int64_t worldPxXForLon(double lon, int z);
+int64_t worldPxYForLat(double lat, int z);
 // The inverse, for the centre of tile (x, y): the coordinate the tile sits on.
 double lonForTileX(uint32_t x, int z);
 double latForTileY(uint32_t y, int z);

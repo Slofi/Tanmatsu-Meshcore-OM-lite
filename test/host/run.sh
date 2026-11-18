@@ -17,10 +17,11 @@ LAYOUT="$(mktemp /tmp/tm-layout.XXXXXX)"
 MAP="$(mktemp /tmp/tm-map.XXXXXX)"
 TXQ="$(mktemp /tmp/tm-txq.XXXXXX)"
 CARDS="$(mktemp /tmp/tm-cards.XXXXXX)"
+MENU="$(mktemp /tmp/tm-menu.XXXXXX)"
 MCASAN="$(mktemp /tmp/tm-mc-asan.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MCASAN"; rm -rf "$ED" "$EDASAN"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$MCASAN"; rm -rf "$ED" "$EDASAN"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -113,3 +114,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
     ../../core/chat_cards.cpp \
     -o "$CARDS"
 "$CARDS"
+
+# The start menu's rules (S513/EST-432): three app cards, focus clamped at both ends, Enter on an available
+# card vs a LATER one, and s only on a running card. The panel has no second area any more (the S499 two-area
+# rule is retired), so these three decisions are the whole key behaviour worth pinning.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_menu_cards.cpp \
+    ../../core/menu_cards.cpp \
+    -o "$MENU"
+"$MENU"

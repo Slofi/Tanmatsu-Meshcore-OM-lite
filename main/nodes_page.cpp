@@ -203,8 +203,9 @@ void drawNodes(Screen& s, const NodesView& v) {
         drawText(s, Face::Body, rx, kv_y + 48, "reply-path slice: no button that does nothing.", kDimmer);
     }
 
-    static const HintItem hints[] = {{"up/dn", "move"}, {"esc", "back"}};
-    drawHintBar(s, tm::Page::Nodes, hints, 2);
+    // S513/EST-432: the advert key works on this page too, so it is a hint and not only the empty-list line.
+    static const HintItem hints[] = {{"up/dn", "move"}, {"a", "advert"}, {"esc", "back"}};
+    drawHintBar(s, tm::Page::Nodes, hints, 3);
 }
 
 }  // namespace ui

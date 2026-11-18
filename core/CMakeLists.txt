@@ -20,6 +20,9 @@ idf_component_register(
          # S513/EST-430: the Chat list's two-column card grid — the rects, the focus moves and the scroll that keeps
          # the focused card visible. Pure arithmetic on the page's box, so the host tests pin the panel's numbers.
          "chat_cards.cpp"
+         # S513/EST-432: the start menu's three app cards — focus clamped at both ends, Enter on available vs
+         # LATER, s only on a running card. The panel's whole key behaviour, host-tested.
+         "menu_cards.cpp"
          # The map pack rules (S503, step 6): record layout, binary search, zoom -> pack, tile coordinates.
          "map_pack.cpp"
          # The Map page arithmetic (S503): view tiles, panning, zooming, and the decoded-tile cache.

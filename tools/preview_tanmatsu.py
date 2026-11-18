@@ -82,6 +82,9 @@ TM = dict(
     # The Chat list's cards (S513/EST-430). These mirror main/chat_page.h kTmCard* exactly; core/chat_cards.cpp
     # turns them into rects and the device draws at them, so the preview and the panel must not drift.
     card_gutter=16, card_header_h=30, card_h=68, card_gap=10, card_radius=6,
+    # The start menu's three app cards (S513/EST-432). They mirror main/launcher_page.h kTmMenu* exactly:
+    # the same 16 px gutter and 6 px radius as the Chat cards, one large plate per app.
+    menu_gap=16, menu_card_h=232, menu_top=22, menu_radius=6,
 )
 
 SIGILS = ('triangle', 'square', 'circle', 'cloud', 'diamond')   # BRIEF § 5, Filip's names
@@ -1095,8 +1098,87 @@ def settings():
     return save(img, '2026-11-13-settings.png')
 
 
-RENDERERS = dict(launcher=launcher, nodes=nodes, chat=chat, chat2=chat_cards, map=map_page, rptr=rptr,
-                 settings=settings)
+# ------------------------------------------------------------------------------------------- start menu
+# The start screen (S513/EST-432): three app cards, one per module, in Filip's names and order. Invented
+# numbers, as everywhere in this file: the memory and uptime are placeholders, not a device reading.
+MENU_CARDS = [
+    dict(name='OM Lite', desc='mesh companion', state='RUNNING',
+         memory='4.0 KB requested', uptime='up 1 h 12 m'),
+    dict(name='OPS-TOC', desc='field ops map & checklists', state='LATER'),
+    dict(name='Mesh-Torry', desc='the territory game', state='LATER'),
+]
+MENU_OWNS = {
+    'OM Lite': 'radio 868 · MeshCore session · SD history',
+    'OPS-TOC': 'field checklists · map pins · no GPS',
+    'Mesh-Torry': 'the territory game · Wi-Fi · later',
+}
+
+
+def menu():
+    """The start menu: three large app cards side by side, the focused one ringed in gold.
+
+    Same rounded-card style as the Chat list (S513/EST-430): kPanel + 1 px kLine when resting, kSelBg + 2 px
+    kAcc when focused, radius 6. Each card: the name large, one dim description, the state chip, then for the
+    running card its memory and uptime (the numbers the old detail pane carried). The focused card's own line
+    sits under the row; the hint bar shows the new keys.
+    """
+    img, d = new_screen()
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    status_bar(d)
+
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Tanmatsu', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    text(d, (W - pad, y + TM['head_h'] // 2), 'core ready · radio free', font(FONT_MONO, TM['f_meta']),
+         P['Dim'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+
+    top = y + TM['head_h'] + TM['menu_top']
+    gap = TM['menu_gap']
+    cw = (W - 2 * pad - 2 * gap) // 3
+    ch = TM['menu_card_h']
+    for i, card in enumerate(MENU_CARDS):
+        x = pad + i * (cw + gap)
+        focused = (i == 0)
+        if focused:
+            plate(d, [x, top, x + cw - 1, top + ch - 1], P['SelBg'], P['Acc'],
+                  r=TM['menu_radius'], w=TM['ring_w'])
+            name_col = P['AccInk']
+        else:
+            plate(d, [x, top, x + cw - 1, top + ch - 1], P['Panel'], P['Line'],
+                  r=TM['menu_radius'], w=1)
+            name_col = P['Ink']
+
+        ix = x + 16
+        text(d, (ix, top + 14), card['name'], font(FONT_SANS, TM['f_title']), name_col)
+        text(d, (ix, top + 52), card['desc'], font(FONT_MONO, TM['f_meta']), P['Dim'])
+
+        running = card['state'] == 'RUNNING'
+        later = card['state'] == 'LATER'
+        fc = font(FONT_MONO, TM['f_label'])
+        bw = tw(fc, card['state']) + 14
+        plate(d, [ix, top + 84, ix + bw, top + 106], P['Panel2'], P['Line'], r=3)
+        chip_col = P['Green'] if running else (P['Dimmer'] if later else P['Dim'])
+        text(d, (ix + bw / 2, top + 95), card['state'], fc, chip_col, anchor='mm')
+
+        if running:
+            fm = font(FONT_MONO, TM['f_meta'])
+            text(d, (ix, top + 128), card['memory'], fm, P['Dim'])
+            text(d, (ix, top + 150), card['uptime'], fm, P['Dim'])
+        elif later:
+            text(d, (ix, top + 132), 'coming later', font(FONT_MONO, TM['f_meta']), P['Dim'])
+        else:
+            text(d, (ix, top + 132), 'stopped · ↵ starts it', font(FONT_MONO, TM['f_meta']), P['Dim'])
+
+    # one short dim line about the focused card: what it owns, in the mesh's own numbers
+    text(d, (pad, top + ch + 28), MENU_OWNS[MENU_CARDS[0]['name']],
+         font(FONT_MONO, TM['f_meta']), P['Dim'])
+
+    hint_bar(d, 'home', [('←→', 'select'), ('↵', 'open'), ('s', 'stop'), ('esc', 'quit')])
+    return save(img, '2026-11-18-menu-cards.png')
+
+
+RENDERERS = dict(launcher=launcher, menu=menu, nodes=nodes, chat=chat, chat2=chat_cards, map=map_page,
+                 rptr=rptr, settings=settings)
 
 
 def main(argv):

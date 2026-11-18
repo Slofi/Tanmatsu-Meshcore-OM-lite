@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "launcher_page.h"
 
-#include <stdio.h>
-#include <string.h>
+#include <stdint.h>
 
 #include "chrome.h"
 #include "tm_theme.h"
@@ -37,116 +36,93 @@ void drawTextCentred(Screen& s, Face face, int cx, int baseline, const char* utf
     f->draw(s.fb(), s.width(), s.height(), cx - f->textWidth(utf8) / 2, baseline, utf8, colour);
 }
 
+namespace {
+
+// The state chip's word and colour: the one place a card's two booleans become the LATER / STOPPED /
+// RUNNING the panel shows, so the chip can never say RUNNING beside a stopped module.
+const char* chipText(const MenuCard& c) {
+    if (!c.available) return "LATER";
+    return c.running ? "RUNNING" : "STOPPED";
+}
+
+uint16_t chipColour(const MenuCard& c) {
+    if (!c.available) return kDimmer;
+    return c.running ? (uint16_t)kGreen : (uint16_t)kDim;
+}
+
+}  // namespace
+
 // -------------------------------------------------------------------------------------------- frame
 void drawLauncher(Screen& s, const LauncherView& v) {
-    const int W = kTmW, H = kTmH;
+    const int W = kTmW;
     s.clear((uint16_t)kBg);
 
     // ---- status bar (the L2's: clock left, radio/wifi/battery/gear right) — shared with the other pages
     drawStatusBar(s, v.clock, v.battery_pct, v.charging);
 
-    // ---- page title row
-    const int head_top = kTmStatusH;
-    drawText(s, Face::Title, kTmPad, textBaseline(s, Face::Title, head_top, kTmHeadH), "Launcher", kInk);
-    drawTextRight(s, Face::Meta, W - kTmPad, textBaseline(s, Face::Meta, head_top, kTmHeadH), v.right_head,
-                  kDimmer);
-    s.hline(kTmPad, W - kTmPad, head_top + kTmHeadH, kLine);
+    // ---- page head: the app's name, the core line on the right. A live notice owns that right slot for
+    // its three seconds (the EST-428 pattern), so the core line returns by itself.
+    const char* right = (v.notice != nullptr && v.notice[0] != '\0') ? v.notice : v.right_head;
+    const int   head_bot = drawPageHead(s, "Tanmatsu", right);
 
-    // ---- left pane: the modules
-    const int list_x0 = kTmPad;
-    const int list_x1 = kTmPad + kTmListW;
-    const int work_top = head_top + kTmHeadH;
-    const int work_bot = H - kTmHintH;
-    char      count[32];
-    snprintf(count, sizeof(count), "%d · %d running", v.row_count, 1);
-    drawText(s, Face::Meta, list_x0, textBaseline(s, Face::Meta, work_top, 26) - 2, "MODULES", kDimmer);
-    drawTextRight(s, Face::Hint, list_x1 - kTmRingInset, textBaseline(s, Face::Meta, work_top, 26) - 2, count,
-                  kDimmer);
+    // ---- three equal cards from the work box; the odd leftover pixel stays in a gap
+    int count = v.card_count;
+    if (count < 0) count = 0;
+    if (count > 3) count = 3;
+    int focused = v.focused;
+    if (focused < 0) focused = 0;
+    if (count > 0 && focused >= count) focused = count - 1;
 
-    int y = work_top + 30;
-    for (int i = 0; i < v.row_count && y + kTmRowH <= work_bot - 8; i++) {
-        const ModuleRow& r  = v.rows[i];
-        const bool       f  = (i == v.focused);
-        const uint16_t   ink = r.available ? kInk : kDimmer;
-        if (f) {
-            // the L2's selected band; the 2 px gold ring marks WHICH AREA has the focus (Filip, S499:
-            // Enter takes it to the actions, Esc brings it back), so with the actions focused the band
-            // stays but the ring goes plain.
-            const int right = list_x1 - kTmRingInset;
-            s.fillRect(list_x0, y, right - list_x0, kTmRowH - 2, kSelBg);
-            if (!v.focus_actions)
-                s.frame(list_x0, y, right - list_x0, kTmRowH - 2, kTmRingW, kAcc);
-            else
-                s.frame(list_x0, y, right - list_x0, kTmRowH - 2, 1, kLine);
+    const int top = head_bot + kTmMenuTop;
+    const int cw  = (W - 2 * kTmPad - (count > 1 ? (count - 1) * kTmMenuGap : 0)) / (count > 0 ? count : 1);
+
+    for (int i = 0; i < count; i++) {
+        const MenuCard& c = v.cards[i];
+        const int       x = kTmPad + i * (cw + kTmMenuGap);
+        const bool      f = (i == focused);
+        // resting card: kPanel plate + 1 px kLine; focused: kSelBg plate + the 2 px gold ring (the Chat cards'
+        // exact recipe, from chrome.cpp so the two pages share one implementation)
+        drawCardPlate(s, x, top, cw, kTmMenuCardH, kTmMenuRadius, f ? (int)kTmRingW : 1,
+                      f ? (uint16_t)kAcc : (uint16_t)kLine, f ? (uint16_t)kSelBg : (uint16_t)kPanel);
+
+        const int ix = x + 16;
+        drawText(s, Face::Title, ix, textBaseline(s, Face::Title, top + 10, 34), c.name,
+                 f ? (uint16_t)kAccInk : (uint16_t)kInk);
+        drawText(s, Face::Body, ix, textBaseline(s, Face::Body, top + 50, 24), c.sub, kDim);
+
+        // state chip: the existing chip style (Panel2 plate, 1 px kLine, mono caps), green + line for running
+        const char* chip = chipText(c);
+        const Font* hf   = fontFor(Face::Hint);
+        const int   tw   = (hf && hf->ready()) ? hf->textWidth(chip) : 0;
+        const int   cw2  = tw + 14;
+        s.fillRect(ix, top + 84, cw2, 22, rgb565(0x242321));
+        s.frame(ix, top + 84, cw2, 22, 1, rgb565(0x3a3936));
+        drawTextCentred(s, Face::Hint, ix + cw2 / 2, textBaseline(s, Face::Hint, top + 84, 22), chip,
+                        chipColour(c));
+
+        if (c.available && c.running) {
+            // the two small lines the old detail pane carried: the module's memory and how long it has run
+            if (c.memory) drawText(s, Face::Meta, ix, textBaseline(s, Face::Meta, top + 122, 24), c.memory, kDim);
+            if (c.uptime) drawText(s, Face::Meta, ix, textBaseline(s, Face::Meta, top + 144, 24), c.uptime, kDim);
+        } else if (!c.available) {
+            drawText(s, Face::Body, ix, textBaseline(s, Face::Body, top + 126, 24), "coming later", kDim);
+        } else {
+            drawText(s, Face::Body, ix, textBaseline(s, Face::Body, top + 126, 24), "stopped \xc2\xb7 ret starts it",
+                     kDim);
         }
-        // status dot: green when running, dim when later
-        const int dot_cx = list_x0 + 14, dot_cy = y + kTmRowH / 2 - 1;
-        if (r.available)
-            s.disc(dot_cx, dot_cy, 4, r.running ? (uint16_t)kGreen : (uint16_t)kDim);
-        else {
-            s.ring(dot_cx, dot_cy, 4, 1, kDimmer);
-        }
-        drawText(s, Face::Row, list_x0 + 30, textBaseline(s, Face::Row, y + 6, 28), r.name,
-                 f ? (uint16_t)kAccInk : ink);
-        drawText(s, Face::Meta, list_x0 + 30, textBaseline(s, Face::Meta, y + 34, 22), r.sub, kDim);
-        if (r.badge && r.badge[0]) {
-            const Font* hf = fontFor(Face::Hint);
-            const int   tw = hf && hf->ready() ? hf->textWidth(r.badge) : 0;
-            const int   pw = tw + 14, ph = 18;
-            const int   bx = list_x0 + kTmListW - kTmRingInset - pw - 8, by2 = y + (kTmRowH - ph) / 2 - 1;
-            s.fillRect(bx, by2, pw, ph, r.running ? rgb565(0x14301F) : rgb565(0x242321));
-            s.frame(bx, by2, pw, ph, 1, r.running ? (uint16_t)kGreen : (uint16_t)rgb565(0x3a3936));
-            drawTextCentred(s, Face::Hint, bx + pw / 2, textBaseline(s, Face::Hint, by2, ph), r.badge,
-                            r.running ? (uint16_t)kGreen : kDimmer);
-        }
-        if (i + 1 < v.row_count) s.hline(list_x0, list_x1 - kTmRingInset, y + kTmRowH - 1, kRowLine);
-        y += kTmRowH;
     }
 
-    // ---- the note under the list (the mock's honest line about one app at a time)
-    drawText(s, Face::Body, list_x0, y + 26, "The stock launcher starts one app at a time.", kDimmer);
-    drawText(s, Face::Body, list_x0, y + 48, "Here the modules start and stop inside this", kDimmer);
-    drawText(s, Face::Body, list_x0, y + 70, "app; the core keeps the radio.", kDimmer);
+    // ---- one short dim line about the FOCUSED card: what it owns, in the mesh's own numbers
+    if (count > 0 && v.cards[focused].owns)
+        drawText(s, Face::Body, kTmPad, textBaseline(s, Face::Body, top + kTmMenuCardH + kTmMenuOwnsGap, 24),
+                 v.cards[focused].owns, kDim);
 
-    // ---- pane divider + right pane: the focused module
-    s.vline(list_x1 + 8, work_top, work_bot - 8, kLine);
-    const int rx = list_x1 + kTmPad + 14;
-    if (v.detail) {
-        const ModuleDetail& d = *v.detail;
-        s.fillRect(rx - kTmPad + 4, work_top + 1, W - (rx - kTmPad + 4), work_bot - work_top - 2, kScreen);
-        drawText(s, Face::Title, rx, textBaseline(s, Face::Title, work_top, 44), d.title, kInk);
-        if (d.meta)
-            drawText(s, Face::Meta, rx, textBaseline(s, Face::Meta, work_top + 36, 24), d.meta, kDim);
-        int kv_y = work_top + 72;
-        for (int i = 0; i < 4 && d.kv[i][0]; i++) {
-            drawText(s, Face::Kv, rx, textBaseline(s, Face::Kv, kv_y, 26), d.kv[i][0], kDimmer);
-            if (d.kv[i][1])
-                drawText(s, Face::Body, rx + 150, textBaseline(s, Face::Body, kv_y, 26), d.kv[i][1], kInk);
-            kv_y += 28;
-        }
-        // the two buttons (gold "Open", plain "Stop"), then the note
-        const int by = kv_y + 18;
-        const int open_w = 120, stop_w = 96, bh = 46;
-        const bool open_hot = v.focus_actions && v.action_index == 0;
-        const bool stop_hot = v.focus_actions && v.action_index == 1;
-        s.fillRect(rx, by, open_w, bh, kSelBg2);
-        s.frame(rx, by, open_w, bh, open_hot ? kTmRingW : 1, open_hot ? kAcc : kLine);
-        drawTextCentred(s, Face::Row, rx + open_w / 2, textBaseline(s, Face::Row, by, bh), "Open",
-                        open_hot ? kAccInk : kInk);
-        s.fillRect(rx + open_w + 16, by, stop_w, bh, kPanel);
-        s.frame(rx + open_w + 16, by, stop_w, bh, stop_hot ? kTmRingW : 1, stop_hot ? kAcc : kLine);
-        drawTextCentred(s, Face::Row, rx + open_w + 16 + stop_w / 2, textBaseline(s, Face::Row, by, bh), "Stop",
-                        stop_hot ? kAccInk : kInk);
-        if (d.note)
-            drawText(s, Face::Body, rx, by + bh + 34, d.note, kDim);
-    }
-
-    // ---- hint bar: this page's actions left, the five symbol keys right (chrome.cpp: one bar, all pages)
-    static const HintItem hints_list[] = {
-        {"up/dn", "move"}, {"ret", "actions"}, {"s", "stop"}, {"esc", "quit"}};
-    static const HintItem hints_act[] = {
-        {"l/r", "pick"}, {"ret", "do it"}, {"", ""}, {"esc", "back"}};
-    drawHintBar(s, tm::Page::Launcher, v.focus_actions ? hints_act : hints_list, 4);
+    // ---- hint bar: this page's actions left, the five symbol keys right (the triangle stays LAUNCHER).
+    // The panel's generated faces are the L2 subset (ASCII + Latin-1/Extended-A, tools/mkfonts.py), so the
+    // key chips say "l/r" and "ret" exactly like every other page's hint bar; the preview draws ←→ / ↵ in
+    // desktop DejaVu. The words are the ticket's: select / open / stop / quit.
+    static const HintItem hints[] = {{"l/r", "select"}, {"ret", "open"}, {"s", "stop"}, {"esc", "quit"}};
+    drawHintBar(s, tm::Page::Launcher, hints, 4);
 }
 
 }  // namespace ui

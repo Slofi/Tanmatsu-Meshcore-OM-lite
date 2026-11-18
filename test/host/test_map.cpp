@@ -161,6 +161,20 @@ void test_coordinates() {
     CHECK_EQ(om::map::tileYForLat(89.999, 5), 0);
 }
 
+void test_world_pixel() {
+    // S513 (Claude): Ljubljana, Presernov trg, 46.0514 N 14.5060 E. Expected values computed independently in
+    // Python with the same slippy formula (math.log/tan/cos), not copied from this code's output.
+    CHECK_EQ((long long)om::map::worldPxXForLon(14.5060, 16), 9064636LL);
+    CHECK_EQ((long long)om::map::worldPxYForLat(46.0514, 16), 5965242LL);
+    CHECK_EQ((long long)om::map::worldPxXForLon(14.5060, 9), 70817LL);
+    CHECK_EQ((long long)om::map::worldPxYForLat(46.0514, 9), 46603LL);
+    // A world pixel lies inside the tile the tile functions name (the two cannot drift apart).
+    CHECK_EQ((long long)(om::map::worldPxXForLon(14.5060, 16) / 256), (long long)om::map::tileXForLon(14.5060, 16));
+    CHECK_EQ((long long)(om::map::worldPxYForLat(46.0514, 16) / 256), (long long)om::map::tileYForLat(46.0514, 16));
+    // Out of range clamps.
+    CHECK_EQ((long long)om::map::worldPxXForLon(-400.0, 3), 0LL);
+}
+
 
 void test_view_tiles() {
     // A view starting on a tile boundary: exactly ceil(800/256)=4 columns, ceil(480/256)=2 rows (no extra tile).
@@ -426,6 +440,7 @@ int main() {
     test_zoom_to_pack();
     test_binary_search();
     test_coordinates();
+    test_world_pixel();
     test_view_tiles();
     test_pan_and_zoom();
     test_tile_cache();

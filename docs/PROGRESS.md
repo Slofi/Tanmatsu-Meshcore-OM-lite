@@ -15,6 +15,153 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-18 · S513 (EST-432) · the menu redone: three app cards
+
+> Written by DeepSeek for ticket EST-432 (fenced Paperclip run: no session start/end, nothing installed, nothing
+> flashed, nothing committed). Code + host tests + build + one preview PNG only. **Version for Claude's install:
+> 39.** This entry is the ticket's FIRST artefact: it goes in before the preview and the code, and its Results
+> section is filled from the real runs below. (EST-431, which removed the menu, was cancelled before it touched
+> anything; the tree was clean at 52baaa0 and this starts from there.)
+
+### What was read (this run)
+- `BRIEF.md` in full, `docs/PLAN.md` § 1, § 2, § 4, § 5, and this file's S513 entries (EST-430, EST-429,
+  EST-427) for the card style, the notice pattern and the install discipline.
+- `main/launcher_page.h/.cpp` (the list + detail pane being replaced), the Launcher part of `main/main.cpp`
+  (the rows, the two-area key branch, the draw switch), `main/chat_page.h/.cpp` (the new rounded card style),
+  `main/chrome.h/.cpp` (head, hint bar, status bar), `main/nodes_page.cpp` (the Nodes empty-list text and hints),
+  `main/tm_theme.h`, `main/screen.h`, `core/registry.*`, `core/router.*`, `core/module.h`, `core/pages.h`,
+  `test/host/run.sh`, `test/host/test_core.cpp`, `tools/preview_tanmatsu.py`, and the two shots
+  `shots/2026-11-13-launcher-home.png` (the old page) and `shots/2026-11-18-chat-two-columns.png` (the card style).
+
+### 1. The menu: three large cards, no list, no detail pane
+
+The page head now says **Tanmatsu** (the head's right slot keeps the core line, e.g. `core ready · radio free`,
+and hands that slot to a 3-second notice when one is live). Below it, three equal-width cards side by side in
+Filip's names and order: **OM Lite**, **OPS-TOC**, **Mesh-Torry**.
+
+| number | value | why |
+|---|---|---|
+| work box | x 18 … 782 | `kTmPad` margins |
+| card gap | **16 px** | the Chat cards' gutter (S513/EST-430) |
+| card width | **244 px** each | `(764 - 2*16)/3`; the odd pixel stays in the gap |
+| card height | **232 px** | one large plate, name + description + chip + two numbers |
+| corner radius | **6 px** | the Chat cards' radius, and the same 2 px gold focus outline |
+| card top | head line + **22 px** | the cards start under the page head |
+| focused line | card bottom + **28 px** | one short dim line about the focused card |
+
+A card shows the name large, one dim description (OM Lite "mesh companion", OPS-TOC "field ops map &
+checklists", Mesh-Torry "the territory game"), a state chip in the existing chip style (`RUNNING` green /
+`STOPPED` plain / `LATER` dim), then for the running card two small lines with its memory and uptime (the
+numbers the old detail pane had). A LATER card says `coming later` in the dim colour; a STOPPED card says
+`stopped · ↵ starts it`. Under the row sits **one** short dim line about the focused card (OM Lite:
+`radio 868 · MeshCore session · SD history`). The old explanatory paragraph is gone: say less.
+
+### 2. Keys: picking is the main action (this REPLACES Filip's S499 two-area rule)
+
+**Deliberate rule change, so Claude can tell Filip:** the S499 rule was "Enter moves the focus to the actions
+on the right; Esc brings it back". With three app cards there is no second area to move to, and picking IS the
+main action, so that two-area rule is retired here. The new keys:
+
+- **Left/Right** (Up/Down are aliases) move between the three cards and **stop at both ends** — no wrapping.
+- **Enter** opens the focused app: a stopped one is started first (`core.start`) and then the router goes to its
+  home page (OM Lite: **Nodes**); a LATER card changes nothing visible except a **3-second notice** in the
+  head's right slot: `OPS-TOC: coming later` (the EST-428 notice pattern, `notice` only in the view while live).
+- **s** stops the focused running app (`core.stop`; the leak line is logged exactly as today). No confirm — it
+  is reversible.
+- **Esc** on the menu leaves the app through `leaveToLauncher()` exactly as today (the S501 exit code is not
+  touched).
+- **a** still forces an advert early here, and now also on the **Nodes** page, whose hint bar carries
+  `a advert` (its empty-list text already points at it).
+- Hint bar: `←→ select · ↵ open · s stop · esc quit`; the triangle key still says LAUNCHER.
+
+The app still opens on this menu at launch, with the focus on OM Lite.
+
+### 3. Registry: nothing new runs
+
+The registry gets the two LATER modules as real `available = false` entries (`ops-toc`, `mesh-torry`) beside
+`om-lite`, so the state the cards draw comes from the registry and not from a string in the shell. Their pages
+mask is 0 and every hook is null: they are listed, never startable, and neither app is built.
+
+### 4. The rules are pure, in `core/menu_cards.*`
+
+No UI types, no theme: `menuFocusMove(focused, move, count)` (clamped at both ends), `menuEnterAction(available)`
+(`Open` vs `ComingLater`) and `menuStopAction(available, running)` (`Stop` vs `None`). Host suite
+`test/host/test_menu_cards.cpp` wired into `test/host/run.sh`; the ARM section below is the evidence that it is
+red against a deliberately wrong rule.
+
+### 5. Preview first
+
+`tools/preview_tanmatsu.py` gains the `menu` renderer (same palette parsed from `theme.h`, same metrics table):
+800x480, OM Lite RUNNING and focused, OPS-TOC and Mesh-Torry LATER, the focused line under the cards, the new
+hint bar → `shots/2026-11-18-menu-cards.png`. One shared tool, no per-ticket script.
+
+### Results (real exit codes)
+
+- **ARM FIRST — the suite is red against a deliberately wrong rule.** The same `test/host/test_menu_cards.cpp`
+  was compiled against a sweep-only copy of the rules (`paperclip-pilot/sweep/est432-arm/menu_cards_wrong.cpp`,
+  outside the tree and not built by `run.sh`) with the focus WRAPPING at both ends and Enter saying `Open` even
+  on a LATER card. **ARM_EXIT=1**, **3 checks, 2 failures**; the FAIL lines, verbatim
+  (`paperclip-pilot/sweep/est432-arm.log`):
+
+      FAIL test_menu_cards.cpp:47  tm::menuFocusMove(0, tm::MenuMove::Left) == 0 (got 2, want 0)
+      FAIL test_menu_cards.cpp:76  tm::menuEnterAction(false) == tm::MenuAction::ComingLater
+
+  The same file against the real `core/menu_cards.cpp`: **23 checks, 0 failures**. The wrap at the first card
+  and the LATER card's `Open` are both caught by a ticket case (the no-wrap rule, Enter's difference).
+- `sh test/host/run.sh` → **HOST_SUITE_FINAL_EXIT=0**. Suites: 192 / 91 (clock) / 99 / 65 / 62 / 115 (MeshCore)
+  / 115 (the same under ASan+UBSan) / 260 (map) / 82 (tx queue) / 99 (chat cards) / **23 (menu cards, new)** —
+  **0 failures** everywhere, **0** `AddressSanitizer` lines. Totals: 1180 checks across 10 suites before,
+  **1203 across 11** after. Logs: `paperclip-pilot/sweep/est432-host.log`, final re-run on the finished tree
+  `paperclip-pilot/sweep/est432-host-final.log`.
+- `make build` → **BUILD_EXIT=0**, **0** `warning:` lines. `application.bin` = **0x15CE00 = 1,428,992 B**,
+  **0xA3200 = 668,160 B (32 %) of the 2 MB app partition free**, **−144 B** from v38 (EST-430, 0x15CE90 =
+  1,429,136 B). **Stated honestly:** the first build of this run exited 0 but printed one warning
+  (`main/launcher_page.cpp:57:25: warning: unused variable 'H'`); the variable was removed and the run above is
+  the clean one. Log: `paperclip-pilot/sweep/est432-build.log`.
+- **Preview:** `shots/2026-11-18-menu-cards.png`, **800x480**, from
+  `python3 tools/preview_tanmatsu.py menu` — OM Lite RUNNING and focused, OPS-TOC and Mesh-Torry LATER, the
+  focused card's own line under the row, the hint bar with `←→ select · ↵ open · s stop · esc quit`.
+- **One documented difference between the preview and the panel, stated because the ticket quoted the glyphs:**
+  the device's hint chips say **`l/r`** and **`ret`**, not `←→` / `↵`. The generated faces are the L2 subset
+  (ASCII + Latin-1/Extended-A, `tools/mkfonts.py`); U+2190/U+2192/U+21B5 are not in it and would draw as blank
+  advances. Every other device page's hint bar already uses `l/r` / `ret` for this reason, so the menu follows
+  that convention; the words (select / open / stop / quit) are exactly the ticket's.
+- **Version for Claude's install: 39.**
+
+### Files changed
+
+- `core/menu_cards.h`, `core/menu_cards.cpp` (**new**) — the menu's pure decisions: `menuFocusMove` (clamped at
+  both ends, Up/Down aliases), `menuEnterAction` (`Open` vs `ComingLater`), `menuStopAction` (`Stop` vs `None`).
+  No UI types, no theme.
+- `core/CMakeLists.txt` — `menu_cards.cpp` added to the component.
+- `test/host/test_menu_cards.cpp` (**new**) — 23 checks on the ticket's three rules.
+- `test/host/run.sh` — the new suite wired in (one stage, one temp binary, cleaned up in the same trap).
+- `main/launcher_page.h` — `MenuCard` (name, sub, running, available, memory, uptime, owns), the new `LauncherView`
+  (cards/focused/right_head/notice, no rows/detail/two-area fields), and the menu metrics (`kTmMenuGap` 16,
+  `kTmMenuCardH` 232, `kTmMenuTop` 22, `kTmMenuRadius` 6, `kTmMenuOwnsGap` 28).
+- `main/launcher_page.cpp` — the three equal cards, the Chat cards' plate/ring recipe, state chip derived from
+  the two booleans, memory + uptime for the running card, "coming later" for LATER, the focused card's own line,
+  the new hint bar.
+- `main/chrome.h`, `main/chrome.cpp` — `drawRoundedRect` / `drawCardPlate` moved here from the Chat page, so the
+  Chat cards and the menu cards share one rounded-card implementation.
+- `main/chat_page.cpp` — uses the shared helpers; its local rounded-fill copy is gone. Drawing unchanged.
+- `main/main.cpp` — the two LATER modules added to the registry as `available = false` rows; the cards, focus,
+  memory/uptime; the new key branch (arrows clamped, Enter start-then-route, `s` stop, Esc untouched, `a` still
+  advert); the 3-second notice; `a` on the Nodes page.
+- `main/nodes_page.cpp` — hint bar gains `a advert` (the empty-list text already pointed at it).
+- `tools/preview_tanmatsu.py` — the `menu` renderer plus its metrics in the ONE table.
+- `shots/2026-11-18-menu-cards.png` (**new**) — the preview above.
+- `docs/PROGRESS.md` — this entry.
+
+### What could NOT be checked (honest list)
+
+- **Nothing installed, flashed or committed** (ticket terms): the build's exit code and binary size are real,
+  the menu has **host-render evidence only** — no glass shot.
+- The **two LATER cards are strings and a registry row**, not apps: nothing of OPS-TOC or Mesh-Torry runs.
+- Enter's start-then-route path is host-tested as a decision; the panel's own frame timing was not measured.
+
+---
+
 ## 2026-11-18 · S513 (EST-430) · the Chat list is two columns of cards: channels left, direct messages right (v38)
 
 > Written by DeepSeek for ticket EST-430 (fenced Paperclip run: no session start/end, nothing installed, nothing
