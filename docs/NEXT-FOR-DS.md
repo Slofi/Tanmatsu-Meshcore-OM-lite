@@ -5,7 +5,15 @@
 - [x] **Step 0 + 1 (EST-424, done 2026-11-13 11:20, reviewed by Claude: right look; build section unverified because WadaMesh was not visible):** `docs/PLAN.md` + the Launcher home preview at 800×480 (`shots/`), then Nodes/Chat previews if time allowed.
 **Three decisions for Filip (Claude, 2026-11-13 11:40):** (1) **the look**: the six 800×480 previews in `tanmatsu/shots/` (Launcher, Nodes, Chat, Map, RPTR, Settings); DS asks whether the filled "cloud" key symbol should be an outline like the other four; (2) **the sandbox** opening below; (3) **where the Tanmatsu toolchain goes**: ESP-IDF 5.5.1 for the `esp32p4` (~3 GB, needs a download), nothing installed yet, so no real build is possible until then (PLAN.md § 6, cited from WadaMesh).
 
-## ⚠️ Where DS writes (S498, Claude, 11:30)
+## ▶ S513 (2026-11-18, Claude): where it stands now
+
+The device runs **v42** (`0d8ec23`). S513's tickets EST-427 … EST-441 are all closed; their records are the S513
+entries at the top of `PROGRESS.md`. Everything below this block is older history. **The ordered TO-DO and the
+"what not to do" list live in `../pocket-mesh.md` § REBUILD "▶ TANMATSU: NEXT SESSION STARTS HERE"** (one home):
+first an on-air test of v42 with Filip, then the push on his word, then a Settings page (ask Filip first).
+Since S499 DS works IN PLACE in this folder (the fence binds it read-write, `.git` read-only); one run at a time.
+
+## (SUPERSEDED since S499: DS writes IN PLACE in `tanmatsu/`, see the S513 block above) Where DS wrote in S498 (Claude, 11:30)
 
 DS's sandbox (`paperclip-pilot/ds-fence.sh`) can write `pocket-mesh/firmware/` but **not** `tanmatsu/`, and it cannot see `~/dev/wadamesh`. Until Filip decides:
 - DS works in **`/home/slofi/paperclip-pilot/sweep/tanmatsu-work/`** (same layout as this folder) and lists the copy-in commands at the top of its PROGRESS.md; Claude or Filip copies the work in after reading it.
