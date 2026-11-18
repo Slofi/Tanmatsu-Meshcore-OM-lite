@@ -167,7 +167,14 @@ void drawChat(Screen& s, const ChatView& v) {
             const int   left_x  = kTmChatBodyX0;
             const int   right_x = kTmChatBodyX1;
             const char* who     = m.outgoing ? "you" : m.sender;
-            drawText(s, Face::Hint, kTmPad + 4, textBaseline(s, Face::Hint, y, 20), m.hhmm, kDimmer);
+            // S513/EST-439: our own line carries its delivery state AFTER the time ("09:12 delivered"), because
+            // "the radio said it went out" is not the same as "the recipient acknowledged it" (dm_delivery.h).
+            char stamp[32];
+            if (m.outgoing && m.state[0] != '\0')
+                snprintf(stamp, sizeof(stamp), "%s %s", m.hhmm, m.state);
+            else
+                snprintf(stamp, sizeof(stamp), "%s", m.hhmm);
+            drawText(s, Face::Hint, kTmPad + 4, textBaseline(s, Face::Hint, y, 20), stamp, kDimmer);
             if (m.outgoing) {
                 drawTextRightClipped(s, Face::Meta, right_x, textBaseline(s, Face::Meta, y, 20), right_x - left_x,
                                      who, kDim);
@@ -194,37 +201,34 @@ void drawChat(Screen& s, const ChatView& v) {
                          kDimmer);
         }
 
-        // ---- composer: one line, a caret, and the Send key hint. A DM thread has no composer yet (sending is the
-        // next slice): the same box holds a dim line, so the geometry does not jump when sending arrives.
+        // ---- composer: one line, a caret, and the Send key hint. S513/EST-439: a DM thread gets the SAME
+        // composer as a channel (Enter sends, a full queue keeps the text and the head says why).
         const int cy0 = work_bot - kTmChatComposerH - 4;
         s.fillRect(kTmPad, cy0, W - 2 * kTmPad, kTmChatComposerH, kPanel);
         s.frame(kTmPad, cy0, W - 2 * kTmPad, kTmChatComposerH, 1, kLine);
-        const int bl = textBaseline(s, Face::Body, cy0, kTmChatComposerH);
-        if (v.dm_open) {
-            drawText(s, Face::Body, kTmPad + 12, bl, "sending DMs comes next", kDimmer);
-        } else {
-            const bool empty = (v.composer == nullptr || v.composer[0] == '\0');
-            drawText(s, Face::Body, kTmPad + 12, bl, empty ? "message the channel, Enter sends" : v.composer,
-                     empty ? (uint16_t)kDimmer : (uint16_t)kInk);
-            if (!empty) {
-                const Font* f = fontFor(Face::Body);
-                const int   tw = (f && f->ready()) ? f->textWidth(v.composer) : 0;
-                const int   cx = kTmPad + 12 + tw + 3;
-                s.fillRect(cx, cy0 + 12, 2, kTmChatComposerH - 24, kAcc);   // caret
-            }
-            const int bw = 86, bh = 34;
-            const int bx = W - kTmPad - bw - 8, by = cy0 + (kTmChatComposerH - bh) / 2;
-            s.fillRect(bx, by, bw, bh, kSelBg2);
-            s.frame(bx, by, bw, bh, 1, kAcc);
-            drawTextCentred(s, Face::Hint, bx + bw / 2, textBaseline(s, Face::Hint, by, bh), "Send", kAccInk);
+        const int  bl    = textBaseline(s, Face::Body, cy0, kTmChatComposerH);
+        const bool empty = (v.composer == nullptr || v.composer[0] == '\0');
+        drawText(s, Face::Body, kTmPad + 12, bl,
+                 empty ? (v.dm_open ? "message this contact, Enter sends" : "message the channel, Enter sends")
+                       : v.composer,
+                 empty ? (uint16_t)kDimmer : (uint16_t)kInk);
+        if (!empty) {
+            const Font* f = fontFor(Face::Body);
+            const int   tw = (f && f->ready()) ? f->textWidth(v.composer) : 0;
+            const int   cx = kTmPad + 12 + tw + 3;
+            s.fillRect(cx, cy0 + 12, 2, kTmChatComposerH - 24, kAcc);   // caret
         }
+        const int bw = 86, bh = 34;
+        const int bx = W - kTmPad - bw - 8, by = cy0 + (kTmChatComposerH - bh) / 2;
+        s.fillRect(bx, by, bw, bh, kSelBg2);
+        s.frame(bx, by, bw, bh, 1, kAcc);
+        drawTextCentred(s, Face::Hint, bx + bw / 2, textBaseline(s, Face::Hint, by, bh), "Send", kAccInk);
     }
 
     static const HintItem hints_list[] = {{"up/dn", "move"}, {"l/r", "column"}, {"ret", "open"}, {"esc", "back"}};
     static const HintItem hints_open[] = {{"type", "write"}, {"up/dn", "scroll"}, {"ret", "send"}, {"esc", "back"}};
-    static const HintItem hints_dm[]   = {{"up/dn", "scroll"}, {"esc", "back"}};
-    if (v.open && v.dm_open) drawHintBar(s, tm::Page::Chat, hints_dm, 2);
-    else drawHintBar(s, tm::Page::Chat, v.open ? hints_open : hints_list, 4);
+    // A DM thread types and sends exactly like a channel (EST-439), so the two open states share one hint bar.
+    drawHintBar(s, tm::Page::Chat, v.open ? hints_open : hints_list, 4);
 }
 
 }  // namespace ui

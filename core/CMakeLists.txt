@@ -33,6 +33,15 @@ idf_component_register(
          # S513/EST-433: direct messages — open a TXT_MSG against the contact list and build the ACK / path
          # return. Pure, bounds-checked, host-tested against an independent Python oracle.
          "mc_dm.cpp"
+         # S513/EST-436: DM SEND — compose an attempt, open a PATH packet, match the ACK, and the retry rule.
+         # Pure: time is an argument and nothing here transmits.
+         "dm_send.cpp"
+         # S513/EST-435: one advert per 5 s — the gate the key handler and the 3-hour schedule both ask, so a
+         # held key cannot flood the mesh. Time is an argument, so the host tests drive exact instants.
+         "advert_rule.cpp"
+         # S513/EST-437: the contact table's one versioned NVS blob — encode/decode only, so the host tests
+         # round-trip the exact bytes the device stores and refuse a wrong version, width or length.
+         "contact_blob.cpp"
          # Ed25519, vendored from firmware/lib/meshcore_ed25519 (orlp/ed25519, zlib licence): the same code
          # the L2 signs with, so the signatures match by construction rather than by hope.
          "ed25519/add_scalar.c" "ed25519/fe.c" "ed25519/ge.c" "ed25519/key_exchange.c"

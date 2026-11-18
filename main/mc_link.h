@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "advert_rule.h"
 #include "mc_store.h"
 
 namespace om {
@@ -42,7 +43,12 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db);
 // The SENDER name is not a parameter: it is the node's name (see nodeName()), so a message and an advert can
 // never announce two different identities.
 bool queueText(size_t i, const char* text);
-bool queueAdvert();
+
+// S513/EST-435: ask for an advert. Returns the RULE's answer, not just true/false, because a refusal now has a
+// reason worth showing: `Wait` carries the whole seconds left of the 5 s gap, `Busy` means one is still queued.
+// `Send` means it WAS queued (or, if the send queue was full, `Busy`). The caller (a key handler) renders the
+// sentence with advertRefusalText(); nothing here draws, and nothing here blocks.
+AdvertDecision queueAdvert();
 
 // This node's name on the mesh: what an advert announces and what a message is signed "from" ("TNMT (SI)",
 // Filip, S501 — the same <device> (<country>) shape the L2 uses for "ERA-3 (SI)"). One definition, in mc_link.cpp.
@@ -69,6 +75,28 @@ DmRing&       dmThreads();   // S513/EST-434: the RAM DM threads, one view per c
 // card is mounted and BEFORE the radio task starts, so nothing races the restore. Occupies the radio's own DM path:
 // the caller must not have started it yet.
 size_t restoreDmHistory();
+
+// S513/EST-437: restore the contact table from NVS ("mcct"/"tbl"). Called at boot BEFORE the radio task exists, so
+// a DM from a node heard before the restart can be opened without waiting for its next advert. Logs
+// "contacts: N restored from NVS"; a wrong version/size is ignored with one warning line.
+size_t restoreContacts();
+
+// S513/EST-437: called by the MAIN task in its loop. Writes the contact blob when the radio task has marked it
+// dirty: an add/rename/route change on the next pass, last-heard/SNR at most once per 10 minutes. Never writes NVS
+// from the radio task; does nothing when there is nothing to write.
+void contactsPersistTick();
+
+// S513/EST-439: send a direct message to `pub` (the open DM thread's contact). The MAIN task calls this: it
+// composes attempt 0 (a flood when the contact's route is OUT_PATH_UNKNOWN, a DIRECT frame down the route it
+// learned otherwise), puts the message in the thread and its log as SENDING, begins the pending entry that the
+// ACK will clear, and QUEUES the frame — it never transmits. False when the radio's queue is full or the text does
+// not fit: nothing is stored or sent, so the caller still owns its text ("radio busy, not sent").
+bool queueDm(const uint8_t pub[32], const char* text);
+
+// S513/EST-439: called by the MAIN task in its loop. Polls the pending table: a retry composes the next attempt
+// (1, 2; the LAST is a flood, and a failed DIRECT attempt clears the stored route) and queues it; when every
+// attempt is spent the message becomes "no confirmation". Returns true when a state changed, so the page repaints.
+bool dmTick();
 
 // "The user has now seen this DM thread": marks it read and moves the seen point in the contact's log (the format's
 // Meta record), so unread survives a restart. Takes the store lock itself.

@@ -3,7 +3,8 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
+// No <time.h> here: chrome.h -> pages.h defines `namespace tm`, and <time.h> defines `struct tm` — the two cannot
+// live in one translation unit (time_source.h says the same). The radio task asks time_source::epochNow() instead.
 
 #include "esp_log.h"
 #include "esp_random.h"
@@ -13,12 +14,16 @@
 #include "freertos/task.h"   // uxTaskGetStackHighWaterMark: the stack evidence after each request   // esp_fill_random() for the one-time identity seed
 #include "nvs.h"
 
+#include "advert_rule.h"   // S513/EST-435: one advert per 5 s, host-tested
+#include "contact_blob.h"  // S513/EST-437: the contact table as one versioned NVS blob
+#include "chrome.h"        // S513/EST-435/437: the app's one notice slot, safe from any task
 #include "mc_channels.h"
 #include "tx_queue.h"   // S513: the send queue's rules, host-tested
 #include "mc_identity.h"
 #include "mc_crypto.h"
 #include "mc_wire.h"
 #include "mc_dm.h"      // S513/EST-433/434: TXT_MSG open + the two reply frames
+#include "dm_send.h"    // S513/EST-436/439: compose, the PATH parser, the pending/ACK table and the retry rule
 #include "radio_link.h"
 #include "sd_history.h"   // step 5: the chat history on the card
 #include "chat_layout.h"  // step 5 / S503: historyReadCount, the read-prefix rule for the seen point
@@ -34,6 +39,18 @@ const char* TAG = "tm/mc";
 // ONE home for the node's name (Filip, S501: renamed from the placeholder "EDCT" to "TNMT (SI)"). MeshCore
 // forbids [ ] \ : , ? * inside an advert name; a space and parentheses are fine (AdvertDataHelpers.cpp:31-34).
 const char kNodeName[] = "TNMT (SI)";
+
+// The L2's words for an advert type (firmware/src/ui/node_menu.h:27-35, advTypeName) — the new-node notice and the
+// Nodes sheet in the L2 name a type the same way, so the two cannot disagree. S513/EST-437.
+const char* advertTypeName(uint8_t t) {
+    switch (t) {
+        case 1: return "client";
+        case 2: return "repeater";
+        case 3: return "room";
+        case 4: return "sensor";
+        default: return "node";
+    }
+}
 
 // MeshCore announces a node on a schedule; a flood advert is expensive on a shared mesh, so it is rare.
 // Ours: one as soon as the radio is up (so the node is discoverable without anyone pressing a key), then
@@ -52,7 +69,7 @@ uint32_t nextAdvertTimestamp() {
         nvs_get_u32(h, "advts", &floor_ts);   // absent -> 0
         nvs_close(h);
     }
-    const uint32_t now = (uint32_t)time(nullptr);
+    const uint32_t now = (uint32_t)om::time_source::epochNow();
     const uint32_t ts  = om::clock::advertFloor(now, floor_ts);
     if (nvs_open("mcid", NVS_READWRITE, &h) == ESP_OK) {
         if (nvs_set_u32(h, "advts", ts) == ESP_OK) nvs_commit(h);
@@ -71,6 +88,32 @@ MessageRing     g_messages;
 ReadState       g_read;
 DmRing          g_dms;   // S513/EST-434: direct-message threads (RAM, item 3); SD history is item 4
 SemaphoreHandle_t g_store_mutex = nullptr;
+
+// S513/EST-437: the contact table survives a restart as ONE versioned blob in NVS ("mcct"/"tbl"). The radio task
+// never writes NVS — it only raises a dirty flag under the store lock. The main task encodes the table under the
+// same lock and writes it, so a flash write can never hold up receiving and two tasks can never write one blob.
+//
+// Two kinds of dirty, because they are worth different amounts: a contact that was ADDED, RENAMED or whose route
+// changed is written on the next main-loop pass; last-heard and SNR move on every advert, so those wait for the
+// 10-minute floor. The flags are cleared BEFORE the lock is released and the NVS write happens after that, so a
+// mutation that lands during the write sets a flag again and is not lost.
+constexpr const char* kContactsNvsNamespace = "mcct";
+constexpr const char* kContactsNvsKey       = "tbl";
+constexpr uint32_t    kContactsSoftWriteMs  = 10u * 60u * 1000u;   // last-heard/SNR floor
+constexpr uint32_t    kContactsRetryMs      = 10u * 1000u;         // after a failed NVS write
+
+bool     g_contacts_dirty_struct = false;
+bool     g_contacts_dirty_soft   = false;
+bool     g_contacts_write_failed = false;
+uint32_t g_contacts_last_write_ms  = 0;
+uint32_t g_contacts_last_attempt_ms = 0;
+uint8_t  g_contact_blob[kContactBlobMaxBytes];   // restore reads it, the main task encodes it
+
+// Caller holds the store lock (or is the single main-task reader before the radio task exists).
+void markContactsDirty(bool structural) {
+    if (structural) g_contacts_dirty_struct = true;
+    else g_contacts_dirty_soft = true;
+}
 
 // Step 5 / S503 — the id each channel's LOG FILE has reached, and the last seen point we appended. Both are per
 // channel because a log file is per channel: the format numbers records inside one file, not globally.
@@ -97,6 +140,13 @@ char               g_pub_hex[17] = {0};   // first 8 bytes of the public key, fo
 TxQueue            g_txq;
 SemaphoreHandle_t  g_tx_lock = nullptr;   // created once in begin()
 
+// S513/EST-439: the DMs we sent and the ACK each one expects. The RADIO task matches an arriving ACK (it must not
+// transmit, but it may read this table), the MAIN task begins/rearms/drops entries and polls the retry rule. One
+// mutex, held for the few microseconds one of those operations takes — never across a transmit, never across the
+// store lock.
+meshcore::DmPendingTable g_dm_pending;
+SemaphoreHandle_t        g_dm_lock = nullptr;   // created once in begin()
+
 // A reply that was BUILT on the radio task (a DM ACK / path return) still leaves through the queue: the receive
 // path must not transmit, because a send inside receive handling is how the S501 two-writers race started.
 bool queueFrame(const uint8_t* frame, size_t len) {
@@ -108,6 +158,14 @@ bool queueFrame(const uint8_t* frame, size_t len) {
     if (!ok) ESP_LOGW(TAG, "tx: queue full (%d waiting); a DM reply was NOT queued", (int)depth);
     return ok;
 }
+
+// S513/EST-435: ONE advert per 5 s, counted from the last advert that actually went on the air. The RULE is
+// core/advert_rule.* (host-tested, no clock inside); this is only the state it reads and the millisecond timeline
+// the device runs on. Three things touch it, all under g_tx_lock: a key press (main task), the schedule (radio task)
+// and the transmission's own result (radio task).
+om::mc::AdvertGate g_advert_gate;
+
+uint32_t monotonicMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
 
 // Duplicate suppression: a flood can arrive over two paths, and MeshCore itself keeps a seen-table for the
 // same reason. Eight 4-byte fingerprints is plenty for one leaf node and costs 32 bytes.
@@ -129,6 +187,59 @@ bool seenBefore(uint32_t fp) {
     g_seen[g_seen_next] = fp;
     g_seen_next         = (uint8_t)((g_seen_next + 1) % kSeenSlots);
     return false;
+}
+
+// ---- S513/EST-439: the DM send's shared state ---------------------------------------------------------------
+// The thread's messages live in g_dms (seq is the id the pending table names); this finds one by that id.
+DmMessage* findDmBySeq(uint32_t seq) {
+    for (size_t i = 0; i < g_dms.count; i++) {
+        DmMessage* m = &g_dms.m[(g_dms.head + i) % kMaxDms];
+        if (m->seq == seq) return m;
+    }
+    return nullptr;
+}
+
+// The ACK arrived for `seq`: the delivered mark. Kept across a restart the L2's way — the message's log gets an
+// Update record naming its log id (firmware/src/history/history_log.h Type::Update, the L2's own delivered mark),
+// and loadDm applies it in file order on the next boot.
+void markDmDelivered(uint32_t seq) {
+    StoreLock l;
+    DmMessage* m = findDmBySeq(seq);
+    if (m == nullptr) {
+        ESP_LOGI(TAG, "DM: ACK for message %u, which has already left the ring", (unsigned)seq);
+        return;
+    }
+    m->delivery = om::ui::DmState::Delivered;
+    if (m->log_id != 0) {
+        if (!sdhistory::appendDmState(m->peer_pub, m->log_id, m->delivery, (uint32_t)om::time_source::epochNow())) {
+            ESP_LOGW(TAG, "DM: delivered, but the Update record could not be written");
+        }
+    }
+    ESP_LOGI(TAG, "DM: message %u DELIVERED (log id %u)", (unsigned)seq, (unsigned)m->log_id);
+}
+
+// Radio task: a 4-byte ACK crc from the air. The table decides WHICH message it proves (four bytes only, as
+// MyMesh::processAck compares); a repeat simply matches nothing.
+bool dmNoteAck(const uint8_t ack[4]) {
+    if (g_dm_lock == nullptr || ack == nullptr) return false;
+    uint32_t seq      = 0;
+    bool     matched  = false;
+    xSemaphoreTake(g_dm_lock, portMAX_DELAY);
+    matched = meshcore::dmPendingAck(g_dm_pending, ack, &seq);
+    xSemaphoreGive(g_dm_lock);
+    if (matched) markDmDelivered(seq);
+    return matched;
+}
+
+// Radio task: the paths a PATH packet may open are the contacts as they are NOW (their keys decide the MAC), and
+// the table must not be walked while the main task writes it.
+size_t snapshotContactPubs(uint8_t* pubs, size_t cap) {
+    size_t n = 0;
+    StoreLock l;
+    n = g_contacts.count < cap ? g_contacts.count : cap;
+    for (size_t i = 0; i < n; i++) memcpy(pubs + i * meshcore::kPubKeyBytes, g_contacts.c[i].pub,
+                                          meshcore::kPubKeyBytes);
+    return n;
 }
 
 void loadOrCreateIdentity() {
@@ -207,9 +318,119 @@ void loadChannels() {
 
 }  // namespace
 
+// S513/EST-437: the contact table's one NVS blob. Read at boot before the radio task exists; a wrong blob is
+// ignored whole (decode writes into a scratch table), so a damaged namespace cannot half-fill the Nodes list.
+size_t restoreContacts() {
+    nvs_handle_t h;
+    if (nvs_open(kContactsNvsNamespace, NVS_READONLY, &h) != ESP_OK) {
+        ESP_LOGI(TAG, "contacts: none stored yet (no \"%s\" namespace)", kContactsNvsNamespace);
+        return 0;
+    }
+    size_t    len = 0;
+    esp_err_t r   = nvs_get_blob(h, kContactsNvsKey, nullptr, &len);
+    if (r == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGI(TAG, "contacts: none stored yet");
+        nvs_close(h);
+        return 0;
+    }
+    if (r != ESP_OK || len == 0 || len > kContactBlobMaxBytes) {
+        ESP_LOGW(TAG, "contacts: stored blob ignored (unreadable: %s, %u B)", esp_err_to_name(r), (unsigned)len);
+        nvs_close(h);
+        return 0;
+    }
+    size_t cap = len;
+    r          = nvs_get_blob(h, kContactsNvsKey, g_contact_blob, &cap);
+    nvs_close(h);
+    if (r != ESP_OK || cap != len) {
+        ESP_LOGW(TAG, "contacts: stored blob ignored (read %s, %u of %u B)", esp_err_to_name(r), (unsigned)cap,
+                 (unsigned)len);
+        return 0;
+    }
+
+    // Decode straight into the live table: every check in contactsDecode is BEFORE its first write, so a wrong
+    // blob leaves the (still empty) table alone, and the boot stack does not carry a second 2.7 KB ContactStore.
+    const ContactDecode d = contactsDecode(g_contact_blob, len, g_contacts);
+    if (d != ContactDecode::Ok) {
+        const unsigned version = len > 0 ? g_contact_blob[0] : 0;
+        ESP_LOGW(TAG, "contacts: stored blob ignored (%s, version %u, %u B)", contactDecodeText(d), version,
+                 (unsigned)len);
+        return 0;
+    }
+    // Nothing has changed since this was read: the first real mutation raises a flag again.
+    g_contacts_dirty_struct = false;
+    g_contacts_dirty_soft   = false;
+    g_contacts_write_failed = false;
+    ESP_LOGI(TAG, "contacts: %u restored from NVS", (unsigned)g_contacts.count);
+    return g_contacts.count;
+}
+
+// S513/EST-437: the MAIN task's write. The radio task only raises a flag; the encode and the NVS write are here.
+void contactsPersistTick() {
+    if (g_store_mutex == nullptr) return;   // begin() has not run yet
+    const uint32_t now = monotonicMs();
+
+    bool     structural = false;
+    bool     soft       = false;
+    size_t   bytes      = 0;
+    uint32_t count      = 0;
+    {
+        StoreLock l;
+        structural = g_contacts_dirty_struct;
+        soft       = g_contacts_dirty_soft;
+        if (!structural && !soft) return;
+        // A soft-only change waits for the floor; a structural one goes on this pass. The failure retry is its own
+        // 10 s clock, so a broken NVS does not turn into a write storm from the UI task.
+        if (!structural && g_contacts_last_write_ms != 0 &&
+            (uint32_t)(now - g_contacts_last_write_ms) < kContactsSoftWriteMs) {
+            return;
+        }
+        if (g_contacts_write_failed && g_contacts_last_attempt_ms != 0 &&
+            (uint32_t)(now - g_contacts_last_attempt_ms) < kContactsRetryMs) {
+            return;
+        }
+        bytes = contactsEncode(g_contacts, g_contact_blob, sizeof(g_contact_blob));
+        if (bytes == 0) {
+            // The table is over kMaxContacts or the buffer is wrong; drop the flags rather than retry for ever.
+            ESP_LOGE(TAG, "contacts: encode failed (%u rows), not written", (unsigned)g_contacts.count);
+            g_contacts_dirty_struct = false;
+            g_contacts_dirty_soft   = false;
+            return;
+        }
+        count = (uint32_t)g_contacts.count;
+        // Cleared BEFORE the lock is released: a mutation that lands while NVS is written sets a flag again.
+        g_contacts_dirty_struct = false;
+        g_contacts_dirty_soft   = false;
+    }
+
+    nvs_handle_t h;
+    esp_err_t    r = nvs_open(kContactsNvsNamespace, NVS_READWRITE, &h);
+    if (r == ESP_OK) {
+        r = nvs_set_blob(h, kContactsNvsKey, g_contact_blob, bytes);
+        if (r == ESP_OK) r = nvs_commit(h);
+        nvs_close(h);
+    }
+    g_contacts_last_attempt_ms = now;
+    if (r == ESP_OK) {
+        g_contacts_last_write_ms = now;
+        g_contacts_write_failed  = false;
+        ESP_LOGI(TAG, "contacts: %u stored to NVS (%u B)", (unsigned)count, (unsigned)bytes);
+    } else {
+        g_contacts_write_failed = true;
+        ESP_LOGE(TAG, "contacts: NVS write failed (%s); retrying in %u s", esp_err_to_name(r),
+                 (unsigned)(kContactsRetryMs / 1000));
+        StoreLock l;
+        if (structural) g_contacts_dirty_struct = true;
+        else g_contacts_dirty_soft = true;
+    }
+}
+
 void begin() {
     if (g_store_mutex == nullptr) g_store_mutex = xSemaphoreCreateRecursiveMutex();
     if (g_tx_lock == nullptr) g_tx_lock = xSemaphoreCreateMutex();   // S513: the send queue, created once
+    if (g_dm_lock == nullptr) g_dm_lock = xSemaphoreCreateMutex();   // S513/EST-439: the pending DM table
+    // S513/EST-437: the last-heard/SNR floor starts at boot, so the first soft change after a restart waits its
+    // 10 minutes like every other one. Add/rename/route changes are not affected: those write on the next pass.
+    g_contacts_last_write_ms = monotonicMs();
     loadOrCreateIdentity();
     loadChannels();
     g_loaded = true;
@@ -292,6 +513,9 @@ void rebindRestoredDmPeer(const uint8_t pub[32], const char* name) {
     for (size_t i = 0; i < g_contacts.count; i++) {
         Contact& c = g_contacts.c[i];
         if (!prefixOnlyKey(c.pub) || memcmp(c.pub, pub, 4) != 0) continue;
+        // The row's identity changed from a 4-byte file name to a real key: that is a contact the next boot must
+        // find whole, not a last-heard detail (S513/EST-437).
+        markContactsDirty(true);
         memcpy(c.pub, pub, sizeof(c.pub));
         if (name != nullptr && name[0] != '\0') snprintf(c.name, sizeof(c.name), "%s", name);
         for (size_t j = 0; j < g_dms.count; j++) {
@@ -310,6 +534,60 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
         ESP_LOGW(TAG, "rx %u B: not a MeshCore frame", (unsigned)len);
         return;
     }
+    // ------------------------------------------------- S513/EST-439: the PATH answer and the delivered ACK
+    // A PATH packet is the recipient's answer to a flooded DM: it carries the route back TO that contact and, when
+    // its extra type is ACK, the delivered mark for the message we sent (Mesh.cpp:160-180). Opening it is the
+    // only way a route is ever learned, and storing it is a STRUCTURAL change to the contact table.
+    if (v.type() == meshcore::kTypePath) {
+        if (!g_has_id) {
+            ESP_LOGW(TAG, "rx %u B PATH but this node has no identity yet, dropped", (unsigned)len);
+            return;
+        }
+        static uint8_t peer_pubs[kMaxContacts * meshcore::kPubKeyBytes];
+        const size_t   peer_count = snapshotContactPubs(peer_pubs, kMaxContacts);
+        if (peer_count == 0) {
+            ESP_LOGI(TAG, "rx %u B PATH but no contacts are known yet, dropped", (unsigned)len);
+            return;
+        }
+        meshcore::DmPath p;
+        if (!meshcore::dmOpenPath(g_id, v, peer_pubs, peer_count, &p)) {
+            ESP_LOGI(TAG, "rx %u B PATH, no contact of ours opens it", (unsigned)len);
+            return;
+        }
+        {
+            StoreLock l;
+            Contact&      c     = g_contacts.c[p.peer];
+            const uint8_t hops  = (uint8_t)(p.out_path_len & 63);
+            const size_t  bytes = (size_t)hops * (size_t)((p.out_path_len >> 6) + 1);
+            const bool    moved = c.out_path_len != p.out_path_len ||
+                                  (bytes > 0 && memcmp(c.out_path, p.out_path, bytes) != 0);
+            if (moved) {
+                c.out_path_len = p.out_path_len;
+                memset(c.out_path, 0, sizeof(c.out_path));
+                if (bytes > 0) memcpy(c.out_path, p.out_path, bytes);
+                markContactsDirty(true);   // a new route is written to NVS on the main task's next pass
+            }
+            ESP_LOGI(TAG, "DM: route to \"%s\" %s (path_len 0x%02X, %u hop(s))", c.name,
+                     c.out_path_len == kOutPathUnknown ? "unknown" : "stored", (unsigned)c.out_path_len,
+                     (unsigned)hops);
+        }
+        if (p.extra_type == meshcore::kTypeAck && p.extra_len >= 4) {
+            if (!dmNoteAck(p.extra)) ESP_LOGI(TAG, "DM: PATH carried an ACK no pending message expected");
+        }
+        return;
+    }
+
+    // A plain ACK (a DIRECT arrival was answered with createAck): payload = the 4-byte crc.
+    if (v.type() == meshcore::kTypeAck) {
+        const uint8_t* ack = meshcore::dmAckPayload(v);
+        if (ack == nullptr) {
+            ESP_LOGI(TAG, "rx %u B ACK with a payload shorter than 4 bytes", (unsigned)len);
+            return;
+        }
+        if (!dmNoteAck(ack)) ESP_LOGI(TAG, "rx %u B ACK: no pending DM expects it", (unsigned)len);
+        return;
+    }
+
     // ------------------------------------------------------------------- direct messages (S513/EST-434, item 2)
     // A TXT_MSG is not channel-scoped either: it is addressed to OUR pub_key[0] and sealed with the shared secret
     // of one contact. It is handled here, on the radio task, and the reply is only QUEUED — the receive path never
@@ -368,7 +646,7 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
             snprintf(m.peer_name, sizeof(m.peer_name), "%s", peer_name);
             m.outgoing = false;
             m.ts       = dm.timestamp;
-            m.local_ts = (uint32_t)time(nullptr);   // OUR clock, for ordering and the list's HH:MM
+            m.local_ts = (uint32_t)om::time_source::epochNow();   // OUR clock, for ordering and the list's HH:MM
             m.snr_x10  = (int16_t)(snr_db * 10);
             m.direct   = (v.path_bytes == 0);
             snprintf(m.text, sizeof(m.text), "%.*s", (int)(sizeof(m.text) - 1), dm.text);
@@ -402,9 +680,22 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
                 n = meshcore::dmBuildPathReturn(v, peer_pub[0], g_id.pub, secret, dm.ack, frame, sizeof(frame));
             }
         } else {
-            // A direct arrival, and we do not store out_path yet: sendAckTo's OUT_PATH_UNKNOWN branch is a
-            // FLOODED createAck() (BaseChatMesh.cpp:43-58). A later PATH slice passes the stored route in here.
-            n = meshcore::dmBuildAck(nullptr, 0, dm.ack, frame, sizeof(frame));
+            // A direct arrival is answered with createAck (BaseChatMesh.cpp:43-58). If we have learned a route to
+            // that contact it is copied back; OUT_PATH_UNKNOWN is the only value that means "no route", so a
+            // zero-hop route is a direct ACK to a neighbour (EST-439).
+            static uint8_t ack_path[meshcore::kMaxPath];
+            uint8_t        ack_path_len = kOutPathUnknown;
+            {
+                StoreLock l;
+                const int ci = contactsFind(g_contacts, peer_pub);
+                if (ci >= 0 && contactHasOutPath(g_contacts.c[ci])) {
+                    ack_path_len = g_contacts.c[ci].out_path_len;
+                    const size_t bytes = (size_t)(ack_path_len & 63) * (size_t)((ack_path_len >> 6) + 1);
+                    if (bytes > 0) memcpy(ack_path, g_contacts.c[ci].out_path, bytes);
+                }
+            }
+            n = meshcore::dmBuildAck(ack_path_len == kOutPathUnknown ? nullptr : ack_path, ack_path_len, dm.ack,
+                                     frame, sizeof(frame));
         }
         if (n == 0) {
             ESP_LOGW(TAG, "DM: could not build the %s reply", v.route() == meshcore::kRouteFlood ? "path return"
@@ -450,8 +741,35 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
         {
             StoreLock l;
             rebindRestoredDmPeer(pub, name);
-            contactsUpsert(g_contacts, pub, name, type, v.path_bytes, ts, (uint32_t)time(nullptr), rssi_dbm,
-                           snr_db * 10);
+            // S513/EST-437: remember the row BEFORE the upsert so "new" means "was not in the table", not
+            // "the name changed". A restored contact (NVS or a DM thread from the card) is known, so its advert
+            // is silent; our own echo returned above.
+            const int before = contactsFind(g_contacts, pub);
+            char      old_name[kNameBytes] = {0};
+            uint8_t   old_path = 0;
+            uint8_t   old_type = 0;
+            if (before >= 0) {
+                snprintf(old_name, sizeof(old_name), "%s", g_contacts.c[before].name);
+                old_path = g_contacts.c[before].path_len;
+                old_type = g_contacts.c[before].type;
+            }
+            const uint32_t heard = om::time_source::epochNow();
+            const int      idx =
+                contactsUpsert(g_contacts, pub, name, type, v.path_bytes, ts, heard, rssi_dbm, snr_db * 10);
+            if (idx >= 0) {
+                // Add / rename / route change is worth an immediate NVS write; a repeat advert that only moves
+                // last-heard and SNR waits for the 10-minute floor.
+                const bool structural = before < 0 || strcmp(old_name, g_contacts.c[idx].name) != 0 ||
+                                        old_path != g_contacts.c[idx].path_len ||
+                                        old_type != g_contacts.c[idx].type;
+                markContactsDirty(structural);
+                if (before < 0) {
+                    char text[64];
+                    snprintf(text, sizeof(text), "New node: %s (%s)", name[0] != '\0' ? name : "?",
+                             advertTypeName(type));
+                    om::ui::noticeSet(text, 3000);
+                }
+            }
         }
         return;
     }
@@ -493,7 +811,7 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
         m.channel   = (uint8_t)idx;
         m.outgoing  = false;
         m.ts        = ts;
-        m.local_ts  = (uint32_t)time(nullptr);
+        m.local_ts  = (uint32_t)om::time_source::epochNow();
         m.snr_x10   = (int16_t)(snr_db * 10);
         m.direct    = (v.path_bytes == 0);
         // A message longer than the field is CUT, not dropped: the field widths are the UI's, not MeshCore's.
@@ -516,7 +834,7 @@ static int doText(size_t i, const char* sender, const char* text) {
     // Since S502 it is the app's OWN clock (main/time_source.cpp): the coprocessor's RTC at boot, the stored
     // floor if that was empty, and — only since S513/EST-429 — a time two DIFFERENT adverts agree on. One
     // wrong node can no longer move it. Logged, so a wrong one is visible rather than silent.
-    const uint32_t ts = (uint32_t)time(nullptr);
+    const uint32_t ts = (uint32_t)om::time_source::epochNow();
 
     uint8_t      frame[256];
     const size_t n = meshcore::buildGroupText(g_set.ch[i], ts, sender, text, 2, frame, sizeof(frame));
@@ -551,21 +869,40 @@ static int doText(size_t i, const char* sender, const char* text) {
 }
 
 static int doAdvert(const char* name) {
+    // The 5 s gap counts from the AIR, not from the key press, and this is the only place that knows whether
+    // anything was transmitted. EVERY exit from this function resolves the gate, or a build failure would leave
+    // it "in flight" and no advert could ever be sent again.
+    auto resolve = [](bool ok) {
+        // S513/EST-437: the notice is the REAL result of this transmission, on every exit — a refused radio call
+        // and a build/identity failure both say "Advert NOT sent", never "sent" because the key was pressed. The
+        // notice slot is safe from the radio task (chrome.cpp).
+        om::ui::noticeSet(ok ? "Advert sent" : "Advert NOT sent", 3000);
+        if (g_tx_lock == nullptr) return;
+        xSemaphoreTake(g_tx_lock, portMAX_DELAY);
+        advertResolved(g_advert_gate, monotonicMs(), ok);
+        xSemaphoreGive(g_tx_lock);
+    };
     if (!g_has_id) {
         ESP_LOGE(TAG, "advert: no identity (see the identity lines above)");
+        resolve(false);
         return -1;
     }
-    if (name == nullptr || name[0] == '\0') return -1;
+    if (name == nullptr || name[0] == '\0') {
+        resolve(false);
+        return -1;
+    }
     const uint32_t ts = nextAdvertTimestamp();
     uint8_t        frame[256];
     const size_t   n = meshcore::advertBuild(g_id, ts, name, 2, frame, sizeof(frame));
     if (n == 0) {
         ESP_LOGE(TAG, "advert: build failed (name too long?)");
+        resolve(false);
         return -1;
     }
     const int sent = om::radio::send(frame, n);
     ESP_LOGI(TAG, "ADVERT TX \"%s\" %u B ts %u -> %s", name, (unsigned)n, (unsigned)ts,
              sent > 0 ? "ok" : "FAILED");
+    resolve(sent > 0);   // this also sets "Advert sent" / "Advert NOT sent" from the real result
     return sent > 0 ? (int)n : -1;
 }
 
@@ -580,13 +917,235 @@ bool queueText(size_t i, const char* text) {
     return ok;
 }
 
-bool queueAdvert() {
-    if (g_tx_lock == nullptr) return false;
+bool queueDm(const uint8_t pub[32], const char* text) {
+    if (pub == nullptr || text == nullptr || text[0] == '\0') return false;
+    if (!g_has_id || g_tx_lock == nullptr || g_dm_lock == nullptr) return false;
+    if (strlen(text) > meshcore::kMaxText) return false;
+
+    // The caller gets false only when nothing was stored and nothing was queued, so its text is still its own.
     xSemaphoreTake(g_tx_lock, portMAX_DELAY);
-    const bool ok = g_txq.pushAdvert(kNodeName);
+    const bool queue_full = g_txq.full();
     xSemaphoreGive(g_tx_lock);
-    if (!ok) ESP_LOGW(TAG, "tx: the send queue is full; the advert was NOT queued");
-    return ok;
+    if (queue_full) {
+        ESP_LOGW(TAG, "DM: the send queue is full; \"%s\" was NOT queued", text);
+        return false;
+    }
+
+    uint8_t secret[meshcore::kSecretBytes];
+    if (!meshcore::identitySharedSecret(g_id, pub, secret)) {
+        ESP_LOGE(TAG, "DM: no shared secret for this contact");
+        return false;
+    }
+
+    // The route exactly as the contact stores it: OUT_PATH_UNKNOWN (or a missing row) floods; every other valid
+    // encoding is DIRECT, including a zero-hop path to a neighbour (EST-439).
+    uint8_t path[meshcore::kMaxPath] = {0};
+    uint8_t path_len                 = kOutPathUnknown;
+    char    name[kNameBytes]        = {0};
+    {
+        StoreLock l;
+        const int ci = contactsFind(g_contacts, pub);
+        if (ci >= 0) {
+            path_len = g_contacts.c[ci].out_path_len;
+            const size_t bytes = path_len == kOutPathUnknown
+                                     ? 0
+                                     : (size_t)(path_len & 63) * (size_t)((path_len >> 6) + 1);
+            if (bytes > 0) memcpy(path, g_contacts.c[ci].out_path, bytes);
+            snprintf(name, sizeof(name), "%s", g_contacts.c[ci].name);
+        }
+    }
+    if (name[0] == '\0') snprintf(name, sizeof(name), "%02x%02x%02x%02x", pub[0], pub[1], pub[2], pub[3]);
+
+    const uint32_t          ts = (uint32_t)om::time_source::epochNow();
+    meshcore::DmComposed    c;
+    if (!meshcore::dmCompose(g_id, pub, secret, ts, 0, text, path, path_len, &c)) {
+        ESP_LOGW(TAG, "DM: could not compose \"%s\" (%u chars)", text, (unsigned)strlen(text));
+        return false;
+    }
+
+    // The message goes into the thread (and the card) BEFORE the pending entry, because the entry names it by
+    // its seq. Its state is Sending: the ACK, not the radio's "sent", is what proves delivery (dm_delivery.h).
+    uint32_t seq = 0;
+    {
+        StoreLock l;
+        DmMessage m;
+        memcpy(m.peer_pub, pub, sizeof(m.peer_pub));
+        snprintf(m.peer_name, sizeof(m.peer_name), "%s", name);
+        m.outgoing = true;
+        m.delivery = om::ui::DmState::Sending;
+        m.ts       = ts;
+        m.local_ts = ts;
+        m.direct   = !c.flood;
+        snprintf(m.text, sizeof(m.text), "%.*s", (int)(sizeof(m.text) - 1), text);
+        const int ci   = contactsFind(g_contacts, pub);
+        uint32_t  next = (ci >= 0) ? g_contacts.c[ci].dm_log_next : dmNewestLogId(g_dms, pub) + 1;
+        if (next == 0) next = 1;
+        if (sdhistory::appendDm(pub, m, next)) {
+            m.log_id = next;
+            if (ci >= 0) g_contacts.c[ci].dm_log_next = next + 1;
+        }
+        seq = dmPush(g_dms, m);
+    }
+
+    const uint32_t airtime = meshcore::dmAirtimeMillis(c.frame_len);
+    xSemaphoreTake(g_dm_lock, portMAX_DELAY);
+    meshcore::dmPendingBegin(g_dm_pending, pub, seq, c.expected_ack,
+                             c.flood ? meshcore::dmFloodTimeoutMillis(airtime)
+                                     : meshcore::dmDirectTimeoutMillis(airtime, path_len),
+                             !c.flood, monotonicMs());
+    xSemaphoreGive(g_dm_lock);
+
+    // The pending entry exists BEFORE the frame can leave, so an ACK that arrives quickly still finds it.
+    if (!queueFrame(c.frame, c.frame_len)) {
+        xSemaphoreTake(g_dm_lock, portMAX_DELAY);
+        meshcore::dmPendingDrop(g_dm_pending, seq);
+        xSemaphoreGive(g_dm_lock);
+        StoreLock l;
+        if (DmMessage* m = findDmBySeq(seq)) {
+            m->delivery = om::ui::DmState::Failed;
+            if (m->log_id != 0) {
+                (void)sdhistory::appendDmState(m->peer_pub, m->log_id, m->delivery,
+                                               (uint32_t)om::time_source::epochNow());
+            }
+        }
+        ESP_LOGW(TAG, "DM: the frame could not be queued; \"%s\" was not sent", text);
+        return false;
+    }
+    ESP_LOGI(TAG, "DM: queued \"%s\" to \"%s\" (%u B, %s, attempt 0)", text, name, (unsigned)c.frame_len,
+             c.flood ? "flood" : "direct");
+    return true;
+}
+
+bool dmTick() {
+    if (g_dm_lock == nullptr || g_store_mutex == nullptr) return false;
+
+    meshcore::DmTimeout due;
+    xSemaphoreTake(g_dm_lock, portMAX_DELAY);
+    due = meshcore::dmPendingTimeout(g_dm_pending, monotonicMs());
+    xSemaphoreGive(g_dm_lock);
+    if (due.action == meshcore::DmTimeoutAction::None) return false;
+
+    if (due.action == meshcore::DmTimeoutAction::GiveUp) {
+        bool changed = false;
+        {
+            StoreLock l;
+            DmMessage* m = findDmBySeq(due.msg_id);
+            if (m != nullptr) {
+                m->delivery = om::ui::DmState::NotConfirmed;
+                changed      = true;
+                if (m->log_id != 0) {
+                    (void)sdhistory::appendDmState(m->peer_pub, m->log_id, m->delivery,
+                                                   (uint32_t)om::time_source::epochNow());
+                }
+                ESP_LOGI(TAG, "DM: message %u has NO CONFIRMATION after %u attempts", (unsigned)due.msg_id,
+                         (unsigned)meshcore::kDmMaxAttempts);
+            }
+        }
+        return changed;
+    }
+
+    // A retry is due: the text and the timestamp are the ORIGINAL message's (MeshCore keeps the timestamp and
+    // changes only the attempt, BaseChatMesh.cpp:451-471); the route may have been learned since, or cleared if
+    // the direct attempt timed out.
+    uint8_t  pub[32]      = {0};
+    uint8_t  path[meshcore::kMaxPath] = {0};
+    uint8_t  path_len     = kOutPathUnknown;
+    char     text[kTextBytes] = {0};
+    uint32_t ts           = 0;
+    {
+        StoreLock l;
+        DmMessage* m = findDmBySeq(due.msg_id);
+        if (m == nullptr) {
+            // The ring evicted it: nothing left to retry (the log still has the message).
+            xSemaphoreTake(g_dm_lock, portMAX_DELAY);
+            meshcore::dmPendingDrop(g_dm_pending, due.msg_id);
+            xSemaphoreGive(g_dm_lock);
+            ESP_LOGW(TAG, "DM: message %u left the ring before its retry", (unsigned)due.msg_id);
+            return false;
+        }
+        memcpy(pub, m->peer_pub, sizeof(pub));
+        ts = m->ts;
+        snprintf(text, sizeof(text), "%s", m->text);
+
+        const int ci = contactsFind(g_contacts, pub);
+        if (ci >= 0) {
+            if (due.clear_path && contactHasOutPath(g_contacts.c[ci])) {
+                g_contacts.c[ci].out_path_len = kOutPathUnknown;
+                memset(g_contacts.c[ci].out_path, 0, sizeof(g_contacts.c[ci].out_path));
+                markContactsDirty(true);
+                ESP_LOGI(TAG, "DM: the direct attempt failed; the route to \"%s\" is cleared",
+                         g_contacts.c[ci].name);
+            }
+            path_len = g_contacts.c[ci].out_path_len;
+            const size_t bytes = path_len == kOutPathUnknown
+                                     ? 0
+                                     : (size_t)(path_len & 63) * (size_t)((path_len >> 6) + 1);
+            if (bytes > 0) memcpy(path, g_contacts.c[ci].out_path, bytes);
+        }
+    }
+
+    uint8_t secret[meshcore::kSecretBytes];
+    if (!meshcore::identitySharedSecret(g_id, pub, secret)) {
+        xSemaphoreTake(g_dm_lock, portMAX_DELAY);
+        meshcore::dmPendingDrop(g_dm_pending, due.msg_id);
+        xSemaphoreGive(g_dm_lock);
+        return false;
+    }
+    meshcore::DmComposed c;
+    const uint8_t        attempt = due.attempt;
+    if (!meshcore::dmCompose(g_id, pub, secret, ts, attempt, text, path, due.flood ? kOutPathUnknown : path_len,
+                             &c)) {
+        ESP_LOGW(TAG, "DM: retry %u could not be composed", (unsigned)attempt);
+        return false;
+    }
+
+    const uint32_t airtime = meshcore::dmAirtimeMillis(c.frame_len);
+    const uint32_t timeout = c.flood ? meshcore::dmFloodTimeoutMillis(airtime)
+                                     : meshcore::dmDirectTimeoutMillis(airtime, path_len);
+    // Rearm BEFORE queueing: the reply to this attempt can arrive before queueFrame() has even returned.
+    xSemaphoreTake(g_dm_lock, portMAX_DELAY);
+    meshcore::dmPendingRearm(g_dm_pending, due.msg_id, c.expected_ack, timeout, !c.flood, monotonicMs());
+    xSemaphoreGive(g_dm_lock);
+
+    if (!queueFrame(c.frame, c.frame_len)) {
+        xSemaphoreTake(g_dm_lock, portMAX_DELAY);
+        meshcore::dmPendingDelay(g_dm_pending, due.msg_id, 300, monotonicMs());
+        xSemaphoreGive(g_dm_lock);
+        ESP_LOGW(TAG, "DM: retry %u could not be queued; trying again shortly", (unsigned)attempt);
+        return false;
+    }
+    ESP_LOGI(TAG, "DM: retry %u queued for message %u (%u B, %s)", (unsigned)attempt, (unsigned)due.msg_id,
+             (unsigned)c.frame_len, c.flood ? "flood" : "direct");
+    return true;
+}
+
+AdvertDecision queueAdvert() {
+    AdvertDecision d;
+    if (g_tx_lock == nullptr) {
+        d.verdict = AdvertVerdict::Busy;   // the link is not up yet: nothing can be queued
+        return d;
+    }
+    bool refused_by_queue_full = false;
+    xSemaphoreTake(g_tx_lock, portMAX_DELAY);
+    d = advertRequest(g_advert_gate, monotonicMs());
+    if (d.verdict == AdvertVerdict::Send) {
+        if (g_txq.pushAdvert(kNodeName)) {
+            advertQueued(g_advert_gate);
+        } else {
+            // The queue is full. The advert was NOT queued, so the gate must not say one is in flight.
+            d.verdict             = AdvertVerdict::Busy;
+            refused_by_queue_full = true;
+            ESP_LOGW(TAG, "tx: the send queue is full; the advert was NOT queued");
+        }
+    }
+    xSemaphoreGive(g_tx_lock);
+    if (d.verdict == AdvertVerdict::Wait) {
+        ESP_LOGI(TAG, "advert: refused, %u s left of the %u s gap", (unsigned)d.wait_s,
+                 (unsigned)(kAdvertGapMs / 1000));
+    } else if (d.verdict == AdvertVerdict::Busy && !refused_by_queue_full) {
+        ESP_LOGI(TAG, "advert: refused, one is still queued");
+    }
+    return d;
 }
 
 void serviceRequests() {
@@ -595,10 +1154,16 @@ void serviceRequests() {
     // The schedule first: an advert at start and every kAdvertIntervalUs. This is what makes the node
     // discoverable on its own; the 'a' key only forces one early. It goes to the BACK of the queue and only when
     // nothing the user typed is waiting — a scheduled advert must never displace, or delay, a message.
+    // S513/EST-435: it asks the SAME 5 s rule as the key, so a manual advert two seconds ago also defers the
+    // schedule. A refusal here is silent on purpose: nothing was pressed, so there is nothing to tell.
     static int64_t s_last_advert_us = 0;
     if (g_has_id && (s_last_advert_us == 0 || esp_timer_get_time() - s_last_advert_us >= kAdvertIntervalUs)) {
         xSemaphoreTake(g_tx_lock, portMAX_DELAY);
-        if (!g_txq.hasText() && g_txq.pushAdvert(kNodeName)) s_last_advert_us = esp_timer_get_time();
+        if (advertRequest(g_advert_gate, monotonicMs()).verdict == AdvertVerdict::Send && !g_txq.hasText() &&
+            g_txq.pushAdvert(kNodeName)) {
+            advertQueued(g_advert_gate);
+            s_last_advert_us = esp_timer_get_time();
+        }
         xSemaphoreGive(g_tx_lock);
     }
 
@@ -614,7 +1179,7 @@ void serviceRequests() {
     if (req.kind == TxKind::Text) {
         doText((size_t)req.channel, req.sender, req.text);   // a COPY of what the main task queued
     } else if (req.kind == TxKind::Advert) {
-        doAdvert(req.sender);
+        doAdvert(req.sender);   // resolves the 5 s gate on every path, including "never got on the air"
     } else {
         // A reply built on the radio task (DM ACK / path return): this is the only place it is transmitted.
         const int sent = om::radio::send(req.frame, req.frame_len);

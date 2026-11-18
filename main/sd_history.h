@@ -47,6 +47,10 @@ bool appendDm(const uint8_t pub[32], const mc::DmMessage& m, uint32_t log_id);
 size_t loadDm(const uint8_t pub[32], const char* peer_name, mc::DmMessage* out, size_t max_out,
               uint32_t* out_max_log_id = nullptr);
 bool appendDmSeen(const uint8_t pub[32], uint32_t seen_log_id, uint16_t unread);
+
+// S513/EST-439: append the delivered mark to a DM's log as the L2's Update record (history_log.h Type::Update),
+// naming the message by its log id. The state survives a restart because loadDm applies it in file order.
+bool appendDmState(const uint8_t pub[32], uint32_t log_id, om::ui::DmState state, uint32_t ack_wall);
 mc::SeenPoint loadDmSeen(const uint8_t pub[32]);
 
 // Scan the history directory at boot and restore every dm-*.log into `ring`/`contacts`. A restored thread's contact

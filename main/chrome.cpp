@@ -1,12 +1,63 @@
 // SPDX-License-Identifier: MIT
 #include "chrome.h"
 
+#include <stdio.h>
+#include <string.h>
+
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"   // taskENTER_CRITICAL: the radio task publishes, the main task draws
+
 #include "launcher_page.h"   // textBaseline / drawText* — the one place the baseline math lives
 #include "tm_theme.h"
 #include "../../firmware/src/ui/theme.h"   // the L2 palette: one source of truth, never copied
 
 namespace om {
 namespace ui {
+namespace {
+
+// ---- the app's ONE notice (S513/EST-435) ----------------------------------------------------------------------
+// Filled by noticeSet() from whichever task decided it, copied out by noticeText() on the main task. The lock is a
+// critical section, not a mutex: the longest it is ever held is one short copy, so it cannot delay the radio.
+portMUX_TYPE g_notice_mux = portMUX_INITIALIZER_UNLOCKED;
+
+struct NoticeSlot {
+    // 64, not 40: S513/EST-437's "New node: <name> (<type>)" can reach 44 bytes (a 23-character advert name and
+    // "repeater"), and a truncated node name would be worse than a wider plate.
+    char     text[64] = {0};
+    int64_t  until_us = 0;     // esp_timer time after which it is no longer live
+};
+
+NoticeSlot g_notice;
+char       g_notice_copy[64] = {0};   // the reader's own copy: drawn text never changes under the drawer
+
+}  // namespace
+
+void noticeSet(const char* text, uint32_t ttl_ms) {
+    if (text == nullptr || text[0] == '\0') return;
+    taskENTER_CRITICAL(&g_notice_mux);
+    snprintf(g_notice.text, sizeof(g_notice.text), "%s", text);
+    // "Newest wins": a second notice replaces the first and restarts its life, so the strip can never show a
+    // stale sentence next to a fresh one.
+    g_notice.until_us = esp_timer_get_time() + (int64_t)ttl_ms * 1000;
+    taskEXIT_CRITICAL(&g_notice_mux);
+}
+
+void noticeClear() {
+    taskENTER_CRITICAL(&g_notice_mux);
+    g_notice.text[0] = '\0';
+    g_notice.until_us = 0;
+    taskEXIT_CRITICAL(&g_notice_mux);
+}
+
+const char* noticeText() {
+    const int64_t now = esp_timer_get_time();
+    taskENTER_CRITICAL(&g_notice_mux);
+    const bool live = g_notice.text[0] != '\0' && now < g_notice.until_us;
+    if (live) snprintf(g_notice_copy, sizeof(g_notice_copy), "%s", g_notice.text);
+    taskEXIT_CRITICAL(&g_notice_mux);
+    return live ? g_notice_copy : nullptr;
+}
+
 
 // The five physical symbol keys, drawn as vectors (BRIEF § 5; the preview tool's recipes, ported).
 // Cloud is an OUTLINE like the other four (Filip, S499 "fix the cloud symbol").
@@ -141,6 +192,22 @@ int drawPageHead(Screen& s, const char* title, const char* right_text) {
 
 void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_count) {
     const int W = kTmW, H = kTmH;
+
+    // S513/EST-435: the app's one notice, as a plate just above the bar, right-aligned so it sits clear of the
+    // key hints. It is drawn LAST in the frame's order but it is part of the chrome, so every page gets it without
+    // knowing it exists. A page that fills this strip with content loses only the 22 px behind the plate.
+    if (const char* notice = noticeText()) {
+        const Font* f  = fontFor(Face::Hint);
+        const int   tw = (f != nullptr && f->ready()) ? f->textWidth(notice) : 200;
+        const int   ph = 22;
+        const int   pw = tw + 20;
+        const int   px = W - kTmPad - pw;
+        const int   py = H - kTmHintH - ph - 2;
+        drawRoundedRect(s, px, py, pw, ph, 4, kPanel2);
+        s.frame(px, py, pw, ph, 1, kLine);
+        drawText(s, Face::Hint, px + 10, textBaseline(s, Face::Hint, py, ph), notice, kAccInk);
+    }
+
     s.fillRect(0, H - kTmHintH, W, kTmHintH, kBar);
     s.hline(0, W, H - kTmHintH, kLine);
     const int hy = H - kTmHintH;

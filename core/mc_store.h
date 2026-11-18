@@ -12,6 +12,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "mc_wire.h"   // meshcore::kMaxPath: MeshCore's own limit on a stored route
+// The L2's delivery states (firmware/src/ui/dm_delivery.h): Sending / Delivered / NotConfirmed / Failed, with
+// dmStateToken() giving the words. Reused rather than re-invented — the same numbers go into the card log's
+// `delivery` byte (firmware/src/history/history_log.h, Msg::delivery).
+#include "../../firmware/src/ui/dm_delivery.h"
+
 namespace om {
 namespace mc {
 
@@ -20,6 +26,7 @@ constexpr size_t kMaxMessages  = 64;    // across all channels; the oldest goes 
 constexpr size_t kNameBytes    = 24;    // "TNMT (SI)" plus a NUL, the same width mc_link uses
 constexpr size_t kTextBytes    = 160;   // one MeshCore group text, in bytes
 constexpr size_t kMaxPathHops  = 8;
+constexpr uint8_t kOutPathUnknown = 0xFF;   // OUT_PATH_UNKNOWN (ContactInfo.h; MeshCore.h:19) — never a route
 constexpr size_t kMaxChannels  = 8;     // matches meshcore::kMaxChannels
 
 // MeshCore's advert type, low bits of the flags byte (AdvertDataHelpers: CHAT 1, REPEATER 2, ROOM 3, SENSOR 4).
@@ -40,7 +47,15 @@ struct Contact {
     uint32_t dm_seen = 0;
     uint32_t dm_seen_log = 0;   // the log id the on-card Meta record already names (0 = none written this boot)
     uint32_t dm_log_next = 1;   // the next id in this contact's dm-<8 hex>.log (1 = a fresh file)
+    // S513/EST-439: the route we learned from a PATH packet, exactly as MeshCore keeps ContactInfo::out_path /
+    // out_path_len. OUT_PATH_UNKNOWN (0xFF) means "no route, flood"; a COUNT of 0 is a real DIRECT route to a
+    // neighbour heard directly (BaseChatMesh.cpp:481-486 only tests against OUT_PATH_UNKNOWN).
+    uint8_t  out_path_len = kOutPathUnknown;
+    uint8_t  out_path[meshcore::kMaxPath] = {0};
 };
+
+// MeshCore's ONE distinction: only OUT_PATH_UNKNOWN means "no route"; a zero-hop path is a direct neighbour.
+inline bool contactHasOutPath(const Contact& c) { return c.out_path_len != kOutPathUnknown; }
 
 struct ContactStore {
     Contact c[kMaxContacts];
@@ -104,6 +119,10 @@ struct DmMessage {
     int16_t  snr_x10 = 0;
     bool     direct = false;    // path_len 0 in the received frame
     uint32_t log_id = 0;        // id in that contact's log file (item 4), 0 = not written
+    // S513/EST-439: for OUR outgoing DMs, the delivery state the ACK proves (the L2's DmState). An incoming
+    // message leaves this at Sending; only an outgoing one is ever advanced, and the log's Update record keeps it
+    // across a restart (dm_delivery.h + history_log.h).
+    om::ui::DmState delivery = om::ui::DmState::Sending;
 };
 
 struct DmRing {

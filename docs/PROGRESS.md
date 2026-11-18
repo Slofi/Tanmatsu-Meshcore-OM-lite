@@ -15,6 +15,353 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-18 · S513 (EST-439) · DM send, wired
+
+> Written by DeepSeek for ticket EST-439 (fenced Paperclip run: no session start/end, nothing installed, flashed or
+> committed). Continues EST-436: its core (`core/dm_send.*`) is unchanged except for item 0 below. **Version: 42.**
+
+### 0. One defect first: a zero-hop direct route is a route
+- `dmCompose()` refused `path_bytes == 0` ("is not a route"). In MeshCore the ONLY "no route" value is
+  `OUT_PATH_UNKNOWN` (`ContactInfo.h`; `MeshCore.h:19`, 0xFF); `sendMessage()` tests exactly that and otherwise calls
+  `sendDirect(pkt, out_path, out_path_len)` (BaseChatMesh.cpp:481-486), which is how a neighbour heard directly is
+  sent to — path count 0, hash-size bits kept.
+- Fixed: `dmCompose()` floods only for a null path OR `out_path_len == kDmPathUnknown` (0xFF); every valid encoding is
+  DIRECT, count 0 included. The test that pinned the refusal now pins the opposite, and it was **armed red against
+  the old rule** (`sweep/est439/arm0-old/`, new test + old `dm_send.cpp`): **12 failures**, then 0 with the fix.
+- New checks also pin the oracle's direct frame byte for byte with the two path bytes removed, the 0x00 (1-byte
+  hashes, count 0) case, and that 0xFF still floods.
+
+### 1. The wiring: queueDm → radio task → ACK/PATH → main-task retry
+- `mc::queueDm(pub, text)` (MAIN task) composes attempt 0 against the contact's stored route, writes the outgoing
+  message into the thread and `dm-<8 hex>.log` as **SENDING**, begins the pending entry (expected ACK computed over OUR
+  pubkey), then `pushFrame`s it. It never transmits, and it refuses BEFORE storing anything when the send queue is
+  full — so the caller keeps its text.
+- The RADIO task handles the answer, and still never transmits from the RX path: a **PATH** packet is opened with
+  `dmOpenPath` (decrypted route + extra), the route is stored on the contact (and marks the NVS blob dirty), and an
+  embedded ACK clears the pending entry; a plain **ACK** (4-byte payload) matches the same table. The delivered mark
+  is written under the store lock; the reply the radio builds still leaves through the tx queue.
+- `mc::dmTick()` (MAIN task, every loop) polls `dmPendingTimeout`: retry attempt 1 then 2, the LAST attempt is a flood,
+  and a DIRECT attempt that timed out **clears the stored route**; after attempt 2 the message becomes
+  **no confirmation**. A retry is composed and QUEUED, never sent inline; a retry that cannot be queued is postponed
+  300 ms without spending the attempt (`dmPendingDelay`).
+- Timeouts are the companion's formula (MyMesh.cpp:888-895). The C6 lora component has no `getEstAirtimeFor()`, so
+  `dmAirtimeMillis()` is the SX1262 time-on-air formula at `kSloPlan`'s numbers (SF8 / 62.5 kHz / CR 4/8 / preamble
+  32). It only sizes a timeout; the ACK still decides delivery. A direct arrival is now ACKed along the stored route
+  when there is one (`dmBuildAck`), and flooded only for OUT_PATH_UNKNOWN.
+
+### 2. The route survives a restart — contact blob version 2
+- `Contact` grew `out_path_len` + `out_path[kMaxPath]` (default 0xFF/zero), filling EST-437's reserved slot, so the
+  record width stays 148. `kContactBlobVersion = 2`; **a version-1 blob still loads** and every route comes back
+  OUT_PATH_UNKNOWN. A stored encoding that is not valid (hash-size 4 reserved, or too many bytes) is treated as
+  unknown rather than trusted. Tests: every field round-trips (including a zero-hop 0x40), v1 loads, a bad route byte
+  is ignored, and the encoder writes 0xFF (not a zero-length direct path) for an unknown route.
+
+### 3. UI: the DM thread has the channel's composer, and our lines carry their state
+- A DM thread types and sends exactly like a channel: Enter calls `queueDm`; a full queue is refused and the text
+  stays in the composer with **"radio busy, not sent"** in the head slot for 3 s. Backspace deletes a UTF-8 sequence.
+  The "sending DMs comes next" line and the DM-only hint bar are gone.
+- Our message shows at once on the right under **"you"**, with its state AFTER the time: `09:52 sending` →
+  `09:48 delivered` → `no confirmation` after the last attempt. The font has no check glyph, so the word is drawn;
+  the state values are the L2's own `om::ui::DmState` (`firmware/src/ui/dm_delivery.h`).
+- Outgoing DMs are written to `dm-<8hex>.log` with the format's outgoing flag (`Msg::mine`). The delivered mark is
+  kept across a restart **the L2's way**: the message record carries the format's `delivery` byte, and the ACK appends
+  an **Update** record (`history_log.h` Type::Update / `kUpdateState`, naming the log id); `historyLoadDm` applies
+  Update records in file order. A power cut before the ACK therefore comes back as "sending", never as delivered.
+
+### 4. Preview
+- `shots/2026-11-18-dm-send.png` (host render, `tools/preview_tanmatsu.py dm_send`): two messages from Alpha on the
+  left, two from us on the right — `09:48 delivered` and `09:52 sending` — above the shared composer.
+
+### Results
+- `sh test/host/run.sh` → **exit 0**. Totals (checks): core 192, clock 91, store 127, **history 84** (the delivery
+  Update round trip is new), layout 62, mc 115, dm 45, mc-ASan 115, dm-ASan 45, **dm_send 140** (was 113; drop/delay/
+  airtime are new), dm_send-ASan 140, map 267, txqueue 93, chat cards 99, advert 162, **contact_blob 1190** (v1 load
+  and route round trip are new). The UBSan lines from the vendored ed25519 `fe.c/ge.c` are pre-existing and not ours.
+- `make build` → **exit 0**, `application.bin` **1,462,240 B (0x164fe0), 0x9b020 B (30 %) of the 2 MB app partition
+  free** — +12,002 B over v42/EST-437 (1,450,238 B), no warning from our own files.
+- Files: `core/dm_send.{h,cpp}`, `core/mc_store.h`, `core/contact_blob.{h,cpp}`, `core/mc_history.{h,cpp}`,
+  `main/mc_link.{h,cpp}`, `main/chat_page.{h,cpp}`, `main/main.cpp`, `main/sd_history.{h,cpp}`,
+  `test/host/test_dm_send.cpp`, `test/host/test_contact_blob.cpp`, `test/host/test_history.cpp`,
+  `tools/preview_tanmatsu.py`, `shots/2026-11-18-dm-send.png`.
+- **Not checked:** nothing ran on hardware, so no real ACK/PATH was received, no retry was seen on the air, and the
+  PNG is a host render. The radio queue, the NVS write and the 10-minute floor are the EST-437 paths, unchanged.
+
+### Next
+- Install v42 and try a DM to a real neighbour: the log line `DM: route to "<name>" stored (path_len 0x40, 0 hops)`
+  is the one-hop case item 0 fixed; `DM: message N DELIVERED` is the ACK; the thread's state must read `delivered`
+  after a restart (the Update record). A neighbour that never answers should show `no confirmation` after ~3 attempts.
+
+## 2026-11-18 · S513 (EST-437) · contacts kept + advert notices
+
+> Written by DeepSeek for ticket EST-437 (fenced Paperclip run: no session start/end, nothing installed, flashed or
+> committed). **Version for Claude's install: 42** (one image with EST-435..437). This entry is written FIRST, as the
+> ticket asks; the Results section is filled in as the work finishes.
+
+### 1. Contacts kept across restarts — NVS namespace `mcct`, one versioned blob
+- `core/contact_blob.{h,cpp}` is the pure codec: header `version(1) | count(1) | record_size(2, LE)`, then one
+  92-byte record per contact (`pub 32`, `name 24`, `type 1`, `path_len 1`, `remote_ts 4`, `heard_at 4`, `rssi 2`,
+  `snr 2`, `favourite 1`, `dm_seen 4`, `dm_seen_log 4`, `dm_log_next 4`, and a **reserved out_path slot
+  `len 1 + bytes 8`** — EST-436 did not add an out_path to `Contact`, so it is reserved, not guessed).
+  No NVS, no clock, no radio in this file; the host tests drive it directly.
+- `main/mc_link.cpp` owns the NVS I/O. `restoreContacts()` runs at boot **before the radio task exists** and logs
+  `contacts: N restored from NVS`; a bad version, record size or length is ignored with one warning line. A wrong
+  blob can never half-fill the table: the decoder validates every header field BEFORE its first write.
+- Writes are **never made on the radio task**. An advert marks a dirty flag instead: add / rename / route (path)
+  change is written on the next main-loop pass; last-heard / SNR changes at most once per 10 minutes. The blob is
+  encoded under the store lock into a static buffer, the flags are cleared before the lock is released, and only
+  then is NVS written — a mutation during the write sets the flag again. **Route change currently means
+  `path_len`**: EST-436 added no route bytes to `Contact`, and the reserved `out_path` slot is zeroes today.
+
+### 2. Advert notices — the two sentences item 2 asks for
+- `doAdvert()` sets **"Advert sent"** when `radio::send()` returned > 0 and **"Advert NOT sent"** otherwise, for 3 s,
+  through the shared chrome notice slot (already safe from the radio task).
+- The advert RX branch takes `contactsFind()` **before** `contactsUpsert()`; only a genuinely added contact (not a
+  known one, not our own echo, which returns earlier) shows **"New node: <name> (<type>)"**, with the L2's
+  `node_menu.h` words `client / repeater / room / sensor / node` (a full table adds nothing, so it says nothing).
+
+### Results — both items done
+
+- **Host:** `sh test/host/run.sh` → **exit 0**, **16 stages, 2838 checks, 0 failures**; no AddressSanitizer report
+  (the ed25519 `left shift of negative value` UBSan lines remain the vendored third-party C). The new stage is
+  **1125 checks** (`test_contact_blob`, exit 0). **Before: 1736 checks.** The arithmetic reconciles exactly:
+  1736 − 23 (a stray duplicate `"$MENU"` run left at the end of run.sh by EST-435; it tested the same 23-check
+  suite twice, and this stage replaces it as the last line) + 1125 = **2838**. Logs:
+  `paperclip-pilot/sweep/est437-host-before.log` and `est437-host-final.log`.
+- **Build:** `make build` → **exit 0**, **0** `warning:` / `error:` lines. `application.bin` =
+  **0x162290 = 1,450,640 B**, **0x9dd70 = 646,512 B (31 %) of the 2 MB app partition free**; total image
+  **1,450,238 B**; **DIRAM 194,036 B (33.9 %)**. v41 was 1,447,456 B, so this is **+3,184 B** (the blob codec,
+  the NVS glue and the notice text). Logs: `paperclip-pilot/sweep/est437-build-final2.log`,
+  `est437-size-final2.log`. One compile fix worth naming: adding `chrome.h` to `mc_link.cpp` collides with
+  `<time.h>` (`struct tm` vs `namespace tm`), so the file now asks `time_source::epochNow()` — exactly the rule
+  `time_source.h` already states — instead of including `<time.h>`.
+- **ARM, against a codec with five deliberate rule breaks** (copy in `paperclip-pilot/sweep/est437-arm/`):
+  header record size written as 147, version check removed, truncated reported as wrong-size, count limit removed,
+  name terminator not forced → **ARM_EXIT=1**, **95 checks, 8 FAILURES**, log
+  `paperclip-pilot/sweep/est437-arm.log`. The real tree is **1125 checks, 0 failures**. The FAIL lines pin the
+  wrong version, truncation, extra bytes and full-table cases, not just the happy path.
+
+### Files changed
+
+- **new** `core/contact_blob.{h,cpp}` — the versioned blob codec; reserved `out_path_len + out_path[kMaxPath]`
+  slot (EST-436 added no `Contact.out_path`), no NVS/clock/radio inside.
+- **new** `test/host/test_contact_blob.cpp` — 1125 checks: empty table, full-field round trip, wrong version,
+  wrong record width, every truncation of a two-row blob, extra bytes, over-large count, the full 32-row table,
+  unterminated name, the reserved zeroed route slot, short-buffer refusal.
+- `test/host/run.sh` — the new stage; the stray duplicate `"$MENU"` at the end replaced by it.
+- `core/CMakeLists.txt` — `contact_blob.cpp` added to the component.
+- `main/mc_link.{h,cpp}` — `restoreContacts()` (before the radio task, `contacts: N restored from NVS`, wrong
+  blob ignored with a warning), `contactsPersistTick()` (main task; structural immediate, last-heard/SNR 10-minute
+  floor, 10 s retry after a failed write), dirty flags set on add/rename/route/rebind, and the two advert notices.
+- `main/main.cpp` — `restoreContacts()` before `restoreDmHistory()` and before `core.start()`; `contactsPersistTick()`
+  in the main loop.
+- `main/chrome.cpp` — notice slot 40 → 64 bytes so a 44-byte "New node: <name> (<type>)" is never cut.
+- `docs/PROGRESS.md` — this entry.
+
+### Not done / not verified
+
+1. **Nothing was installed or flashed**, so the NVS read/write and both notices are proven by the host tests and
+   the build, not on the glass. The exact log line to look for after Claude's install is
+   `contacts: N restored from NVS`.
+2. The NVS blob is **not** CRC-protected; the ticket asked for version/size, and a fixed 148-byte record plus an
+   exact length catches truncation and a format change. A corrupted-but-right-sized record would decode as data.
+3. Last-heard/SNR is written at most every 10 minutes **and not at all in the first 10 minutes after boot** (the
+   floor starts at boot); an add/rename/route change is never delayed by that floor.
+4. No PNG was produced (this ticket is code + tests only).
+5. **Version for Claude's install: 42** — one image carrying EST-435, EST-436 and EST-437.
+
+
+## 2026-11-18 · S513 (EST-436) · direct messages slice 2: send + delivered — the CODE RULES, not the wiring
+
+> Written by DeepSeek for ticket EST-436 (fenced Paperclip run: no session start/end, nothing installed, flashed or
+> committed). Verdict: **item 1 is done; item 2's rules are done in the core and NOT wired; items 3, 4, 5 were not
+> started.** The ticket's **30-minute cap** is why, and item 3 has a precondition that is not in the tree.
+
+**Read first:** `BRIEF.md`; this file's S513 entries (EST-435, EST-433/434); `core/mc_dm.*`, `core/mc_store.*`,
+`core/tx_queue.*`; `main/mc_link.{h,cpp}` (the TXT_MSG RX path and `serviceRequests()`), `main/chat_page.*` and
+`main/main.cpp` (the channel composer); and, line by line, upstream: `helpers/BaseChatMesh.cpp:43-58, 222-270,
+341-384, 451-492, 989-994`, `Mesh.cpp:117-128, 160-205, 441-486, 488-505`, `MeshCore.h:19`,
+`Packet.cpp:13-18`, and the companion's `MyMesh.cpp:108-112, 417-438, 888-895`.
+
+### 1. The core rules — `core/dm_send.*` (DONE, host-tested)
+Every rule is a port with a citation, not an invention:
+- **Compose** (`dmCompose`, BaseChatMesh.cpp:451-471 + Mesh.cpp:488-505): `plain = ts(4, LE) | (attempt & 3) | text`
+  (length `5 + text_len`, NUL excluded), `attempt > 3` appends NUL + the full attempt byte (and refuses
+  `text_len > MAX_TEXT_LEN-2`); `expected_ack = sha256(plain || OUR pub)[0..4]` — the hash stops BEFORE the
+  extended-attempt tail; payload `= THEIR pub[0] | OUR pub[0] | encryptThenMAC(secret, plain)`. No stored route →
+  the usual FLOOD (`path_len 0x40`, 2-byte hashes, count 0); a stored route → DIRECT with `out_path_len` copied
+  back and its bytes, exactly `sendDirect`.
+- **PATH parse** (`dmOpenPath`, Mesh.cpp:160-180): payload is `dest(1) src(1) | sealed`, sealed decrypts to
+  `path_len | path | extra_type | extra`. `path_len` is validated with `Packet::isValidPathLen`'s own rule
+  (Packet.cpp:13-18: hash_size 4 is reserved, count*hash_size ≤ MAX_PATH_SIZE), and **every offset is checked
+  against the decrypted length before it is used**, because `extra_len` is "remainder of packet (may be padded
+  with zeroes)". A PATH with a bad/truncated length yields nothing.
+- **ACK matching** (`dmPendingBegin/ Rearm/ Ack/ Timeout`): 8 slots, the oldest reused when full (never drop a new
+  send), matched on **four bytes** as `MyMesh::processAck` does (MyMesh.cpp:425), and a matched slot is cleared
+  because "the same ACK can be received multiple times" (MyMesh.cpp:431). A plain ACK packet is
+  `dmAckPayload`: ACK header, payload ≥ 4 bytes, first four are the crc (Mesh.cpp:117-121). Our own EST-434
+  builder's **6**-byte ACK (crc + attempt + random) is therefore accepted, which is why the test pins both 4 and 6.
+
+### 2. The retry rule — the ticket's, and what upstream actually does (rules done, wiring NOT done)
+**Said plainly, because the ticket asked:** the retry loop is **not in this tree's upstream library**.
+`BaseChatMesh::loop()` only calls `onSendTimeout()` when `txt_send_timeout` expires
+(BaseChatMesh.cpp:989-994), and the companion leaves `MyMesh::onSendTimeout()` **empty** (MyMesh.cpp:897); the
+phone app drives attempts. The L2's own app did retry (`firmware/src/mesh_link.cpp:570-596, 1564-1574`,
+attempt 0..3 on `est_timeout`), but it **never forced a flood** and **never cleared a path**. So, per the ticket's
+fallback: retry on timeout, **the last attempt is a flood even with a stored path**, and **a failed DIRECT attempt
+clears the stored path**. `dmPendingTimeout()` returns exactly that (`Retry` with `flood`/`clear_path`, or
+`GiveUp`), and nothing in it transmits. The per-attempt deadlines are the companion's arithmetic, copied:
+`flood = 500 + 16 * airtime_ms`, `direct = 500 + (airtime_ms*6 + 250) * (hash_count+1)`
+(MyMesh.cpp:888-895, constants :108-111).
+**Not done:** wiring this into `main/mc_link.cpp` (a `TxKind`/queue path for a composed DM, the deadline poll next
+to the advert schedule, and the delivered state in the DM store). No half-built version is in the tree.
+
+### 3. out_path in EST-435's NVS contact record — BLOCKED, the record does not exist
+EST-435's own entry above says item 3 (**contacts across restarts, NVS**) was **NOT DONE**: `ContactStore` is still
+RAM only, there is no NVS namespace, no encoder and no record version. So there is nothing to bump. Doing this
+ticket's item 3 would first mean building the whole contact record (a separate ticket's worth). Recorded rather
+than guessed; no NVS code was written here.
+
+### 4 and 5. UI composer, the state after the time, the preview — NOT STARTED
+`chat_page.cpp:203-205` still draws the dim **"sending DMs comes next"** line, `main.cpp:917-946` still refuses
+Enter and typing while a DM is open, and there is no `shots/2026-11-18-dm-send.png`. Nothing was half-wired.
+
+### Results (real exit codes)
+- `sh test/host/run.sh` → **exit 0**, **16 stages, 1736 checks, 0 failures**, no AddressSanitizer report (the
+  ed25519 `left shift of negative value` UBSan lines are the vendored third-party C and pre-existing).
+  **Before this change: 14 stages, 1510 checks** (EST-435's own final figure). **+226 checks** = the new stage
+  **113** checks twice (normal **and** the new ASan stage); 1510 + 226 = 1736, which is the measured total.
+  Log: `paperclip-pilot/sweep/est436-host-3.log` (the two runs before it, `-1` and `-2`, are the red steps on the
+  way: my first test vectors assumed the oracle's frame was the direction we SEND, which it is not).
+- `make build` → **exit 0**, **0** `warning:`/`error:` lines. `application.bin` = **0x161620 = 1,447,456 B**,
+  **649,696 B (0x9e9e0, 31 %) of the 2 MB app partition free** — the **same size as v41**, and that is expected:
+  `dm_send.cpp` is compiled into the component but nothing calls it yet, so the linker drops it. Log:
+  `paperclip-pilot/sweep/est436-build.log`.
+- **ARM, two wrong rules, both red** (copies in `paperclip-pilot/sweep/est436-arm1|2/`):
+  - wrong ACK key (the recipient's pub instead of ours): **ARM1_EXIT=1**, **1 failure**,
+    `FAIL test_dm_send.cpp:125  memcmp(c.expected_ack, full, 4) == 0`.
+  - retry rule without the last-flood / path-clear rule: **ARM2_EXIT=1**, **2 failures**,
+    `FAIL test_dm_send.cpp:273  d.flood` and `FAIL test_dm_send.cpp:274  d.clear_path`.
+  - The real tree is **113 checks, 0 failures** (and the same 113 under ASan).
+- **PNG: none** (item 5 not reached). **Version: not bumped** — 41 stays the version for Claude's install, because
+  nothing in this entry changes the installed image's behaviour (the new core file is compiled but not called).
+
+### Files changed
+- **new** `core/dm_send.h`, `core/dm_send.cpp` — compose, PATH parse, the pending/ACK table, the retry rule.
+- **new** `test/host/test_dm_send.cpp` — 113 checks: the oracle's frame/seal mirrored for our direction, the ACK
+  rule from its inputs, direct vs flood, bad lengths, a real PATH round trip from a derived peer identity, every
+  truncation, ACK matching (right/wrong/twice/full table), the retry timeline at exact instants, the timeout maths.
+- `test/host/run.sh` — one normal stage and one ASan stage (the PATH parser carries air-sourced lengths).
+- `core/CMakeLists.txt` — `dm_send.cpp` added to the component.
+- `docs/PROGRESS.md` — this entry.
+
+### Next step (for a fresh cap, in the ticket's order)
+1. Wire item 2: a `queueDm(contact_index, text)` that composes, `pushFrame`s, begins a pending entry; the radio
+   task resolves it with the value `radio::send()` returned; a poll next to the advert schedule asks
+   `dmPendingTimeout()`. 2. Item 3 after EST-435's contact NVS exists. 3. Items 4-5 (composer + state + PNG).
+
+## 2026-11-18 · S513 (EST-435) · contacts kept, advert notices, one advert per 5 s
+
+> Written by DeepSeek for ticket EST-435 (fenced Paperclip run: no session start/end, nothing installed, flashed or
+> committed). Code + host tests + build only. **Version for Claude's install: 41.** The ticket carries a
+> **30-minute cap**: the numbered items are done in order and this entry says exactly where the run stopped.
+
+**Ticket's three asks (Filip on the glass):** contacts must survive a restart, an advert must pop a notice (ours
+sent, and a NEW node heard), and at most one advert per 5 s so a key held down cannot flood the mesh.
+
+**Read first:** `BRIEF.md` in full; this file's S513 entries (EST-433/434, EST-432, EST-430, EST-429); `core/mc_store.*`;
+`main/mc_link.cpp`; `main/chrome.*`; `main/main.cpp`'s two advert key branches and the EST-428/EST-432 notice pattern;
+the L2's `firmware/src/ui/new_node.h` (whole file) and `advTypeName` in `firmware/src/ui/node_menu.h`.
+
+### 1. One advert per 5 s — the rule in `core/advert_rule.*`, armed first
+- `AdvertGate` holds only what the rule needs — `ever_sent`, `last_tx_ms`, `in_flight` — and EVERY function takes
+  `now_ms` as an argument: no clock, no NVS, no radio in the pure file, so the host tests drive exact instants.
+- `advertRequest()` answers `Send` / `Wait` / `Busy`. `Wait` carries the **whole seconds left**,
+  `ceil((5000 - elapsed)/1000)` — so +1.0 s reads "wait 4 s" and +4.9 s reads "wait 1 s", and only +5.0 s sends.
+  `Busy` is "an advert we queued has not been transmitted yet": a second one is refused regardless of the clock.
+- `advertSent(gate, now_ms, ok)` is called where the transmission actually happened, from the value
+  `radio::send()` returned, so the 5 s counts from the AIR, not from the key press. A failed send does not start
+  the clock (nothing was transmitted) and says "Advert NOT sent".
+- The SAME rule covers the 3-hour schedule: `advertRequest()` is asked before the schedule queues anything, so a
+  manual advert 2 s ago also defers the schedule. That is the point — the mesh sees one advert, whoever asked.
+- **Which text for `Busy`:** the ticket gives one sentence, "Advert already sent, wait N s", for the 5 s refusal.
+  For the still-queued refusal that sentence would be a lie (nothing has been transmitted yet), so that one shows
+  **"Advert already queued"**. Nothing else about the wording was invented.
+- **ARM, against a rule without the limit:** `test/host/test_advert.cpp` compiled against a copy of the rule whose
+  `advertRequest()` always answers `Send` is **red** (`ARM_EXIT=1`), the exact FAIL lines quoted in Results below.
+  The real tree is green.
+
+### 2. The notice — one slot in the shared chrome (the plumbing only; the two advert notices are NOT done)
+- `main/chrome.*` owns ONE notice slot for the whole app (`noticeSet(text, ttl_ms)` / `noticeText()`), and
+  `drawHintBar()` draws it as a plate just above the hint bar — so every page that already calls the shared bar
+  shows it, and a page cannot forget it. Newest wins: a second notice replaces the first and restarts its 3 s.
+- The slot is published under a `portMUX_TYPE` critical section (the `time_source` pattern) with a copy taken out
+  for the reader, so a writer on the radio task can never tear the string the main task is drawing.
+- **Stated honestly — it OVERLAYS, it does not reflow:** the plate is drawn on top of the 22 px strip above the hint
+  bar. Nothing but list space sits there on Launcher/Nodes/Map/RPTR, but the **Chat page's composer box** ends right
+  at that line, so on an open channel the plate would cover the right end of the composer for its 3 s. No advert is
+  sent from the Chat page today (its hint bar has no 'a'), so the case is unreachable until item 2's "new node"
+  notice can arrive while typing there. Not measured on the glass — nothing was installed.
+- **What is NOT done:** "Advert sent" / "Advert NOT sent" from `doAdvert()`, and "New node: <name> (<type>)" for an
+  advert that ADDS a contact. Those are item 2's own decisions and they were not reached inside the cap (see
+  Results). No half-built version of them is in the tree: `doAdvert()` writes no notice today.
+
+### 3. Contacts across restarts
+**NOT DONE.** `ContactStore` is still RAM only, so a restart still opens the Nodes page empty and a DM to a known
+node still cannot be opened until it advertises again. No NVS namespace, no encoder, no restore — nothing partial.
+
+### 4. Something the ticket expected that was not in the tree
+- The ticket names `firmware/src/ui/new_node.h` and `node_menu.h`'s `advTypeName`: both exist under
+  `Projects/pocket-mesh/firmware/` and were read (the type words are `client / repeater / room / sensor / node`).
+  Nothing from them was needed for item 1.
+- The ticket's item 1 text ("Advert already sent, wait N s") is one sentence for a 5 s refusal; the *queued*
+  refusal the ticket also asks for has no wording of its own. That case says **"Advert already queued"** — see § 1.
+
+### Results — where the run stopped
+**Item 1 is done and verified. Items 2 and 3 were not started in substance** (item 2 has only the shared slot it
+needs, which item 1 uses for its refusal). The 30-minute cap is the reason; nothing was left half-wired.
+- `sh test/host/run.sh` → **exit 0**, **14 stages, 1510 checks, 0 failures**, no `AddressSanitizer` report.
+  **Before this change: 1348 checks across 13 stages** (the new stage's 162 subtracted from the same run — the run
+  itself is the measurement). **Stated honestly:** the EST-434 entry quoted "1296 across 13"; counted today with the
+  same grep the pre-change total is 1348, so that figure under-counted by 52. The number above is measured, not
+  copied. The `UBSan: left shift of negative value` lines from `core/ed25519/fe.c` are the vendored third-party C
+  and are pre-existing (they appear on the untouched tree too); they do not fail the stage.
+- `make build` → **exit 0**, `application.bin` **1,447,456 B (0x161620)**, **649,696 B (0x9e9e0, 31 %) of the
+  2 MB app partition free**, **+1,280 B** from v40 (v40 was 1,446,176 B, 0x161120).
+- **ARM, against a rule without the limit:** `test/host/test_advert.cpp` compiled against a copy of `advert_rule.cpp`
+  whose `advertRequest()` never refuses (`/home/slofi/paperclip-pilot/sweep/est435-arm/`): **ARM_EXIT=1**,
+  **15 checks, 6 failures**, log in `paperclip-pilot/sweep/est435-arm.log`. The FAIL lines, verbatim:
+  ```
+  FAIL test_advert.cpp:59  d.verdict == om::mc::AdvertVerdict::Wait
+  FAIL test_advert.cpp:75  d.verdict == om::mc::AdvertVerdict::Wait
+  FAIL test_advert.cpp:96  d.verdict == om::mc::AdvertVerdict::Busy
+  FAIL test_advert.cpp:125  om::mc::advertRefusalText(d, text, sizeof(text))
+  FAIL test_advert.cpp:145  d.verdict == om::mc::AdvertVerdict::Wait
+  FAIL test_advert.cpp:158  om::mc::advertRequest(g, 102000).verdict == om::mc::AdvertVerdict::Wait
+  test_advert: 15 checks, 6 FAILURES
+  ```
+  The real tree is **162 checks, 0 failures**.
+
+### Files changed
+- **new** `core/advert_rule.h`, `core/advert_rule.cpp` — the rule (`AdvertGate`, `advertRequest`,
+  `advertQueued`, `advertResolved`, `advertRefusalText`). No clock, no NVS, no radio.
+- **new** `test/host/test_advert.cpp` — 162 checks: the five-press flood, the 100 ms walk from +1.0 to +4.9 s and
+  the +5.0 s send, the queued refusal, the failed send, the pinned sentences, the 32-bit wrap, and the schedule.
+- `test/host/run.sh` — the new stage, wired like the others.
+- `core/CMakeLists.txt` — `advert_rule.cpp` added to the component (one copy for device and host).
+- `main/mc_link.{h,cpp}` — the gate, `monotonicMs()`, `queueAdvert()` now returns the rule's `AdvertDecision`, the
+  3-hour schedule asks the same rule, and `doAdvert()` resolves the gate on EVERY exit (so a build failure cannot
+  leave it "in flight" for ever) using the value `radio::send()` returned.
+- `main/chrome.{h,cpp}` — the one notice slot and the plate `drawHintBar()` draws above the bar.
+- `main/main.cpp` — one `pressAdvert()` lambda used by BOTH advert keys (the start menu and the Nodes page): a
+  refusal becomes a 3 s notice, a fresh advert clears the last refusal. The sentence comes from the rule, so the
+  wording the test pins is the wording on the glass.
+
+### Next step
+Item 2's two notices: `doAdvert()` sets "Advert sent" when `sent > 0` and "Advert NOT sent" otherwise; the advert
+RX branch takes `contactsFind()` BEFORE `contactsUpsert()` to know "new", then sets
+`New node: <name> (<type>)` with the L2's words (`client / repeater / room / sensor / node`) — both through
+`noticeSet()`, which already exists and is already safe from the radio task. Then item 3's NVS blob.
+
 ## 2026-11-18 · S513 (EST-433) · direct messages, slice 1: receive, acknowledge, show, keep
 
 > Written by DeepSeek for ticket EST-433 (fenced Paperclip run: no session start/end, nothing installed, nothing

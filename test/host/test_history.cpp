@@ -248,6 +248,51 @@ void test_dm_record_round_trip() {
     CHECK_EQ(out[0].direct, true);
 }
 
+// S513/EST-439: the delivered mark, the L2's way. An outgoing message is written as Sending; the ACK appends an
+// Update record naming its log id (history_log.h Type::Update / kUpdateState), and loading the log applies it in
+// file order. An Update for a message that is not in the window changes nothing.
+void test_dm_delivery_update() {
+    uint8_t pub[32];
+    for (size_t i = 0; i < sizeof(pub); i++) pub[i] = (uint8_t)(0x80 + i);
+
+    om::mc::DmMessage m;
+    memcpy(m.peer_pub, pub, sizeof(pub));
+    snprintf(m.peer_name, sizeof(m.peer_name), "Beta");
+    m.outgoing = true;
+    m.delivery = om::ui::DmState::Sending;
+    snprintf(m.text, sizeof(m.text), "did you get this");
+    m.ts       = 1750000200u;
+    m.local_ts = m.ts;
+
+    uint8_t log[1024];
+    int     at = om::mc::historyEncodeDm(m, 11, log, (int)sizeof(log));
+    CHECK_EQ(at > 0, true);
+    int n = om::mc::historyEncodeDmState(11, om::ui::DmState::Delivered, 1750000260u, log + at,
+                                         (int)sizeof(log) - at);
+    CHECK_EQ(n > 0, true);
+    at += n;
+    // An Update for a log id that is not in the file: harmless.
+    n = om::mc::historyEncodeDmState(99, om::ui::DmState::Delivered, 1u, log + at, (int)sizeof(log) - at);
+    CHECK_EQ(n > 0, true);
+    at += n;
+
+    om::mc::DmMessage out[4];
+    uint32_t        max_id = 0;
+    const size_t    got    = om::mc::historyLoadDm(log, (size_t)at, pub, "fallback", out, 4, &max_id);
+    CHECK_EQ(got, 1u);
+    CHECK_EQ(max_id, 11u);
+    CHECK_EQ(out[0].outgoing, true);
+    CHECK_EQ((int)out[0].delivery, (int)om::ui::DmState::Delivered);   // the restart keeps the ACK, not "sending"
+
+    // The message alone still loads as Sending: the state is written with the message, so a power cut before the
+    // ACK cannot invent a delivery.
+    int only = om::mc::historyEncodeDm(m, 11, log, (int)sizeof(log));
+    CHECK_EQ(only > 0, true);
+    const size_t got2 = om::mc::historyLoadDm(log, (size_t)only, pub, "fallback", out, 4, &max_id);
+    CHECK_EQ(got2, 1u);
+    CHECK_EQ((int)out[0].delivery, (int)om::ui::DmState::Sending);
+}
+
 }  // namespace
 
 int main() {
@@ -259,6 +304,7 @@ int main() {
     test_seen_point_round_trip();          // S503
     test_seen_point_collapses_on_corruption();
     test_dm_record_round_trip();           // S513/EST-434
+    test_dm_delivery_update();             // S513/EST-439
 
     printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

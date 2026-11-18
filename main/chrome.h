@@ -28,7 +28,23 @@ void drawStatusBar(Screen& s, const char* clock, int battery_pct, bool charging)
 int drawPageHead(Screen& s, const char* title, const char* right_text);
 
 // The bottom bar: this page's actions on the left, the five symbol keys on the right with `active` in gold.
+// S513/EST-435: it also draws the app's ONE notice, just above itself, when one is live — see noticeSet().
 void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_count);
+
+// --------------------------------------------------------------------------------- the one notice (S513/EST-435)
+// Short-lived texts ("Advert already sent, wait 4 s", later "New node: …") appear on EVERY page, so they cannot
+// belong to a page's view: they belong to the chrome. One slot for the whole app, the newest wins, and it is
+// drawn by drawHintBar() above the hint bar — every page already calls that, so no page can forget it and no page
+// needs a clock of its own.
+//
+// ⚠️ The WRITER may be the radio task (a notice decided while a packet is handled) and the READER is always the
+// main task, so the slot is published under a critical section — the `time_source` pattern, not a shared buffer.
+// Set from the task that decides; drawn only by the main task.
+void noticeSet(const char* text, uint32_t ttl_ms);
+void noticeClear();
+
+// The live text, or nullptr. Returns a copy taken under the lock, so the string cannot change while it is drawn.
+const char* noticeText();
 
 // The five symbol keys as vectors (BRIEF § 5). kind: 0 triangle, 1 square, 2 circle, 3 cloud, 4 diamond.
 void drawSymbolSigil(Screen& s, int kind, int cx, int cy, int r, uint16_t c, bool active);

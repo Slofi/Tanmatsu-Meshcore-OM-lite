@@ -502,6 +502,10 @@ extern "C" void app_main(void) {
     // Step 5: the chat history lives on the card, so it starts only once the card is mounted. A missing card is
     // not fatal: the app runs with RAM-only history and the log says so.
     om::sdhistory::begin();
+    // S513/EST-437: the contacts come back BEFORE the DM logs and before the radio task. That ordering matters:
+    // the DM restore then finds its peer already in the table by its full key (instead of adding a prefix-only
+    // row), and a DM from a node heard before the restart can be opened without waiting for its next advert.
+    om::mc::restoreContacts();
     // S513/EST-434 item 4: restore the per-contact DM logs before the radio task exists, so nothing races it.
     om::mc::restoreDmHistory();
     // Step 6 slice 1: prove the pack path (index search, tile read, JPEG decode) with real tiles. central Slovenia,
@@ -743,6 +747,7 @@ extern "C" void app_main(void) {
                     uint32_t    local_ts;
                     uint32_t    ts;
                     bool        outgoing;
+                    uint8_t     delivery;   // S513/EST-439: an outgoing DM's DmState (dm_delivery.h)
                 };
                 static Src srcs[om::mc::kMaxDms];
                 int        idx[om::mc::kMaxDms];
@@ -754,7 +759,8 @@ extern "C" void app_main(void) {
                     for (size_t i = 0; i < n; i++) {
                         const om::mc::DmMessage* m = om::mc::dmAt(dmr, (size_t)idx[i]);
                         if (m == nullptr) continue;
-                        srcs[i] = {m->text, m->peer_name, m->local_ts, m->ts, m->outgoing};
+                        srcs[i] = {m->text, m->peer_name, m->local_ts, m->ts, m->outgoing,
+                                   (uint8_t)m->delivery};
                     }
                 } else {
                     snprintf(cv.channel_name, sizeof(cv.channel_name), "%s",
@@ -763,7 +769,7 @@ extern "C" void app_main(void) {
                     for (size_t i = 0; i < n; i++) {
                         const om::mc::Message* m = om::mc::messagesAt(msgs, (size_t)idx[i]);
                         if (m == nullptr) continue;
-                        srcs[i] = {m->text, m->sender, m->local_ts, m->ts, m->outgoing};
+                        srcs[i] = {m->text, m->sender, m->local_ts, m->ts, m->outgoing, 0};
                     }
                 }
 
@@ -804,6 +810,20 @@ extern "C" void app_main(void) {
                     snprintf(mv.text, sizeof(mv.text), "%s", s.text != nullptr ? s.text : "");
                     om::mc::formatAge(now, s.local_ts ? s.local_ts : s.ts, mv.age, sizeof(mv.age));
                     mv.outgoing   = s.outgoing;
+                    // S513/EST-439: the state after the time, in words (the font has no check glyph). "sending"
+                    // until the ACK proves it, "delivered", or "no confirmation" after the last attempt. The L2's
+                    // own tokens are dmStateToken()'s; the ticket's wording "no confirmation" wins for that one.
+                    mv.state[0]   = '\0';
+                    if (s.outgoing && chat_dm_open) {
+                        switch ((om::ui::DmState)s.delivery) {
+                            case om::ui::DmState::Sending: snprintf(mv.state, sizeof(mv.state), "sending"); break;
+                            case om::ui::DmState::Delivered: snprintf(mv.state, sizeof(mv.state), "delivered"); break;
+                            case om::ui::DmState::NotConfirmed:
+                                snprintf(mv.state, sizeof(mv.state), "no confirmation");
+                                break;
+                            case om::ui::DmState::Failed: snprintf(mv.state, sizeof(mv.state), "not sent"); break;
+                        }
+                    }
                     mv.line_count = wraps[i].count ? wraps[i].count : 1;
                     mv.clipped    = wraps[i].clipped;
                     for (int l = 0; l < om::mc::kMaxLines; l++) mv.line[l] = wraps[i].line[l];
@@ -871,6 +891,20 @@ extern "C" void app_main(void) {
     // keyboard event). It was actively harmful after that — it ended the app after 90 quiet seconds, which
     // is exactly what a radio test or an unattended listen looks like. Leave by Esc, which works.
     bool dirty = true;
+
+    // S513/EST-435: an advert press either queues one or says why not, and the sentence comes from the rule itself
+    // (core/advert_rule.cpp), so the wording the host test pins is the wording on the glass. A refusal is a 3 s
+    // notice in the shared chrome; a fresh advert clears the last refusal, which would now be stale.
+    auto pressAdvert = [&]() {
+        const om::mc::AdvertDecision d = om::mc::queueAdvert();
+        char                        text[48];
+        if (om::mc::advertRefusalText(d, text, sizeof(text))) {
+            om::ui::noticeSet(text, 3000);
+        } else {
+            om::ui::noticeClear();
+        }
+        dirty = true;
+    };
     for (;;) {
         bsp_input_event_t ev = {};
         // While the map is filling in, wake up often so a decoded tile reaches the panel within a frame instead of
@@ -901,9 +935,14 @@ extern "C" void app_main(void) {
                         // was open came back as a badge the moment you went up a level (Filip, S502).
                         handled = true;
                     } else if (k == tm::Key::Enter) {
-                        if (!chat_dm_open && composer_len > 0) {
-                            if (om::mc::queueText((size_t)chat_focus, composer)) {
-                                ESP_LOGI(TAG, "chat: queued for channel %d (%u chars)", chat_focus,
+                        if (composer_len > 0) {
+                            // S513/EST-439: a DM goes through queueDm (compose + pending + the radio queue), a
+                            // channel through queueText. Both refuse rather than replace when the queue is full,
+                            // so a refusal leaves the text in the composer and says why for three seconds.
+                            const bool queued = chat_dm_open ? om::mc::queueDm(chat_dm_pub, composer)
+                                                             : om::mc::queueText((size_t)chat_focus, composer);
+                            if (queued) {
+                                ESP_LOGI(TAG, "chat: queued %s (%u chars)", chat_dm_open ? "a DM" : "a channel text",
                                          (unsigned)composer_len);
                                 composer[0]           = '\0';
                                 composer_len          = 0;
@@ -920,16 +959,14 @@ extern "C" void app_main(void) {
                         handled = true;
                     } else if (k == tm::Key::Backspace) {
                         // delete one UTF-8 sequence, not one byte: a Slovenian letter must not become garbage
-                        if (!chat_dm_open) {
-                            while (composer_len > 0) {
-                                const unsigned char c = (unsigned char)composer[--composer_len];
-                                if ((c & 0xC0) != 0x80) break;
-                            }
-                            composer[composer_len] = '\0';
+                        while (composer_len > 0) {
+                            const unsigned char c = (unsigned char)composer[--composer_len];
+                            if ((c & 0xC0) != 0x80) break;
                         }
+                        composer[composer_len] = '\0';
                         handled                = true;
                     } else if (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD) {
-                        if (!chat_dm_open && composer_len + 1 < sizeof(composer)) {
+                        if (composer_len + 1 < sizeof(composer)) {
                             composer[composer_len++] = (char)ev.args_keyboard.ascii;
                             composer[composer_len]   = '\0';
                         }
@@ -1043,7 +1080,7 @@ extern "C" void app_main(void) {
                         // is S501's, untouched.
                         if (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD &&
                             ev.args_keyboard.ascii == 'a') {
-                            om::mc::queueAdvert();   // the advert key still works on the menu
+                            pressAdvert();   // the advert key still works on the menu
                         } else if (k == tm::Key::Esc) {
                             ESP_LOGI(TAG, "leaving to the stock launcher");
                             leaveToLauncher();
@@ -1108,8 +1145,7 @@ extern "C" void app_main(void) {
                                ev.type == INPUT_EVENT_TYPE_KEYBOARD && ev.args_keyboard.ascii == 'a') {
                         // S513/EST-432: the advert key is on the Nodes page too (its empty-list text points at
                         // it), so the page that shows who was heard can ask for a fresh advert without leaving.
-                        om::mc::queueAdvert();
-                        dirty = true;
+                        pressAdvert();
                     } else if (k == tm::Key::Esc) {
                         core.handleKey(k);   // back one page through the router's history
                         dirty = true;
@@ -1143,6 +1179,15 @@ extern "C" void app_main(void) {
             core.tick();
             refreshOmNumbers();   // the running card's memory + uptime, refreshed with the rest of the chrome
         }
+
+        // S513/EST-437: the contact table's one NVS write, on the MAIN task. The radio task only raised a flag;
+        // a structural change goes on this pass, last-heard/SNR waits for the blob's 10-minute floor. Cheap when
+        // nothing is dirty, which is almost always.
+        om::mc::contactsPersistTick();
+
+        // S513/EST-439: the DM retry rule, on the MAIN task — it composes the next attempt and QUEUES it, and
+        // marks "no confirmation" when the attempts are spent. True = a message's state moved, so repaint.
+        if (om::mc::dmTick()) dirty = true;
 
         if (dirty) {
             switch (core.router().current()) {

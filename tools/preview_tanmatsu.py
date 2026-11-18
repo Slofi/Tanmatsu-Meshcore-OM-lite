@@ -1220,8 +1220,77 @@ def menu():
     return save(img, '2026-11-18-menu-cards.png')
 
 
+# ------------------------------------------------------------------------------------------------ dm send
+DM_THREAD = [
+    # stamp, the delivery state drawn after OUR time (None for an incoming line), who, body, mine
+    ('09:41', None, 'Alpha', 'Are you near the north repeater today?', False),
+    ('09:43', None, 'Alpha', 'The path came back with two hops, so it should work.', False),
+    ('09:48', 'delivered', 'you', 'Yes, on my way after lunch.', True),
+    ('09:52', 'sending', 'you', 'I will ping you when I am there.', True),
+]
+
+
+def dm_send():
+    """OM Lite > Chat > DM thread, SENDING (S513/EST-439, items 3 and 4).
+
+    The open DM view: our own messages on the right under "you", each with its state AFTER the time — "delivered"
+    once the ACK came back, "sending" until it does (and "no confirmation" after the last attempt, which the
+    drawing code takes from the L2's DmState words; the font has no check glyph, so the word is drawn). The
+    composer is the channel's own, because a DM now types and sends the same way.
+    """
+    img, d = new_screen()
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    status_bar(d)
+
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Chat', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    text(d, (W - pad, y + TM['head_h'] // 2), '4 messages', font(FONT_MONO, TM['f_meta']), P['Dimmer'],
+         anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+
+    work_top = y + TM['head_h']
+    text(d, (pad, work_top + 18), 'DM: Alpha', font(FONT_SANS, 20), P['Ink'])
+
+    left_x = pad + 58                      # kTmChatBodyX0: incoming under the time column
+    right_x = W - pad - 46                 # kTmChatBodyX1: outgoing keeps the age column clear
+    fstamp = font(FONT_MONO, TM['f_meta'])
+    fname = font(FONT_SANS, TM['f_body'])
+    fbody = font(FONT_SANS, TM['f_body'])
+
+    yy = work_top + 56
+    for stamp, state, who, body, mine in DM_THREAD:
+        # the time, then the state for our own lines ("09:48 delivered")
+        txt = stamp + (' ' + state if state else '')
+        text(d, (pad + 4, yy), txt, fstamp, P['Dimmer'])
+        if mine:
+            text(d, (right_x, yy), 'you', font(FONT_MONO, TM['f_meta']), P['Dim'], anchor='ra')
+        else:
+            text(d, (left_x, yy), who, font(FONT_SANS, TM['f_meta']), P['Acc'])
+        text(d, (W - pad, yy), 'now' if mine else '4h', fstamp, P['Dimmer'], anchor='ra')
+        yy += 20
+        lines = wrap(d, body, fbody, right_x - left_x)
+        for line in lines:
+            if mine:
+                text(d, (right_x, yy), line, fbody, P['Ink'], anchor='ra')
+            else:
+                text(d, (left_x, yy), line, fbody, P['Ink'])
+            yy += 20
+        yy += 14
+
+    # the composer, the same one a channel has
+    ch = H - TM['hint_h'] - 56
+    plate(d, [pad, ch, W - pad, ch + 44], P['FieldBg'], P['Line'], r=4)
+    text(d, (pad + 12, ch + 22), 'message this contact, Enter sends', font(FONT_MONO, TM['f_meta']),
+         P['Dimmer'], anchor='lm')
+    plate(d, [W - pad - 94, ch, W - pad - 8, ch + 44], P['SelBg2'], P['Acc'], r=4)
+    text(d, (W - pad - 51, ch + 22), 'Send', font(FONT_SANS, TM['f_body']), P['AccInk'], anchor='mm')
+
+    hint_bar(d, 'chat', [('type', 'write'), ('↑↓', 'scroll'), ('↵', 'send'), ('esc', 'back')])
+    return save(img, '2026-11-18-dm-send.png')
+
+
 RENDERERS = dict(launcher=launcher, menu=menu, nodes=nodes, chat=chat, chat2=chat_cards,
-                 chat_dm=chat_dm_column, map=map_page, rptr=rptr, settings=settings)
+                 chat_dm=chat_dm_column, dm_send=dm_send, map=map_page, rptr=rptr, settings=settings)
 
 
 def main(argv):

@@ -27,10 +27,17 @@ namespace mc {
 int historyEncode(const Message& m, uint32_t log_id, uint8_t* out, int cap);
 
 // S513/EST-434: one DM record, in the SAME L2 format. A DM differs only in the format's `dm` flag and in the
-// name (the peer's), so this is the channel encoder with the flag set, not a second layout.
+// name (the peer's), so this is the channel encoder with the flag set, not a second layout. S513/EST-439: the
+// record also carries the L2's `delivery` byte (history_log.h Msg::delivery), Sending at write time.
 int historyEncodeDm(const DmMessage& m, uint32_t log_id, uint8_t* out, int cap);
 
-// Reads a DM log back into DmMessages (newest `max_out`, oldest first). `peer_pub` and `peer_name` identify the
+// S513/EST-439: the delivered mark, the L2's way — an Update record naming a message's log id, appended after
+// the message (history_log.h Type::Update / kUpdateState). One record per state change, so a restart applies it
+// in file order and the message comes back Delivered without re-sending anything.
+int historyEncodeDmState(uint32_t log_id, om::ui::DmState state, uint32_t ack_wall, uint8_t* out, int cap);
+
+// Reads a DM log back into DmMessages (newest `max_out`, oldest first), applying every Update record to the
+// message whose log id it names. `peer_pub` and `peer_name` identify the
 // file's thread: a record does not carry the peer's key (the L2 names the file dm-<8 hex>), so the caller supplies
 // them. The latest Meta record is the seen point and is applied by the caller.
 size_t historyLoadDm(const uint8_t* data, size_t len, const uint8_t peer_pub[32], const char* peer_name,

@@ -66,9 +66,9 @@ struct ChatView {
     bool open = false;
 
     // ---- list mode: two columns of cards (S513/EST-430)
-    // `rows` is the Channels column, `dms` the Direct messages column. The page draws BOTH from the model, so a
-    // future DM slice only fills `dms`/`dm_count` and never touches the layout. Today `dm_count` is always 0
-    // (this app has no TXT_MSG receive or send), and the page draws the L2's "No direct messages yet" line.
+    // `rows` is the Channels column, `dms` the Direct messages column. The page draws BOTH from the model, so the
+    // DM slices only fill `dms`/`dm_count` and never touch the layout. An empty column draws the L2's "No direct
+    // messages yet" line.
     ChatRowView rows[kChatRows];      // Channels (column 0)
     int         row_count = 0;
     ChatRowView dms[kChatRows];       // Direct messages (column 1), newest thread first
@@ -90,6 +90,10 @@ struct ChatView {
         char        sender[mc::kNameBytes];
         char        text[mc::kTextBytes];
         char        age[8];
+        // S513/EST-439: an OUTGOING message's delivery state, after the time: "sending", "delivered",
+        // "no confirmation" (the L2's DmState words, dm_delivery.h; the font has no check glyph, so the word is
+        // what is drawn). Empty for an incoming message.
+        char        state[20];
         bool        outgoing;
         // The wrap, as byte ranges into `text` (S503). The wrap itself is decided by core/chat_layout.*, so the
         // page only draws what it is given.

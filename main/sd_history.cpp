@@ -250,6 +250,20 @@ bool appendDmSeen(const uint8_t pub[32], uint32_t seen_log_id, uint16_t unread) 
     return appendRecord(path, rec, n);
 }
 
+bool appendDmState(const uint8_t pub[32], uint32_t log_id, om::ui::DmState state, uint32_t ack_wall) {
+    if (!g_ready || pub == nullptr || log_id == 0) return false;
+    uint8_t   rec[64];
+    const int n = mc::historyEncodeDmState(log_id, state, ack_wall, rec, (int)sizeof(rec));
+    if (n <= 0) return false;
+    char path[96];
+    pathForDm(path, sizeof(path), pub);
+    if (!appendRecord(path, rec, n)) {
+        g_ready = false;
+        return false;
+    }
+    return true;
+}
+
 mc::SeenPoint loadDmSeen(const uint8_t pub[32]) {
     mc::SeenPoint sp;
     if (!g_ready || pub == nullptr) return sp;

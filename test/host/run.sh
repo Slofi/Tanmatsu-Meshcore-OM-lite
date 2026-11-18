@@ -19,11 +19,15 @@ TXQ="$(mktemp /tmp/tm-txq.XXXXXX)"
 CARDS="$(mktemp /tmp/tm-cards.XXXXXX)"
 MENU="$(mktemp /tmp/tm-menu.XXXXXX)"
 DM="$(mktemp /tmp/tm-dm.XXXXXX)"
+ADV="$(mktemp /tmp/tm-advert.XXXXXX)"
 MCASAN="$(mktemp /tmp/tm-mc-asan.XXXXXX)"
 DMASAN="$(mktemp /tmp/tm-dm-asan.XXXXXX)"
+DMSEND="$(mktemp /tmp/tm-dm-send.XXXXXX)"
+DMSENDASAN="$(mktemp /tmp/tm-dm-send-asan.XXXXXX)"
+CONTACT="$(mktemp /tmp/tm-contact-blob.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$DM" "$MCASAN" "$DMASAN"; rm -rf "$ED" "$EDASAN"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT"; rm -rf "$ED" "$EDASAN"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -116,6 +120,28 @@ ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$MCASAN"
     -o "$DMASAN"
 ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$DMASAN"
 
+# DM SEND (S513/EST-436): compose an attempt (against the SAME Python oracle vectors test_dm.cpp pins), open a
+# PATH packet and its ACK extras, match the ACK against the pending table, and the retry rule at exact instants.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core -I ../../core/ed25519 \
+    test_dm_send.cpp \
+    ../../core/dm_send.cpp ../../core/mc_dm.cpp ../../core/mc_wire.cpp ../../core/mc_crypto_psa.cpp \
+    ../../core/mc_identity.cpp \
+    "$ED"/*.o \
+    -lmbedcrypto \
+    -o "$DMSEND"
+"$DMSEND"
+
+# The PATH/ACK parser under the sanitizers: every length in a PATH packet came off the air.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I ../../core -I ../../core/ed25519 \
+    test_dm_send.cpp \
+    ../../core/dm_send.cpp ../../core/mc_dm.cpp ../../core/mc_wire.cpp ../../core/mc_crypto_psa.cpp \
+    ../../core/mc_identity.cpp \
+    "$EDASAN"/*.o \
+    -lmbedcrypto \
+    -o "$DMSENDASAN"
+ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$DMSENDASAN"
+
 # The map pack rules (S503, step 6): record parse, binary search over the index, zoom -> pack, slippy maths.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
     test_map.cpp \
@@ -148,4 +174,21 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
     test_menu_cards.cpp \
     ../../core/menu_cards.cpp \
     -o "$MENU"
-"$MENU"
+
+# The advert rate rule (S513/EST-435): ONE advert per 5 s. What is pinned is the case that flooded the mesh — five
+# presses in two seconds must produce one transmission and four refusals with the whole seconds left — plus the
+# queued-advert refusal, the failed-send case and the 32-bit clock wrap.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_advert.cpp \
+    ../../core/advert_rule.cpp \
+    -o "$ADV"
+"$ADV"
+
+# The contact table's NVS blob (S513/EST-437): round trip of every field, the wrong version, the wrong record
+# width, EVERY truncation of a two-row blob, extra bytes, an over-large count, and the full 32-row table. The
+# device writes and reads this exact codec, so a lost field here is a contact that comes back subtly wrong.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_contact_blob.cpp \
+    ../../core/contact_blob.cpp \
+    -o "$CONTACT"
+"$CONTACT"

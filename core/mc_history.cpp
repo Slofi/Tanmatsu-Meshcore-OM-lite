@@ -52,6 +52,9 @@ int historyEncodeDm(const DmMessage& m, uint32_t log_id, uint8_t* out, int cap) 
     h.hops    = (int8_t)(m.direct ? 0 : 1);
     h.snr4    = (int8_t)(m.snr_x10 / 25);
     h.repeats = 0;
+    // The delivery byte is the L2's own DmState value (dm_delivery.h -> history_log.h Msg::delivery). An outgoing
+    // message is written as Sending; the ACK later appends an Update that raises it to Delivered.
+    h.delivery = (uint8_t)m.delivery;
     h.pathHashSize = 1;
     h.pathCount    = 0;
     h.pathLen      = 0;
@@ -61,6 +64,22 @@ int historyEncodeDm(const DmMessage& m, uint32_t log_id, uint8_t* out, int cap) 
     const int plen = om::history::encodeMsgPayload(h, payload, (int)sizeof(payload));
     if (plen <= 0) return 0;
     const int total = om::history::encodeRecord(om::history::Type::Msg, payload, plen, out, cap);
+    return total > 0 ? total : 0;
+}
+
+int historyEncodeDmState(uint32_t log_id, om::ui::DmState state, uint32_t ack_wall, uint8_t* out, int cap) {
+    if (out == nullptr || cap <= 0 || log_id == 0) return 0;
+    om::history::Update u;
+    u.logId    = log_id;
+    u.kind     = om::history::kUpdateState;
+    u.delivery = (uint8_t)state;
+    u.ackReal  = (ack_wall != 0);
+    u.ackWall  = ack_wall;
+    u.repeats  = 0;
+    uint8_t   payload[om::history::kMaxPayload];
+    const int plen = om::history::encodeUpdatePayload(u, payload, (int)sizeof(payload));
+    if (plen <= 0) return 0;
+    const int total = om::history::encodeRecord(om::history::Type::Update, payload, plen, out, cap);
     return total > 0 ? total : 0;
 }
 
@@ -77,6 +96,17 @@ size_t historyLoadDm(const uint8_t* data, size_t len, const uint8_t peer_pub[32]
         const int r = om::history::decodeRecordAt(data + pos, (int)(len - pos), (uint32_t)pos, &ref);
         if (r < 0) break;   // the torn-tail rule, the same one the channel log uses
         pos += (size_t)r;
+        if (ref.type == om::history::Type::Update) {
+            // A delivery update names the message by its log id. The log is read oldest first, so the message it
+            // refers to is already in `out` whenever it is still in the newest window; an update for an evicted
+            // record simply has nothing to change.
+            om::history::Update u;
+            if (!om::history::decodeUpdatePayload(ref.payload, (int)ref.len - om::history::kHeaderBytes, &u)) continue;
+            for (size_t i = 0; i < kept; i++) {
+                if (out[i].log_id == u.logId) out[i].delivery = (om::ui::DmState)u.delivery;
+            }
+            continue;
+        }
         if (ref.type != om::history::Type::Msg) continue;
 
         om::history::Msg h;
@@ -95,6 +125,9 @@ size_t historyLoadDm(const uint8_t* data, size_t len, const uint8_t peer_pub[32]
         m.local_ts = h.wall;
         m.snr_x10  = (int16_t)((int)h.snr4 * 25);
         m.direct   = h.hops <= 0;
+        m.delivery = h.delivery <= (uint8_t)om::ui::DmState::Failed
+                         ? (om::ui::DmState)h.delivery
+                         : om::ui::DmState::NotConfirmed;   // a byte from a future format is never shown as "ok"
         snprintf(m.text, sizeof(m.text), "%.*s", (int)(sizeof(m.text) - 1), h.text);
 
         if (kept < max_out) {
