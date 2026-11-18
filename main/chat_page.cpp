@@ -14,7 +14,73 @@ namespace om {
 namespace ui {
 namespace {
 
-constexpr int kListRowH = 64;   // the channel list keeps the Launcher's row height: one row is one channel
+// ---- rounded plates (S513/EST-430) ------------------------------------------------------------------------
+// A card is a rounded rectangle. `Screen` has no rounded fill, and the card is drawn thousands of times a session,
+// so this is a per-row span fill with an integer corner: for a corner row `dy` from the corner circle's centre the
+// row is inset by `r - floor(sqrt(r*r - dy*dy))`. No float, no allocation, no clip list — one fillRect per row.
+void fillRound(Screen& s, int x, int y, int w, int h, int r, uint16_t c) {
+    if (w <= 0 || h <= 0) return;
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
+    if (r <= 0) {
+        s.fillRect(x, y, w, h, c);
+        return;
+    }
+    for (int row = 0; row < h; row++) {
+        int dy;
+        if (row < r)
+            dy = r - row;                 // top corners: distance from the circle's centre
+        else if (row >= h - r)
+            dy = row - (h - r - 1);
+        else {
+            s.fillRect(x, y + row, w, 1, c);
+            continue;
+        }
+        int v = r * r - dy * dy;
+        if (v < 0) v = 0;
+        int root = 0;
+        while ((root + 1) * (root + 1) <= v) ++root;
+        const int inset = r - root;
+        if (w - 2 * inset > 0) s.fillRect(x + inset, y + row, w - 2 * inset, 1, c);
+    }
+}
+
+// A card: the outline colour is the plate, the fill is drawn inside it, so the ring follows the rounded corners
+// exactly (the app's focus ring is 2 px of kAcc, the resting card is 1 px of kLine).
+void drawCard(Screen& s, int x, int y, int w, int h, int thickness, uint16_t outline, uint16_t fill) {
+    fillRound(s, x, y, w, h, kTmCardRadius, outline);
+    if (thickness > 0 && h - 2 * thickness > 0)
+        fillRound(s, x + thickness, y + thickness, w - 2 * thickness, h - 2 * thickness, kTmCardRadius - thickness,
+                  fill);
+}
+
+// One card of the list: name (left, clipped), unread badge (right, only when > 0), then the newest message as
+// "sender: text" with its local HH:MM on the right. Both lines stay inside the card's padding.
+void drawChatCard(Screen& s, const ChatRowView& r, const mc::CardRect& rect, bool focused) {
+    drawCard(s, rect.x, rect.y, rect.w, rect.h, focused ? kTmRingW : 1,
+             focused ? (uint16_t)kAcc : (uint16_t)kLine, focused ? (uint16_t)kSelBg : (uint16_t)kPanel);
+
+    const int pad  = 12;
+    const int x0   = rect.x + pad;
+    const int x1   = rect.x + rect.w - pad;
+    const int name_w = x1 - x0 - (r.unread ? 26 : 0);   // the badge owns the right end of the first line
+
+    drawTextClipped(s, Face::Row, x0, textBaseline(s, Face::Row, rect.y + 6, 28), name_w, r.title,
+                    focused ? (uint16_t)kAccInk : (uint16_t)kInk);
+
+    if (r.unread) {
+        // the L2's unread badge, unchanged: a filled red disc with the count, at the card's top-right
+        const int bx = x1 - 9, by = rect.y + 6 + 14;
+        s.disc(bx, by, 9, kBad);
+        drawTextCentred(s, Face::Hint, bx, textBaseline(s, Face::Hint, by - 9, 18), r.left, kWhite);
+    }
+
+    // second line: the preview clipped, the time right-aligned in the same dim colour family as the L2's meta
+    const int time_w = 44;
+    drawTextClipped(s, Face::Meta, x0, textBaseline(s, Face::Meta, rect.y + 36, 24), (x1 - time_w - 8) - x0, r.body,
+                    kDim);
+    if (r.right[0]) drawTextRight(s, Face::Hint, x1, textBaseline(s, Face::Hint, rect.y + 38, 22), r.right, kDimmer);
+}
 
 // Draw one wrapped line: a byte range of the message, copied into a small scratch buffer because the draw
 // helpers take C strings. A line whose message was cut gets a plain "..." — the font subset has no ellipsis
@@ -39,6 +105,11 @@ void drawMsgLine(Screen& s, Face face, int x, int baseline, int max_w, const cha
 }
 
 }  // namespace
+
+mc::CardGrid chatCardGrid() {
+    return mc::cardGrid(kTmPad, kTmCardWorkTop, kTmW - kTmPad, kTmH - kTmHintH, kTmCardGutter, kTmCardHeaderH,
+                        kTmCardH, kTmCardGap);
+}
 
 void drawChat(Screen& s, const ChatView& v) {
     const int W = kTmW, H = kTmH;
@@ -66,43 +137,42 @@ void drawChat(Screen& s, const ChatView& v) {
     }
     const int head_bot = drawPageHead(s, "Chat", head_right);
 
-    const int list_x0 = kTmPad;
-    const int list_x1 = kTmPad + kTmListW;
     const int work_top = head_bot;
     const int work_bot = H - kTmHintH;
 
-    // ===================================================================================== the channel list
+    // ============================================================ the list: two columns of cards (S513/EST-430)
+    // Channels left, Direct messages right, equal widths, one card per chat. The geometry, the focus and the
+    // scroll are all core/chat_cards.* — this block only walks what the model gives it.
     if (!v.open) {
-        drawText(s, Face::Meta, list_x0, work_top + 24, "CHANNELS", kDimmer);
-        char count[32];
-        snprintf(count, sizeof(count), "%d chats", v.row_count);
-        drawTextRight(s, Face::Hint, list_x1 - kTmRingInset, work_top + 24, count, kDimmer);
+        const mc::CardGrid g = chatCardGrid();
+        static const char* const kHeads[mc::kCardCols] = {"Channels", "Direct messages"};
+        for (int col = 0; col < mc::kCardCols; col++)
+            drawText(s, Face::Meta, g.col_x[col], textBaseline(s, Face::Meta, g.y0, g.header_h), kHeads[col],
+                     kDimmer);
 
-        int y = work_top + 34;
-        for (int i = 0; i < v.row_count && y + kListRowH <= work_bot - 8; i++) {
-            const ChatRowView& r = v.rows[i];
-            const bool         f = (i == v.focused);
-            if (f) {
-                s.fillRect(list_x0, y, list_x1 - kTmRingInset - list_x0, kListRowH - 2, kSelBg);
-                s.frame(list_x0, y, list_x1 - kTmRingInset - list_x0, kListRowH - 2, kTmRingW, kAcc);
+        for (int col = 0; col < mc::kCardCols; col++) {
+            const ChatRowView* list  = (col == mc::kColChannels) ? v.rows : v.dms;
+            const int          count = (col == mc::kColChannels) ? v.row_count : v.dm_count;
+            // The page never trusts a scroll it did not compute: clamp it to what this column can actually scroll.
+            int scroll = v.scroll[col];
+            const int max_scroll = (count > g.visible) ? count - g.visible : 0;
+            if (scroll < 0) scroll = 0;
+            if (scroll > max_scroll) scroll = max_scroll;
+
+            for (int i = 0; i < count && i < kChatRows; i++) {
+                const mc::CardRect rect = mc::cardRect(g, col, i, scroll);
+                // A card the scroll has put outside the work box is not drawn, ever: the hint bar is not a
+                // drawing area, and a half card would collide with it.
+                if (rect.y < g.cards_y || rect.y + rect.h > g.y1) continue;
+                drawChatCard(s, list[i], rect, col == v.focus_col && i == v.focus_row);
             }
-            drawTextClipped(s, Face::Row, list_x0 + 12, textBaseline(s, Face::Row, y + 4, 30), 
-                            list_x1 - kTmRingInset - 12 - list_x0 - 50, r.title,
-                            f ? (uint16_t)kAccInk : (uint16_t)kInk);
-            drawTextClipped(s, Face::Meta, list_x0 + 12, textBaseline(s, Face::Meta, y + 34, 22),
-                            list_x1 - kTmRingInset - 12 - list_x0 - 50, r.body, kDim);
-            if (r.right[0])
-                drawTextRight(s, Face::Hint, list_x1 - kTmRingInset - 6, textBaseline(s, Face::Hint, y + 6, 24),
-                              r.right, kDim);
-            if (r.unread) {
-                // the L2's unread badge: a filled circle with the count, red, bottom-right of the row
-                const int bx = list_x1 - kTmRingInset - 18, by = y + kListRowH - 24;
-                s.disc(bx, by, 9, kBad);
-                drawTextCentred(s, Face::Hint, bx, textBaseline(s, Face::Hint, by - 9, 18), r.left, kWhite);
-            }
-            if (i + 1 < v.row_count) s.hline(list_x0, list_x1 - kTmRingInset, y + kListRowH - 1, kRowLine);
-            y += kListRowH;
         }
+
+        // The DM column: this app has no TXT_MSG receive or send, so there are no direct messages and none are
+        // invented. The L2's own empty line, in the dim colour, and no card (firmware/src/ui/chat_selector.cpp).
+        if (v.dm_count == 0)
+            drawText(s, Face::Body, g.col_x[mc::kColDms] + 12, textBaseline(s, Face::Body, g.cards_y, 24),
+                     "No direct messages yet", kDim);
     }
 
     // ======================================================================================= one channel
@@ -173,9 +243,9 @@ void drawChat(Screen& s, const ChatView& v) {
         drawTextCentred(s, Face::Hint, bx + bw / 2, textBaseline(s, Face::Hint, by, bh), "Send", kAccInk);
     }
 
-    static const HintItem hints_list[] = {{"up/dn", "move"}, {"ret", "open"}, {"esc", "back"}};
+    static const HintItem hints_list[] = {{"up/dn", "move"}, {"l/r", "column"}, {"ret", "open"}, {"esc", "back"}};
     static const HintItem hints_open[] = {{"type", "write"}, {"up/dn", "scroll"}, {"ret", "send"}, {"esc", "back"}};
-    drawHintBar(s, tm::Page::Chat, v.open ? hints_open : hints_list, v.open ? 4 : 3);
+    drawHintBar(s, tm::Page::Chat, v.open ? hints_open : hints_list, v.open ? 4 : 4);
 }
 
 }  // namespace ui

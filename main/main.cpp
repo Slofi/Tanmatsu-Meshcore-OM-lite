@@ -557,7 +557,18 @@ extern "C" void app_main(void) {
     // for itself lives here: its cursor, whether a channel is open, and the composer's text.
     constexpr size_t kChatPreview = 96;   // one "sender: text" line for the channel list
     int    nodes_focus   = 0;
-    int    chat_focus    = 0;
+    // S513/EST-430: the Chat list is two columns of cards, so the selection is a (column, row) pair like the model
+    // in core/chat_cards.h. `chat_focus` is the row in the Channels column (and therefore the channel index);
+    // `chat_dm_focus` is the row in the Direct messages column, which cannot be focused while it has no cards.
+    int    chat_col        = om::mc::kColChannels;
+    int    chat_focus      = 0;
+    int    chat_dm_focus   = 0;
+    // The Direct messages column's model. There is no TXT_MSG receive or send in this app yet, so the count is 0
+    // and the page draws the L2's "No direct messages yet" line; a DM slice fills this and the view's dms[] and
+    // nothing in the layout moves.
+    int    chat_dm_count   = 0;
+    // Each column scrolls by itself to keep its focused card visible (core/chat_cards::cardScroll).
+    int    chat_card_scroll[om::mc::kCardCols] = {0, 0};
     bool   chat_open     = false;
     // S503: how many messages the open channel is scrolled BACK from the newest (0 = pinned to the bottom), how
     // far it can go (from the last draw — a channel that all fits has nowhere to scroll), and how many messages it
@@ -615,7 +626,10 @@ extern "C" void app_main(void) {
         cv.clock         = clockText();
         cv.battery_pct   = view.battery_pct;
         cv.charging      = view.charging;
-        cv.focused       = chat_focus;
+        cv.focus_col     = chat_col;
+        cv.focus_row     = (chat_col == om::mc::kColChannels) ? chat_focus : chat_dm_focus;
+        cv.scroll[0]     = chat_card_scroll[0];
+        cv.scroll[1]     = chat_card_scroll[1];
         cv.composer      = composer;
         // S513: the notice is only in the view while it is live, so the page needs no clock of its own.
         cv.notice        = (chat_notice != nullptr && esp_timer_get_time() < chat_notice_until_us) ? chat_notice : nullptr;
@@ -646,11 +660,26 @@ extern "C" void app_main(void) {
                     row.body   = preview;
                     row.unread = unread > 0;
                     if (sum.has) {
-                        const uint32_t now = om::time_source::epochNow();
-                        om::mc::formatAge(now, sum.ts ? sum.ts : now, row.right, sizeof(row.right));
+                        // S513/EST-430: a card's right-hand value is the newest message's LOCAL time (the ticket's
+                        // HH:MM), not an age. The summary's ts is already our clock when it arrived (local_ts when
+                        // set), so a peer with a wrong clock cannot put a nonsense hour on the card.
+                        om::time_source::hhmmOf(sum.ts ? sum.ts : om::time_source::epochNow(), row.right,
+                                                sizeof(row.right));
                     }
                 }
                 cv.unread_total = total;
+
+                // The card columns: the channels the store gave us, and the DM column's model (empty today).
+                cv.dm_count = chat_dm_count;
+                // The scroll is decided HERE, with the page's own grid (chatCardGrid), so the drawer and this
+                // decision cannot disagree about how many cards fit.
+                const om::mc::CardGrid grid = om::ui::chatCardGrid();
+                for (int col = 0; col < om::mc::kCardCols; col++) {
+                    const int count = (col == om::mc::kColChannels) ? cv.row_count : cv.dm_count;
+                    const int row   = (col == om::mc::kColChannels) ? chat_focus : chat_dm_focus;
+                    chat_card_scroll[col] = om::mc::cardScroll(grid, count, row, chat_card_scroll[col]);
+                    cv.scroll[col]        = chat_card_scroll[col];
+                }
             } else {
                 snprintf(cv.channel_name, sizeof(cv.channel_name), "%s", om::mc::channelName((size_t)chat_focus));
                 int          idx[om::mc::kMaxMessages];
@@ -830,17 +859,31 @@ extern "C" void app_main(void) {
                     }
                     dirty = true;
                 } else if (page_now == tm::Page::Chat) {
-                    if (k == tm::Key::Up || k == tm::Key::Down) {
-                        const int n = (int)om::mc::channelCount();
-                        if (n > 0) {
-                            chat_focus += (k == tm::Key::Down) ? 1 : -1;
-                            if (chat_focus < 0) chat_focus = 0;
-                            if (chat_focus > n - 1) chat_focus = n - 1;
-                        }
+                    // S513/EST-430: Up/Down move inside a column, Left/Right switch column (landing on the nearest
+                    // row, clamped to that column's last card), and an empty column cannot take focus. All of that
+                    // is core/chat_cards::cardMoveFocus — this only hands it the counts.
+                    const bool is_move = k == tm::Key::Up || k == tm::Key::Down || k == tm::Key::Left ||
+                                         k == tm::Key::Right;
+                    if (is_move) {
+                        const om::mc::CardMove move = (k == tm::Key::Up)     ? om::mc::CardMove::Up
+                                                      : (k == tm::Key::Down) ? om::mc::CardMove::Down
+                                                      : (k == tm::Key::Left) ? om::mc::CardMove::Left
+                                                                             : om::mc::CardMove::Right;
+                        const int counts[om::mc::kCardCols] = {(int)om::mc::channelCount(), chat_dm_count};
+                        const om::mc::CardFocus from{chat_col, chat_col == om::mc::kColChannels ? chat_focus
+                                                                                              : chat_dm_focus};
+                        const om::mc::CardFocus to = om::mc::cardMoveFocus(from, move, counts, om::mc::kCardCols);
+                        chat_col = to.col;
+                        if (to.col == om::mc::kColChannels)
+                            chat_focus = to.row;
+                        else
+                            chat_dm_focus = to.row;
                         handled = true;
                         dirty   = true;
                     } else if (k == tm::Key::Enter) {
-                        if (om::mc::channelCount() > 0) {
+                        // Enter opens a CHANNEL card exactly as before. A DM card cannot be focused while the
+                        // column is empty, and there is no DM conversation to open yet.
+                        if (chat_col == om::mc::kColChannels && om::mc::channelCount() > 0) {
                             chat_open       = true;
                             chat_scroll     = 0;    // always opens at the newest message
                             chat_seen_count = -1;

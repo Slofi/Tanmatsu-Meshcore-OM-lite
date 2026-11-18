@@ -15,6 +15,140 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-18 · S513 (EST-430) · the Chat list is two columns of cards: channels left, direct messages right (v38)
+
+> Written by DeepSeek for ticket EST-430 (fenced Paperclip run: no session start/end, nothing installed, nothing
+> flashed, nothing committed). Code + host tests + build + one preview PNG only. **Version for Claude's install:
+> 38.** This is the ticket's FIRST artefact: the entry goes in before the code, and its Results section is filled
+> from the real runs below.
+
+### What was read (this run)
+- `BRIEF.md` in full, `docs/PLAN.md` § 4 (the look) and § 5 (keys), and this file's S513 entries (EST-429,
+  EST-427, EST-428) plus Claude's S513 review note.
+- `main/chat_page.h/.cpp` (the list state only), `main/main.cpp` (`drawChatPage`, the Chat key branch), `main/chrome.*`,
+  `main/screen.h`, `main/tm_theme.h`, `main/time_source.h` (`hhmmOf`), `core/mc_store.h`
+  (`channelSummary`/`unreadForChannel`), `test/host/run.sh`, `test/host/test_layout.cpp` (the harness style),
+  `tools/preview_tanmatsu.py` (the `chat` renderer and the `plate`/`focus_band` recipes), and the L2 wording
+  `firmware/src/ui/chat_selector.cpp:119` ("No direct messages yet").
+
+### 1. Layout: two columns of cards (list state only; the open-channel view is untouched)
+
+The Chat page in its LIST state no longer draws one 64 px full-width row per channel. Between the page head and
+the hint bar sit **two equal columns of rounded cards**, one card per chat:
+
+| number | value | why |
+|---|---|---|
+| work box | x 18 … 782, y 70 … 456 | `kTmPad` margins, head line (`kTmStatusH + kTmHeadH`), hint bar (`kTmHintH`) |
+| gutter | **16 px** | between the two columns; the odd leftover pixel stays in the gutter, so both columns are exactly 374 px |
+| column width | **374 px** each | `(782-18-16)/2`, identical for both (ticket) |
+| column header band | **30 px** | label line, then the cards start |
+| card height | **68 px** | the ticket's 64-72: two comfortable lines (17 px name, 12 px preview) |
+| card gap | **10 px** | vertical space between cards in one column |
+| cards that fit | **4 per column** | `(386-30+10)/(68+10)` = 4 (a 5th would end at y=480, under the hint bar) |
+| corner radius | **6 px** | rounded card; the accent focus outline follows the same radius |
+
+A card shows: the **name** left (clipped), the **unread count** as the app's existing badge (filled `kBad` disc,
+white count, right, drawn only when > 0), and a **second line**: the newest message as `"sender: text"` clipped, in
+`kDim`, with its **local `HH:MM`** right-aligned (`time_source::hhmmOf`). No newest message = `"no messages yet"` in
+`kDim`. Unfocused card: `kPanel` fill, 1 px `kLine` outline. Focused card: `kSelBg` fill + the app's 2 px `kAcc`
+focus ring, both rounded.
+
+The head keeps its existing text (`"N channels · N unread"`) — the ticket asks for nothing new there.
+
+### 2. The DM column carries a MODEL, not messages
+
+No `TXT_MSG` receive or send exists in this app, so **no direct message is invented**: the right column draws
+exactly the L2's empty line **"No direct messages yet"** (`firmware/src/ui/chat_selector.cpp`) in `kDim` and no card.
+The view model nevertheless carries `dms[kChatRows]` + `dm_count` (empty today) beside `cards[]`/`card_count`, and
+the page draws whatever the model holds — so a future DM slice fills the array and never touches the layout.
+
+### 3. Focus and keys (Filip's rules kept: Esc is UP and never undo; Enter opens)
+
+- **Up/Down** move inside the column and stop at its ends (no wrap, same as the rest of the app).
+- **Left/Right** switch column and land on the card at the **nearest row**, clamped to that column's last card.
+- A column with **no cards cannot take focus** → while DMs are empty, Right does nothing.
+- **Enter** on a channel card opens that channel exactly as today (`chat_open`, newest message, marks read).
+- A column with more cards than fit **scrolls by itself** to keep the focused card fully visible (each column has
+  its own scroll), and the head shows nothing new for it.
+
+### 4. The rules are pure, in `core/` (ticket item 4)
+
+`core/chat_cards.h/.cpp` — no UI types, no theme, numbers passed in:
+`cardGrid()` (box → two equal columns, gutter, header band, card height, visible count), `cardRect()` (col, row,
+scroll → screen rect), `cardMoveFocus()` (Up/Down/Left/Right with clamping and the empty-column refusal),
+`cardScroll()` (scroll the minimum needed to keep the focused row fully visible, clamped). Host suite
+`test/host/test_chat_cards.cpp`, wired into `test/host/run.sh`; the ARM section below is the evidence that the
+suite is red against a deliberately wrong rule.
+
+### 5. Preview
+
+`tools/preview_tanmatsu.py` gains the `chat2` renderer (same palette parsed from `theme.h`, same metrics from
+`tm_theme.h`): 800x480, three channels, one with 2 unread, the DM column empty, focus on the second channel →
+`shots/2026-11-18-chat-two-columns.png`. One shared tool, no per-ticket script.
+
+### Results (real exit codes)
+
+- **ARM FIRST — the suite is red against a deliberately wrong rule.** The same `test/host/test_chat_cards.cpp` was
+  compiled against a sweep-only copy of the rules (`paperclip-pilot/sweep/est430-arm/chat_cards_wrong.cpp`, outside
+  the tree and not built by `run.sh`) with two deliberate mistakes: Left/Right jumps into ANY column (empty or not)
+  and keeps the row unclamped, and the scroll only ever moves back towards the top. **44 checks, 3 failures**,
+  `ARM_EXIT=1`; the FAIL lines, verbatim (`paperclip-pilot/sweep/est430-arm.log`):
+
+      FAIL test/host/test_chat_cards.cpp:154  g.row == 2 (got 4, want 2)
+      FAIL test/host/test_chat_cards.cpp:168  f.col == om::mc::kColChannels (got 1, want 0)
+      FAIL test/host/test_chat_cards.cpp:192  om::mc::cardScroll(g, 10, 4, 0) == 1 (got 0, want 1)
+
+  The same file against the real `core/chat_cards.cpp`: **99 checks, 0 failures**. Both wrong rules are caught by a
+  ticket case (the clamped landing row, the empty DM column refusing focus, the scroll keeping the 5th card visible).
+- `sh test/host/run.sh` → **HOST_SUITE_FINAL_EXIT=0**. Suites: 192 / 91 (clock) / 99 / 65 / 62 / 115 (MeshCore) /
+  115 (the same under ASan+UBSan) / 260 (map) / 82 (tx queue) / **99 (chat cards, new)** — **0 failures** everywhere,
+  **0** `AddressSanitizer` lines. Logs: `paperclip-pilot/sweep/est430-host.log`, final re-run on the finished tree
+  `paperclip-pilot/sweep/est430-host-final.log`.
+- `make build` → **BUILD_EXIT=0**, **0** `warning:` lines. `application.bin` = **0x15CE90 = 1,429,136 B**,
+  **0xA3170 = 668,528 B (32 %) of the 2 MB app partition free**, **+1,552 B** over v37 (EST-429, 0x15C880).
+  Log: `paperclip-pilot/sweep/est430-build.log`. **Stated honestly:** the first link of this run FAILED
+  (`undefined reference to om::mc::cardScroll/cardMoveFocus/cardGrid/cardRect`, exit 2) because the new
+  `core/chat_cards.cpp` was not yet in `core/CMakeLists.txt`; the line was added and the run above is the green one.
+- **Preview:** `shots/2026-11-18-chat-two-columns.png`, **800x480**, from
+  `python3 tools/preview_tanmatsu.py chat2` — three channels, `test-a` with 2 unread, the DM column empty with the
+  L2's line, focus on the second channel, the hint bar showing `l/r column`.
+- **Version for Claude's install: 38.**
+
+### Files changed
+
+- `core/chat_cards.h`, `core/chat_cards.cpp` (**new**) — `cardGrid()` (two equal columns, gutter, header band, card
+  height, visible count), `cardRect()` (col/row/scroll → rect), `cardMoveFocus()` (Up/Down/Left/Right, clamping, the
+  empty-column refusal, the fallback when a column empties), `cardScroll()` (minimum move keeping the focused card
+  fully visible, clamped). No theme, no UI types.
+- `core/CMakeLists.txt` — `chat_cards.cpp` added to the component (the missing line that failed the first link).
+- `test/host/test_chat_cards.cpp` (**new**) — 7 test functions / 99 checks on the panel's own numbers.
+- `test/host/run.sh` — the new suite wired in (one stage, one temp binary, cleaned up in the same trap).
+- `main/chat_page.h` — the card metrics (`kTmCardGutter` 16, `kTmCardHeaderH` 30, `kTmCardH` 68, `kTmCardGap` 10,
+  `kTmCardRadius` 6, `kTmCardWorkTop`), `chatCardGrid()` (the one grid main.cpp and the drawer share), and the list
+  model: `dms[]` + `dm_count` (empty today) beside `rows`/`row_count`, `focus_col`/`focus_row`, `scroll[2]`.
+  `focused` is gone.
+- `main/chat_page.cpp` — the list state now draws two columns of rounded cards (`fillRound`/`drawCard` per-row span
+  fills, no float, no allocation), name + unread badge + `"sender: text"` + `HH:MM`, the L2's
+  "No direct messages yet" empty line, the 2 px `kAcc` focus outline on the focused card only; the hint bar gained
+  `l/r column`; the unused `kListRowH` is gone. The **open-channel view is untouched**.
+- `main/main.cpp` — the card fill (time from `time_source::hhmmOf` instead of an age), the DM count (0), the
+  per-column scroll via `cardScroll`, and the list keys routed through `cardMoveFocus` (Up/Down/Left/Right, Enter
+  opens a channel only from the Channels column as before).
+- `tools/preview_tanmatsu.py` — `chat2` renderer + the card metrics in the tool's ONE metrics table.
+- `shots/2026-11-18-chat-two-columns.png` (**new**) — the preview above.
+- `docs/PROGRESS.md` — this entry.
+
+### What could NOT be checked (honest list)
+
+- **Nothing installed, flashed or committed** (ticket terms): the build's exit code and binary size are real, the
+  two-column look has **host-render evidence only** — no glass shot.
+- **No DM exists to draw**: the DM column is an empty state plus a model slot; the DM card path is exercised by the
+  geometry tests (a non-zero `counts[1]`) but never seen on screen.
+- Scrolling in a column is host-tested by rect arithmetic; it has **not** been seen on the glass (needs more
+  channels than four).
+
+---
+
 ## 2026-11-18 · S513 (EST-429) · a mesh time now needs TWO agreeing nodes, so one wrong clock cannot move ours for good
 
 > Written by DeepSeek for ticket EST-429 (fenced Paperclip run: no session start/end, nothing installed, nothing

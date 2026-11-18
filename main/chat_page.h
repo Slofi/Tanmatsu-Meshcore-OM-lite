@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 
+#include "chat_cards.h"    // mc::CardGrid: the two-column card geometry and focus rules (S513)
 #include "chat_layout.h"   // mc::Line / kMaxLines: the wrap the view carries (S503)
 #include "mc_store.h"
 #include "screen.h"
@@ -19,7 +20,22 @@
 namespace om {
 namespace ui {
 
-constexpr int kChatRows = 8;   // message rows or channel rows the view can carry
+constexpr int kChatRows = 8;   // cards per column the view can carry (more than the four a column shows)
+
+// -------------------------------------------------------------------------------------- card geometry (S513)
+// The list state is two columns of rounded cards, not one 64 px row per channel (Filip: "make channels like
+// rectangles in two columns, so first column is channels, the second is DMs"). These are the ONE numbers the
+// drawing and main.cpp's scroll decision share; core/chat_cards.* turns them into rects, focus moves and scrolls.
+constexpr int kTmCardGutter  = 16;   // between the two columns; an odd leftover pixel stays there
+constexpr int kTmCardHeaderH = 30;   // the "Channels" / "Direct messages" label band above the cards
+constexpr int kTmCardH       = 68;   // one card: a 17 px name line and a 12 px preview line, comfortably
+constexpr int kTmCardGap     = 10;   // vertical space between two cards in a column
+constexpr int kTmCardRadius  = 6;    // rounded corners, on the card and on its focus ring
+constexpr int kTmCardWorkTop = kTmStatusH + kTmHeadH;   // the head's line: where the columns start
+
+// The grid this page draws in AND main.cpp scrolls by, built from the numbers above and `tm_theme.h`. One function,
+// so a scroll decision and a draw cannot use two different geometries.
+mc::CardGrid chatCardGrid();
 
 // --------------------------------------------------------------------------------------- message geometry
 // ONE source for the numbers the LAYOUT and the DRAWING both need: main.cpp wraps a message with these widths
@@ -38,10 +54,10 @@ constexpr int  kTmChatHeight = kTmChatBot - kTmChatTop;    // the height chatWin
 static_assert(kTmChatBodyW > 0 && kTmChatHeight > 0, "the chat geometry must leave room for text");
 
 struct ChatRowView {
-    char        left[8] = "";      // "09:12" (messages) or the unread count (channels)
-    const char* title = "";        // sender, or "# channel"
-    const char* body = "";         // message text, or the channel's last line
-    char        right[8] = "";     // age
+    char        left[8] = "";      // the unread count as drawn in the badge (list) or "09:12" (messages)
+    const char* title = "";        // the channel / DM name (list), or the sender (messages)
+    const char* body = "";         // "sender: text" (list), or the message text
+    char        right[8] = "";     // the newest message's local HH:MM (list), or the age (messages)
     bool        outgoing = false;
     bool        unread = false;
 };
@@ -49,10 +65,17 @@ struct ChatRowView {
 struct ChatView {
     bool open = false;
 
-    // ---- list mode
-    ChatRowView rows[kChatRows];
+    // ---- list mode: two columns of cards (S513/EST-430)
+    // `rows` is the Channels column, `dms` the Direct messages column. The page draws BOTH from the model, so a
+    // future DM slice only fills `dms`/`dm_count` and never touches the layout. Today `dm_count` is always 0
+    // (this app has no TXT_MSG receive or send), and the page draws the L2's "No direct messages yet" line.
+    ChatRowView rows[kChatRows];      // Channels (column 0)
     int         row_count = 0;
-    int         focused = 0;
+    ChatRowView dms[kChatRows];       // Direct messages (column 1) — empty today
+    int         dm_count = 0;
+    int         focus_col = mc::kColChannels;   // an empty column cannot take focus, so this is 0 today
+    int         focus_row = 0;
+    int         scroll[mc::kCardCols] = {0, 0}; // each column scrolls by itself to keep its focused card visible
     int         channel_count = 0;
     int         unread_total = 0;
 

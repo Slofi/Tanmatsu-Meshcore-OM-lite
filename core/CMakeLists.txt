@@ -17,6 +17,9 @@ idf_component_register(
          # Chat layout (S503): wrapping a message into lines, and which messages fit the screen. Pure arithmetic,
          # so the host tests pin the break points instead of the glass teaching us.
          "chat_layout.cpp"
+         # S513/EST-430: the Chat list's two-column card grid — the rects, the focus moves and the scroll that keeps
+         # the focused card visible. Pure arithmetic on the page's box, so the host tests pin the panel's numbers.
+         "chat_cards.cpp"
          # The map pack rules (S503, step 6): record layout, binary search, zoom -> pack, tile coordinates.
          "map_pack.cpp"
          # The Map page arithmetic (S503): view tiles, panning, zooming, and the decoded-tile cache.

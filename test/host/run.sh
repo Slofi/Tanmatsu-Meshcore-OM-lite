@@ -16,10 +16,11 @@ HIST="$(mktemp /tmp/tm-history.XXXXXX)"
 LAYOUT="$(mktemp /tmp/tm-layout.XXXXXX)"
 MAP="$(mktemp /tmp/tm-map.XXXXXX)"
 TXQ="$(mktemp /tmp/tm-txq.XXXXXX)"
+CARDS="$(mktemp /tmp/tm-cards.XXXXXX)"
 MCASAN="$(mktemp /tmp/tm-mc-asan.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$MCASAN"; rm -rf "$ED" "$EDASAN"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MCASAN"; rm -rf "$ED" "$EDASAN"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -103,3 +104,12 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
     ../../core/tx_queue.cpp \
     -o "$TXQ"
 "$TXQ"
+
+# The Chat list's two-column card grid (S513/EST-430): the rects, the focus moves (including the empty DM column
+# refusing focus) and the scroll that keeps the focused card visible. Pure arithmetic, so the panel's own numbers
+# (374 px columns, 16 px gutter, 68 px cards, four per column) are pinned here instead of on the glass.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_chat_cards.cpp \
+    ../../core/chat_cards.cpp \
+    -o "$CARDS"
+"$CARDS"

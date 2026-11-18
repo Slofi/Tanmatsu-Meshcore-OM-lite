@@ -79,6 +79,9 @@ TM = dict(
     # types (px). L2: SansBody 11 / SansTitle 14 / SansTab 9 / MonoMeta 10 at 320x240.
     # mock .dev-tan: body 13 / h2 18 / kv 12 / meta 10 / status 11, hints 9.
     f_title=22, f_row=17, f_body=13, f_meta=12, f_label=11, f_status=12, f_hint=11, f_kv=12,
+    # The Chat list's cards (S513/EST-430). These mirror main/chat_page.h kTmCard* exactly; core/chat_cards.cpp
+    # turns them into rects and the device draws at them, so the preview and the panel must not drift.
+    card_gutter=16, card_header_h=30, card_h=68, card_gap=10, card_radius=6,
 )
 
 SIGILS = ('triangle', 'square', 'circle', 'cloud', 'diamond')   # BRIEF § 5, Filip's names
@@ -647,6 +650,86 @@ def chat():
     return save(img, '2026-11-13-chat.png')
 
 
+# ------------------------------------------------------------------------------------------- chat cards
+# The device's own grid arithmetic (core/chat_cards.cpp::cardGrid), mirrored so the render is at the same numbers.
+def card_grid(box, gutter, header_h, card_h, gap):
+    x0, y0, x1, y1 = box
+    col_w = (x1 - x0 - gutter) // 2
+    return dict(x0=x0, y0=y0, x1=x1, y1=y1, col_w=col_w, gutter=gutter, header_h=header_h,
+                card_h=card_h, gap=gap, col_x=[x0, x0 + col_w + gutter], cards_y=y0 + header_h,
+                visible=max(1, ((y1 - y0) - header_h + gap) // (card_h + gap)))
+
+
+def draw_channel_card(d, g, col, row, scroll, name, preview, stamp, unread, focused):
+    x = g['col_x'][col]
+    y = g['cards_y'] + (row - scroll) * (g['card_h'] + g['gap'])
+    w, h = g['col_w'], g['card_h']
+    if focused:
+        plate(d, [x, y, x + w - 1, y + h - 1], P['SelBg'], P['Acc'], r=TM['card_radius'], w=TM['ring_w'])
+        name_col = P['AccInk']
+    else:
+        plate(d, [x, y, x + w - 1, y + h - 1], P['Panel'], P['Line'], r=TM['card_radius'], w=1)
+        name_col = P['Ink']
+
+    fn = font(FONT_SANS, TM['f_row'])
+    text(d, (x + 12, y + 9), name, fn, name_col)
+    if unread:
+        fb = font(FONT_MONO, 11)
+        label = str(min(unread, 9))
+        bw = max(18, tw(fb, label) + 12)
+        plate(d, [x + w - 12 - bw, y + 11, x + w - 12, y + 11 + bw], P['Bad'], None, r=bw // 2)
+        text(d, (x + w - 12 - bw / 2, y + 11 + bw / 2), label, fb, '#ffffff', anchor='mm')
+
+    fm = font(FONT_MONO, TM['f_meta'])
+    text(d, (x + 12, y + 40), preview, fm, P['Dim'])
+    if stamp:
+        text(d, (x + w - 12, y + 41), stamp, font(FONT_MONO, TM['f_hint']), P['Dimmer'], anchor='ra')
+
+
+CHANNEL_CARDS = [
+    # name, the newest message as "sender: text", its local HH:MM, unread
+    ('test-a', 'TEST-A1: morning, radio check', '09:12', 2),
+    ('test-b', 'LOCAL-KB: history save check', '09:41', 0),
+    ('public', 'no messages yet', '', 0),
+]
+
+
+def chat_cards():
+    """OM Lite > Chat, LIST state: two columns of cards, Channels left and Direct messages right.
+
+    Filip (S513): "make channels like rectangles in two columns, so first column is channels, the second is
+    DMs." One card per chat: the name, the unread badge, then the newest message and its local time. The DM
+    column is EMPTY — this app has no direct messages yet, so it shows the L2's own line and no card. Focus is
+    on the second channel, drawn with the app's 2 px gold outline.
+    """
+    img, d = new_screen()
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    status_bar(d)
+
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Chat', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    text(d, (W - pad, y + TM['head_h'] // 2), '3 channels · 2 unread', font(FONT_MONO, TM['f_meta']),
+         P['Dimmer'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+
+    g = card_grid((pad, y + TM['head_h'], W - pad, H - TM['hint_h']),
+                  TM['card_gutter'], TM['card_header_h'], TM['card_h'], TM['card_gap'])
+
+    fh = font(FONT_SANS, TM['f_meta'])
+    text(d, (g['col_x'][0], g['y0'] + 7), 'Channels', fh, P['Dimmer'])
+    text(d, (g['col_x'][1], g['y0'] + 7), 'Direct messages', fh, P['Dimmer'])
+
+    for i, (name, preview, stamp, unread) in enumerate(CHANNEL_CARDS):
+        draw_channel_card(d, g, 0, i, 0, name, preview, stamp, unread, focused=(i == 1))
+
+    # The DM column: no cards, the L2's empty line in the dim colour (firmware/src/ui/chat_selector.cpp).
+    text(d, (g['col_x'][1] + 12, g['cards_y'] + 12), 'No direct messages yet',
+         font(FONT_SANS, TM['f_body']), P['Dim'])
+
+    hint_bar(d, 'chat', [('↑↓', 'move'), ('←→', 'column'), ('↵', 'open'), ('esc', 'back')])
+    return save(img, '2026-11-18-chat-two-columns.png')
+
+
 # ---------------------------------------------------------------------------------------------- map
 # Rule 9: this map is an INVENTED TEST GRID. No real geography, no coordinates, no place names — the
 # labels are the same fake node names the other previews use, and the grid is drawn from scratch.
@@ -1012,7 +1095,7 @@ def settings():
     return save(img, '2026-11-13-settings.png')
 
 
-RENDERERS = dict(launcher=launcher, nodes=nodes, chat=chat, map=map_page, rptr=rptr,
+RENDERERS = dict(launcher=launcher, nodes=nodes, chat=chat, chat2=chat_cards, map=map_page, rptr=rptr,
                  settings=settings)
 
 
