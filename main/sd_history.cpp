@@ -2,6 +2,7 @@
 #include "sd_history.h"
 
 #include <stdio.h>
+#include <dirent.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,6 +34,12 @@ void pathFor(char* out, size_t cap, uint8_t hash, const char* name) {
     char file[64];
     mc::historyFileName(hash, name, file, sizeof(file));
     snprintf(out, cap, "%s/%s", kDir, file);
+}
+
+// S513/EST-434: the L2's DM id, dm-<pubkey[0..3] 8 hex>. The name is the thread's identity on the card; only the
+// first four bytes of the key fit in it, which is exactly why a restored thread starts with a prefix-only row.
+void pathForDm(char* out, size_t cap, const uint8_t pub[32]) {
+    snprintf(out, cap, "%s/dm-%02x%02x%02x%02x.log", kDir, pub[0], pub[1], pub[2], pub[3]);
 }
 
 // One record appended: open, write, flush, close. The same rule for a message and for a seen point, so a power
@@ -192,6 +199,125 @@ mc::SeenPoint loadSeen(uint8_t channel, uint8_t hash, const char* name) {
     free(buf);
     (void)channel;
     return sp;
+}
+
+// --------------------------------------------------------------------------------- DM logs (S513/EST-434)
+bool appendDm(const uint8_t pub[32], const mc::DmMessage& m, uint32_t log_id) {
+    if (!g_ready || pub == nullptr) return false;
+    uint8_t   rec[512];
+    const int n = mc::historyEncodeDm(m, log_id, rec, (int)sizeof(rec));
+    if (n <= 0) {
+        ESP_LOGW(TAG, "history: DM record does not fit (%d)", n);
+        return false;
+    }
+    char path[96];
+    pathForDm(path, sizeof(path), pub);
+    if (!appendRecord(path, rec, n)) {
+        g_ready = false;
+        return false;
+    }
+    return true;
+}
+
+size_t loadDm(const uint8_t pub[32], const char* peer_name, mc::DmMessage* out, size_t max_out,
+              uint32_t* out_max_log_id) {
+    if (!g_ready || pub == nullptr || out == nullptr || max_out == 0) return 0;
+    char path[96];
+    pathForDm(path, sizeof(path), pub);
+
+    long     size = 0;
+    uint8_t* buf  = readTail(path, &size);
+    if (buf == nullptr) return 0;
+    const int start = windowStart(path, buf, size);
+    if (start < 0) {
+        free(buf);
+        return 0;
+    }
+    const size_t n =
+        mc::historyLoadDm(buf + start, (size_t)size - (size_t)start, pub, peer_name, out, max_out, out_max_log_id);
+    free(buf);
+    ESP_LOGI(TAG, "history: %u DM(s) from %s", (unsigned)n, path);
+    return n;
+}
+
+bool appendDmSeen(const uint8_t pub[32], uint32_t seen_log_id, uint16_t unread) {
+    if (!g_ready || pub == nullptr) return false;
+    uint8_t   rec[32];
+    const int n = mc::historyEncodeMeta(seen_log_id, unread, rec, (int)sizeof(rec));
+    if (n <= 0) return false;
+    char path[96];
+    pathForDm(path, sizeof(path), pub);
+    return appendRecord(path, rec, n);
+}
+
+mc::SeenPoint loadDmSeen(const uint8_t pub[32]) {
+    mc::SeenPoint sp;
+    if (!g_ready || pub == nullptr) return sp;
+    char path[96];
+    pathForDm(path, sizeof(path), pub);
+    long     size = 0;
+    uint8_t* buf  = readTail(path, &size);
+    if (buf == nullptr) return sp;
+    const int start = windowStart(path, buf, size);
+    if (start >= 0) sp = mc::historyReadSeen(buf + start, (size_t)size - (size_t)start);
+    free(buf);
+    return sp;
+}
+
+size_t restoreDmThreads(mc::DmRing& ring, mc::ContactStore& contacts) {
+    if (!g_ready) return 0;
+    DIR* d = opendir(kDir);
+    if (d == nullptr) {
+        ESP_LOGW(TAG, "history: cannot scan %s (%s)", kDir, strerror(errno));
+        return 0;
+    }
+    static mc::DmMessage loaded[mc::kMaxDms];   // one thread at a time; the main task only, before the radio task
+    size_t restored = 0;
+    struct dirent* e = nullptr;
+    while ((e = readdir(d)) != nullptr) {
+        const char* name = e->d_name;
+        // Exactly the L2's DM id: dm-<8 hex>.log.
+        if (strlen(name) != 15 || strncmp(name, "dm-", 3) != 0 || strcmp(name + 11, ".log") != 0) continue;
+        unsigned b0 = 0, b1 = 0, b2 = 0, b3 = 0;
+        if (sscanf(name + 3, "%2x%2x%2x%2x", &b0, &b1, &b2, &b3) != 4) continue;
+
+        uint8_t pub[32] = {0};   // prefix only: the file name is all the identity the card keeps
+        pub[0] = (uint8_t)b0;
+        pub[1] = (uint8_t)b1;
+        pub[2] = (uint8_t)b2;
+        pub[3] = (uint8_t)b3;
+        char label[24];
+        snprintf(label, sizeof(label), "%.*s", 8, name + 3);
+
+        uint32_t max_log_id = 0;
+        const size_t n = loadDm(pub, label, loaded, mc::kMaxDms, &max_log_id);
+        if (n == 0) continue;
+        // The first incoming record carries the peer's name; a thread with only our own messages keeps the prefix.
+        for (size_t i = 0; i < n; i++) {
+            if (!loaded[i].outgoing && loaded[i].peer_name[0] != '\0') {
+                snprintf(label, sizeof(label), "%s", loaded[i].peer_name);
+                break;
+            }
+        }
+        const int idx = contactsUpsert(contacts, pub, label, 0, 0, 0, 0, 0, 0);
+        // The Meta record names the last READ log id. Load it BEFORE pushing and remember the NEW seq dmPush gives
+        // the newest record at or before that id; an old record's `seq` is the previous boot's, not ours.
+        const mc::SeenPoint sp = loadDmSeen(pub);
+        uint32_t           seen_seq = 0;
+        for (size_t i = 0; i < n; i++) {
+            const uint32_t seq = mc::dmPush(ring, loaded[i]);
+            if (sp.found && loaded[i].log_id != 0 && loaded[i].log_id <= sp.seen_log_id) seen_seq = seq;
+        }
+        if (idx >= 0) {
+            contacts.c[idx].dm_seen     = sp.found ? seen_seq : 0;   // no Meta record: all unread, honestly
+            contacts.c[idx].dm_log_next = max_log_id + 1;           // continue the file's own numbering
+        }
+        restored++;
+        ESP_LOGI(TAG, "history: restored DM thread %s (%u message(s), %s)", label, (unsigned)n,
+                 sp.found ? "with a seen point" : "no seen point");
+    }
+    closedir(d);
+    return restored;
 }
 
 }  // namespace sdhistory

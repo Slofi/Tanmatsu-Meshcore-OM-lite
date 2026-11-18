@@ -502,6 +502,8 @@ extern "C" void app_main(void) {
     // Step 5: the chat history lives on the card, so it starts only once the card is mounted. A missing card is
     // not fatal: the app runs with RAM-only history and the log says so.
     om::sdhistory::begin();
+    // S513/EST-434 item 4: restore the per-contact DM logs before the radio task exists, so nothing races it.
+    om::mc::restoreDmHistory();
     // Step 6 slice 1: prove the pack path (index search, tile read, JPEG decode) with real tiles. central Slovenia,
     // because it is where this device actually is. No UI yet: the numbers in the log are the result.
     om::maplink::begin();
@@ -589,6 +591,11 @@ extern "C" void app_main(void) {
     // Each column scrolls by itself to keep its focused card visible (core/chat_cards::cardScroll).
     int    chat_card_scroll[om::mc::kCardCols] = {0, 0};
     bool   chat_open     = false;
+    // S513/EST-434: when the open chat is a DM thread, who it is. `chat_dm_pub` is the thread key; a restored thread
+    // may still be prefix-only until an advert fills the rest in (mc_link's rebind).
+    bool   chat_dm_open     = false;
+    uint8_t chat_dm_pub[32] = {0};
+    char   chat_dm_name[32] = "";
     // S503: how many messages the open channel is scrolled BACK from the newest (0 = pinned to the bottom), how
     // far it can go (from the last draw — a channel that all fits has nowhere to scroll), and how many messages it
     // had at the last draw, so arriving messages do not drag the view out from under the reader.
@@ -642,6 +649,7 @@ extern "C" void app_main(void) {
     auto drawChatPage = [&]() {
         om::ui::ChatView cv;
         cv.open          = chat_open;
+        cv.dm_open       = chat_dm_open;
         cv.clock         = clockText();
         cv.battery_pct   = view.battery_pct;
         cv.charging      = view.charging;
@@ -688,8 +696,35 @@ extern "C" void app_main(void) {
                 }
                 cv.unread_total = total;
 
-                // The card columns: the channels the store gave us, and the DM column's model (empty today).
-                cv.dm_count = chat_dm_count;
+                // S513/EST-434: the DM column. Threads come newest first from the store (item 3); the card is the
+                // name (or the 8-hex prefix while a restored thread has no name), unread badge, the newest text
+                // and its LOCAL HH:MM.
+                om::mc::ContactStore& cs  = om::mc::contacts();
+                om::mc::DmRing&       dmr = om::mc::dmThreads();
+                static char dm_titles[om::ui::kChatRows][20];
+                static char dm_previews[om::ui::kChatRows][kChatPreview];
+                om::mc::DmSummary dsums[om::ui::kChatRows];
+                const size_t      dn = om::mc::dmThreadSummaries(dmr, cs, dsums, om::ui::kChatRows);
+                chat_dm_count        = (int)dn;
+                cv.dm_count          = chat_dm_count;
+                for (size_t i = 0; i < dn; i++) {
+                    om::ui::ChatRowView& row = cv.dms[i];
+                    if (dsums[i].name != nullptr && dsums[i].name[0] != '\0') {
+                        snprintf(dm_titles[i], sizeof(dm_titles[i]), "%s", dsums[i].name);
+                    } else {
+                        snprintf(dm_titles[i], sizeof(dm_titles[i]), "%02x%02x%02x%02x", dsums[i].pub[0],
+                                 dsums[i].pub[1], dsums[i].pub[2], dsums[i].pub[3]);
+                    }
+                    row.title = dm_titles[i];
+                    snprintf(dm_previews[i], kChatPreview, "%s", dsums[i].text[0] ? dsums[i].text : "no messages yet");
+                    row.body   = dm_previews[i];
+                    row.unread = dsums[i].unread > 0;
+                    snprintf(row.left, sizeof(row.left), "%u", (unsigned)(dsums[i].unread > 9 ? 9 : dsums[i].unread));
+                    om::time_source::hhmmOf(dsums[i].ts ? dsums[i].ts : om::time_source::epochNow(), row.right,
+                                            sizeof(row.right));
+                }
+
+                // The card columns: the channels the store gave us, and the DM threads above.
                 // The scroll is decided HERE, with the page's own grid (chatCardGrid), so the drawer and this
                 // decision cannot disagree about how many cards fit.
                 const om::mc::CardGrid grid = om::ui::chatCardGrid();
@@ -700,12 +735,40 @@ extern "C" void app_main(void) {
                     cv.scroll[col]        = chat_card_scroll[col];
                 }
             } else {
-                snprintf(cv.channel_name, sizeof(cv.channel_name), "%s", om::mc::channelName((size_t)chat_focus));
-                int          idx[om::mc::kMaxMessages];
-                const size_t n = om::mc::messagesForChannel(msgs, (uint8_t)chat_focus, idx, om::mc::kMaxMessages);
+                // The open view is one of two things: a channel's messages, or a DM thread's. Both go through the
+                // SAME window/wrap code below, so a thread and a channel cannot drift in how they scroll.
+                struct Src {
+                    const char* text;
+                    const char* sender;
+                    uint32_t    local_ts;
+                    uint32_t    ts;
+                    bool        outgoing;
+                };
+                static Src srcs[om::mc::kMaxDms];
+                int        idx[om::mc::kMaxDms];
+                size_t     n = 0;
+                if (chat_dm_open) {
+                    snprintf(cv.channel_name, sizeof(cv.channel_name), "%s", chat_dm_name);
+                    om::mc::DmRing& dmr = om::mc::dmThreads();
+                    n = om::mc::dmForPeer(dmr, chat_dm_pub, idx, om::mc::kMaxDms);
+                    for (size_t i = 0; i < n; i++) {
+                        const om::mc::DmMessage* m = om::mc::dmAt(dmr, (size_t)idx[i]);
+                        if (m == nullptr) continue;
+                        srcs[i] = {m->text, m->peer_name, m->local_ts, m->ts, m->outgoing};
+                    }
+                } else {
+                    snprintf(cv.channel_name, sizeof(cv.channel_name), "%s",
+                             om::mc::channelName((size_t)chat_focus));
+                    n = om::mc::messagesForChannel(msgs, (uint8_t)chat_focus, idx, om::mc::kMaxMessages);
+                    for (size_t i = 0; i < n; i++) {
+                        const om::mc::Message* m = om::mc::messagesAt(msgs, (size_t)idx[i]);
+                        if (m == nullptr) continue;
+                        srcs[i] = {m->text, m->sender, m->local_ts, m->ts, m->outgoing};
+                    }
+                }
 
                 // A message arriving must not drag the view out from under someone who scrolled back (S503):
-                // move the scroll by the same amount the channel grew, so the same messages stay on screen.
+                // move the scroll by the same amount the chat grew, so the same messages stay on screen.
                 if (chat_seen_count >= 0 && (int)n > chat_seen_count && chat_scroll > 0) {
                     chat_scroll += (int)n - chat_seen_count;
                 }
@@ -714,13 +777,12 @@ extern "C" void app_main(void) {
 
                 // How many lines every message takes. Wrapping is core logic (chat_layout) measured with the real
                 // body font; chatWindow then decides which messages fit in the space above the composer.
-                static int             line_counts[om::mc::kMaxMessages];
-                static om::mc::Wrapped wraps[om::mc::kMaxMessages];
+                static int             line_counts[om::mc::kMaxDms];
+                static om::mc::Wrapped wraps[om::mc::kMaxDms];
                 const om::ui::Font*    body = om::ui::fontFor(Face::Body);
                 for (size_t i = 0; i < n; i++) {
-                    const om::mc::Message* m = om::mc::messagesAt(msgs, (size_t)idx[i]);
-                    wraps[i] = om::mc::wrapText(m != nullptr ? m->text : "", om::ui::kTmChatBodyW, measureBody,
-                                                (void*)body);
+                    wraps[i] = om::mc::wrapText(srcs[i].text != nullptr ? srcs[i].text : "", om::ui::kTmChatBodyW,
+                                                measureBody, (void*)body);
                     line_counts[i] = 1 + (int)(wraps[i].count ? wraps[i].count : 1);
                 }
                 const om::mc::Window win = om::mc::chatWindow(line_counts, (int)n, om::ui::kTmChatLineH,
@@ -735,14 +797,13 @@ extern "C" void app_main(void) {
                 const uint32_t now = om::time_source::epochNow();
                 cv.msg_count       = 0;
                 for (int i = win.first; i <= win.last && cv.msg_count < om::ui::kChatRows; i++) {
-                    const om::mc::Message* m = om::mc::messagesAt(msgs, (size_t)idx[i]);
-                    if (m == nullptr) continue;
+                    const Src&             s  = srcs[i];
                     om::ui::ChatView::Msg& mv = cv.msgs[cv.msg_count++];
-                    om::time_source::hhmmOf(m->local_ts ? m->local_ts : m->ts, mv.hhmm, sizeof(mv.hhmm));
-                    snprintf(mv.sender, sizeof(mv.sender), "%s", m->sender);
-                    snprintf(mv.text, sizeof(mv.text), "%s", m->text);
-                    om::mc::formatAge(now, m->local_ts ? m->local_ts : m->ts, mv.age, sizeof(mv.age));
-                    mv.outgoing   = m->outgoing;
+                    om::time_source::hhmmOf(s.local_ts ? s.local_ts : s.ts, mv.hhmm, sizeof(mv.hhmm));
+                    snprintf(mv.sender, sizeof(mv.sender), "%s", s.sender != nullptr ? s.sender : "");
+                    snprintf(mv.text, sizeof(mv.text), "%s", s.text != nullptr ? s.text : "");
+                    om::mc::formatAge(now, s.local_ts ? s.local_ts : s.ts, mv.age, sizeof(mv.age));
+                    mv.outgoing   = s.outgoing;
                     mv.line_count = wraps[i].count ? wraps[i].count : 1;
                     mv.clipped    = wraps[i].clipped;
                     for (int l = 0; l < om::mc::kMaxLines; l++) mv.line[l] = wraps[i].line[l];
@@ -825,16 +886,22 @@ extern "C" void app_main(void) {
                 // ---- the Chat page owns its keys while a channel is open: typing goes to the composer.
                 if (page_now == tm::Page::Chat && chat_open) {
                     if (k == tm::Key::Esc) {
+                        // A DM thread and a channel leave the same way; each marks itself read on the way up.
+                        if (chat_dm_open) {
+                            om::mc::noteDmRead(chat_dm_pub);
+                            chat_dm_open = false;
+                        } else {
+                            om::mc::noteChannelRead((uint8_t)chat_focus);
+                        }
                         chat_open       = false;
                         chat_scroll     = 0;
                         chat_seen_count = -1;
                         // What you were looking at is READ — in the store AND on the card (the seen point), so it
                         // is still read after a restart. Without this a message that arrived while the channel
                         // was open came back as a badge the moment you went up a level (Filip, S502).
-                        om::mc::noteChannelRead((uint8_t)chat_focus);
                         handled = true;
                     } else if (k == tm::Key::Enter) {
-                        if (composer_len > 0) {
+                        if (!chat_dm_open && composer_len > 0) {
                             if (om::mc::queueText((size_t)chat_focus, composer)) {
                                 ESP_LOGI(TAG, "chat: queued for channel %d (%u chars)", chat_focus,
                                          (unsigned)composer_len);
@@ -853,14 +920,16 @@ extern "C" void app_main(void) {
                         handled = true;
                     } else if (k == tm::Key::Backspace) {
                         // delete one UTF-8 sequence, not one byte: a Slovenian letter must not become garbage
-                        while (composer_len > 0) {
-                            const unsigned char c = (unsigned char)composer[--composer_len];
-                            if ((c & 0xC0) != 0x80) break;
+                        if (!chat_dm_open) {
+                            while (composer_len > 0) {
+                                const unsigned char c = (unsigned char)composer[--composer_len];
+                                if ((c & 0xC0) != 0x80) break;
+                            }
+                            composer[composer_len] = '\0';
                         }
-                        composer[composer_len] = '\0';
                         handled                = true;
                     } else if (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD) {
-                        if (composer_len + 1 < sizeof(composer)) {
+                        if (!chat_dm_open && composer_len + 1 < sizeof(composer)) {
                             composer[composer_len++] = (char)ev.args_keyboard.ascii;
                             composer[composer_len]   = '\0';
                         }
@@ -900,13 +969,37 @@ extern "C" void app_main(void) {
                         handled = true;
                         dirty   = true;
                     } else if (k == tm::Key::Enter) {
-                        // Enter opens a CHANNEL card exactly as before. A DM card cannot be focused while the
-                        // column is empty, and there is no DM conversation to open yet.
+                        // Enter opens the focused card: a channel, or a DM thread. The DM thread's key and name
+                        // come from the same summaries the column drew, so the card and the open view agree.
                         if (chat_col == om::mc::kColChannels && om::mc::channelCount() > 0) {
+                            chat_dm_open    = false;
                             chat_open       = true;
                             chat_scroll     = 0;    // always opens at the newest message
                             chat_seen_count = -1;
                             om::mc::noteChannelRead((uint8_t)chat_focus);   // opening a channel marks it read
+                        } else if (chat_col == om::mc::kColDms && chat_dm_count > 0) {
+                            om::mc::DmSummary sums[om::ui::kChatRows];
+                            size_t            dn = 0;
+                            {
+                                om::mc::StoreLock l;
+                                dn = om::mc::dmThreadSummaries(om::mc::dmThreads(), om::mc::contacts(), sums,
+                                                               om::ui::kChatRows);
+                            }
+                            if (chat_dm_focus >= 0 && (size_t)chat_dm_focus < dn) {
+                                const om::mc::DmSummary& sum = sums[chat_dm_focus];
+                                memcpy(chat_dm_pub, sum.pub, sizeof(chat_dm_pub));
+                                snprintf(chat_dm_name, sizeof(chat_dm_name), "%s",
+                                         sum.name != nullptr && sum.name[0] != '\0' ? sum.name : "");
+                                if (chat_dm_name[0] == '\0') {
+                                    snprintf(chat_dm_name, sizeof(chat_dm_name), "%02x%02x%02x%02x", sum.pub[0],
+                                             sum.pub[1], sum.pub[2], sum.pub[3]);
+                                }
+                                chat_dm_open    = true;
+                                chat_open       = true;
+                                chat_scroll     = 0;
+                                chat_seen_count = -1;
+                                om::mc::noteDmRead(chat_dm_pub);   // opening a thread marks it read
+                            }
                         }
                         handled = true;
                         dirty   = true;
@@ -1040,7 +1133,8 @@ extern "C" void app_main(void) {
             // "you have not seen this", and you are looking at it (Filip, S502). The seen point on the card moves
             // with it, so after a restart it is still read (S503) — and it only costs a write when it moved.
             if (chat_open && core.router().current() == tm::Page::Chat) {
-                om::mc::noteChannelRead((uint8_t)chat_focus);
+                if (chat_dm_open) om::mc::noteDmRead(chat_dm_pub);
+                else om::mc::noteChannelRead((uint8_t)chat_focus);
             }
             // S502: apply a time the radio task heard (and correct the CH32 RTC / store the floor), then show it.
             om::time_source::service();

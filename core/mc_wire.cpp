@@ -61,6 +61,18 @@ size_t boundedStrLen(const char* s, size_t max) {
 
 }  // namespace
 
+size_t sealPayload(const uint8_t secret[kSecretBytes], uint8_t* dest, size_t dest_size, const uint8_t* src,
+                   size_t src_len) {
+    if (secret == nullptr || dest == nullptr || src == nullptr) return 0;
+    return encryptThenMac(secret, dest, dest_size, src, src_len);
+}
+
+size_t openPayload(const uint8_t secret[kSecretBytes], uint8_t* dest, size_t dest_size, const uint8_t* src,
+                   size_t src_len) {
+    if (secret == nullptr || dest == nullptr || src == nullptr) return 0;
+    return macThenDecrypt(secret, dest, dest_size, src, src_len);
+}
+
 bool channelSetKey(Channel& ch, const uint8_t key[kKeyBytes], const char* name) {
     if (key == nullptr) return false;
     memset(ch.secret, 0, sizeof(ch.secret));      // MeshCore's 128-bit rule (BaseChatMesh.cpp:938)

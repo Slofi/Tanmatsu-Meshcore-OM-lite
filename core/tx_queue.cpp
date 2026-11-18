@@ -43,6 +43,19 @@ bool TxQueue::pushAdvert(const char* sender) {
     return true;
 }
 
+bool TxQueue::pushFrame(TxKind kind, const uint8_t* frame, size_t len) {
+    if (kind != TxKind::Frame) return false;   // this entry point is only for built frames
+    if (frame == nullptr || len == 0 || len > kTxFrameBytes) return false;
+    if (full()) return false;                  // the caller keeps the reply and logs the refusal
+    TxRequest& r = q_[(head_ + len_) % kTxQueueSlots];
+    r            = TxRequest{};                // no stale frame bytes survive in the slot
+    r.kind       = TxKind::Frame;
+    memcpy(r.frame, frame, len);
+    r.frame_len  = len;
+    ++len_;
+    return true;
+}
+
 bool TxQueue::pop(TxRequest* out) {
     if (len_ == 0 || out == nullptr) return false;
     *out = q_[head_];   // copied out by value: the slot is free for the next push

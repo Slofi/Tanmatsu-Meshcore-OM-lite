@@ -138,6 +138,28 @@ void edges() {
     CHECK(strlen(r.sender) <= om::mc::kTxSenderBytes - 1);
 }
 
+// 6. S513/EST-434: a built frame (a DM ACK / path return) is queued whole and by value, and only Frame kind.
+void frameIsCopiedWhole() {
+    om::mc::TxQueue q;
+    uint8_t frame[8] = {0x0d, 0x40, 1, 2, 3, 4, 5, 6};
+    CHECK(q.pushFrame(om::mc::TxKind::Frame, frame, sizeof(frame)));
+    frame[2] = 0xEE;   // the caller may reuse its buffer at once
+    om::mc::TxRequest r;
+    CHECK(q.pop(&r));
+    CHECK_EQ((int)r.kind, (int)om::mc::TxKind::Frame);
+    CHECK_EQ(r.frame_len, sizeof(frame));
+    CHECK_EQ(r.frame[0], 0x0d);
+    CHECK_EQ(r.frame[2], 1);
+    CHECK_EQ(r.frame[7], 6);
+
+    // Not this entry point: a text or advert kind, an empty frame, or one too big for the slot.
+    CHECK(!q.pushFrame(om::mc::TxKind::Text, frame, 2));
+    CHECK(!q.pushFrame(om::mc::TxKind::Frame, frame, 0));
+    uint8_t big[om::mc::kTxFrameBytes + 1] = {0};
+    CHECK(!q.pushFrame(om::mc::TxKind::Frame, big, sizeof(big)));
+    CHECK(q.empty());
+}
+
 }  // namespace
 
 int main() {
@@ -146,6 +168,7 @@ int main() {
     requestIsACopy();
     advertDoesNotReplaceText();
     edges();
+    frameIsCopiedWhole();
     if (g_failures == 0) {
         printf("test_txqueue: %d checks, 0 failures\n", g_checks);
         return 0;

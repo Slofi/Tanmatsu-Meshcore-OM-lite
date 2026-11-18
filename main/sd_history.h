@@ -39,5 +39,21 @@ bool appendSeen(uint8_t channel, uint8_t hash, const char* name, uint32_t seen_l
 // The seen point stored in a channel's log. `found` is false when the log has no Meta record (an older log).
 mc::SeenPoint loadSeen(uint8_t channel, uint8_t hash, const char* name);
 
+// ---------------------------------------------------------------- direct-message logs (S513/EST-434, item 4)
+// One file per contact, named in the L2's shape: dm-<pubkey[0..3] 8 hex>.log. The file name is the thread's id;
+// a record does not carry the peer's key (the L2 works the same way), so the 32-byte key is supplied by the caller
+// and the first four bytes of it are what names the file.
+bool appendDm(const uint8_t pub[32], const mc::DmMessage& m, uint32_t log_id);
+size_t loadDm(const uint8_t pub[32], const char* peer_name, mc::DmMessage* out, size_t max_out,
+              uint32_t* out_max_log_id = nullptr);
+bool appendDmSeen(const uint8_t pub[32], uint32_t seen_log_id, uint16_t unread);
+mc::SeenPoint loadDmSeen(const uint8_t pub[32]);
+
+// Scan the history directory at boot and restore every dm-*.log into `ring`/`contacts`. A restored thread's contact
+// row has only the first four bytes of the key (that is all the file name holds) with the rest zero; when a real
+// advert for that contact arrives, main/mc_link.cpp rebinds the row and its messages to the full key. Returns how
+// many threads were restored.
+size_t restoreDmThreads(mc::DmRing& ring, mc::ContactStore& contacts);
+
 }  // namespace sdhistory
 }  // namespace om

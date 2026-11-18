@@ -63,6 +63,16 @@ const char* statusText();
 ContactStore& contacts();
 MessageRing&  messages();
 ReadState&    readState();
+DmRing&       dmThreads();   // S513/EST-434: the RAM DM threads, one view per contact (item 3)
+
+// Item 4: restore every dm-*.log from the card into the RAM threads and the contact table. Called once, after the
+// card is mounted and BEFORE the radio task starts, so nothing races the restore. Occupies the radio's own DM path:
+// the caller must not have started it yet.
+size_t restoreDmHistory();
+
+// "The user has now seen this DM thread": marks it read and moves the seen point in the contact's log (the format's
+// Meta record), so unread survives a restart. Takes the store lock itself.
+void noteDmRead(const uint8_t pub[32]);
 
 // "The user has now seen this channel": marks it read in the store AND moves the seen point on the card (the
 // format's Meta record), so unread survives a restart. One call for the three places that mean it — opening a

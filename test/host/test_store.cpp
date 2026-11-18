@@ -237,6 +237,71 @@ void test_ages() {
     CHECK_EQ(strlen(out) < 4, true);
 }
 
+// S513/EST-434: per-contact DM threads. The ring is shared, the threads are views, and unread is counted from
+// each contact's own seen point — marking one thread read must not clear another.
+void test_dm_threads_and_unread() {
+    om::mc::ContactStore s;
+    uint8_t             a[32], b[32];
+    pubOf(a, 0x21);
+    pubOf(b, 0x42);
+    CHECK(om::mc::contactsUpsert(s, a, "Alpha", 1, 0, 0, 100, -70, 30) == 0);
+    CHECK(om::mc::contactsUpsert(s, b, "Beta", 1, 0, 0, 90, -80, 10) == 1);
+
+    om::mc::DmRing r;
+    auto push = [&](const uint8_t* pub, const char* text, uint32_t local_ts, uint32_t log_id) {
+        om::mc::DmMessage m;
+        memcpy(m.peer_pub, pub, 32);
+        snprintf(m.peer_name, sizeof(m.peer_name), "%s", pub == a ? "Alpha" : "Beta");
+        snprintf(m.text, sizeof(m.text), "%s", text);
+        m.local_ts = local_ts;
+        m.log_id   = log_id;
+        return om::mc::dmPush(r, m);
+    };
+    CHECK_EQ(push(a, "one", 10, 1), 1);
+    CHECK_EQ(push(a, "two", 20, 2), 2);
+    CHECK_EQ(push(b, "hello", 15, 1), 3);
+
+    int idx[8];
+    CHECK_EQ(om::mc::dmForPeer(r, a, idx, 8), 2);
+    CHECK_EQ(idx[0], 0);
+    CHECK_EQ(idx[1], 1);
+
+    // A peer NOT in the contact table has no seen point yet: answer 0 rather than invent one.
+    uint8_t stranger[32];
+    pubOf(stranger, 0x77);
+    CHECK_EQ(om::mc::dmUnreadForPeer(r, s, stranger), 0);
+    CHECK_EQ(om::mc::dmUnreadForPeer(r, s, a), 2);
+    CHECK_EQ(om::mc::dmUnreadForPeer(r, s, b), 1);
+
+    // Seen points are per contact: reading Alpha leaves Beta untouched, and a later message is unread again.
+    om::mc::dmMarkPeerRead(r, s, a);
+    CHECK_EQ(om::mc::dmUnreadForPeer(r, s, a), 0);
+    CHECK_EQ(om::mc::dmUnreadForPeer(r, s, b), 1);
+    CHECK_EQ(push(a, "three", 30, 3), 4);
+    CHECK_EQ(om::mc::dmUnreadForPeer(r, s, a), 1);
+
+    // The DM column: newest thread first, with its name, preview and unread count.
+    om::mc::DmSummary sums[4];
+    CHECK_EQ(om::mc::dmThreadSummaries(r, s, sums, 4), 2);
+    CHECK_STR(sums[0].name, "Alpha");
+    CHECK_STR(sums[0].text, "three");
+    CHECK_EQ(sums[0].unread, 1);
+    CHECK_STR(sums[1].name, "Beta");
+    CHECK_STR(sums[1].text, "hello");
+    CHECK_EQ(sums[1].unread, 1);
+
+    CHECK_EQ(om::mc::dmNewestLogId(r, a), 3);
+    CHECK_EQ(om::mc::dmNewestLogId(r, b), 1);
+
+    // Full ring: the oldest message of the whole set goes, and an evicted message cannot keep an unread alive.
+    for (size_t i = 0; i < om::mc::kMaxDms; i++) push(b, "filler", 100 + (uint32_t)i, 100 + (uint32_t)i);
+    CHECK_EQ(r.count, om::mc::kMaxDms);
+    // The four messages before the fillers are exactly the ones evicted: the oldest retained is filler #0.
+    CHECK_EQ(om::mc::dmAt(r, 0)->text[0], 'f');
+    CHECK_EQ(om::mc::dmAt(r, 0)->local_ts, 100);
+    CHECK_EQ(om::mc::dmAt(r, r.count - 1)->local_ts, 100 + (uint32_t)om::mc::kMaxDms - 1);
+}
+
 }  // namespace
 
 int main() {
@@ -245,6 +310,7 @@ int main() {
     test_contact_order_and_counts();
     test_message_ring_drops_the_oldest();
     test_per_channel_and_unread();
+    test_dm_threads_and_unread();
     test_ages();
 
     printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);

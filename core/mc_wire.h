@@ -85,6 +85,14 @@ size_t buildGroupText(const Channel& ch, uint32_t timestamp, const char* sender,
 bool openGroupText(const Channel& ch, const View& pkt, char* sender, size_t sender_size, char* text,
                    size_t text_size, uint32_t* timestamp);
 
+// MeshCore's Utils::encryptThenMAC / MACThenDecrypt, exposed so the direct-message codec (mc_dm) uses the SAME
+// implementation instead of keeping a second copy of the crypto. `sealPayload` returns MAC+ciphertext length;
+// `openPayload` returns the decrypted (block-padded) length, or 0 when the MAC does not match.
+size_t sealPayload(const uint8_t secret[kSecretBytes], uint8_t* dest, size_t dest_size, const uint8_t* src,
+                   size_t src_len);
+size_t openPayload(const uint8_t secret[kSecretBytes], uint8_t* dest, size_t dest_size, const uint8_t* src,
+                   size_t src_len);
+
 // Exposed for the tests: the exact payload MeshCore puts inside a group-text packet.
 size_t buildPlain(uint8_t* out, size_t out_size, uint32_t timestamp, const char* sender,
                   const char* text);

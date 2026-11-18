@@ -733,6 +733,49 @@ def chat_cards():
     return save(img, '2026-11-18-chat-two-columns.png')
 
 
+DM_CARDS = [
+    # name, the newest message, its local HH:MM, unread
+    ('Alpha', 'see you at the repeater at six', '09:48', 3),
+    ('Mira', 'got the map pack, thanks', '09:31', 0),
+    ('dm-3f7a01c2', 'hello from an old log', '08:55', 1),
+    ('Tomaž', 'the path came back, 2 hops', '08:12', 0),
+]
+
+
+def chat_dm_column():
+    """OM Lite > Chat, LIST state with the DM column populated (S513/EST-434, items 5 and 6).
+
+    Same two-column grid as 2026-11-18-chat-two-columns.png, but the right column now carries the threads the RAM
+    store holds: newest first, the contact's name (or the 8-hex prefix of a restored thread), the unread badge,
+    the newest text and its LOCAL HH:MM. Focus is on the second DM card, ringed in gold.
+    """
+    img, d = new_screen()
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    status_bar(d)
+
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Chat', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    text(d, (W - pad, y + TM['head_h'] // 2), '3 channels · 2 unread · 4 DM threads',
+         font(FONT_MONO, TM['f_meta']), P['Dimmer'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+
+    g = card_grid((pad, y + TM['head_h'], W - pad, H - TM['hint_h']),
+                  TM['card_gutter'], TM['card_header_h'], TM['card_h'], TM['card_gap'])
+
+    fh = font(FONT_SANS, TM['f_meta'])
+    text(d, (g['col_x'][0], g['y0'] + 7), 'Channels', fh, P['Dimmer'])
+    text(d, (g['col_x'][1], g['y0'] + 7), 'Direct messages', fh, P['Dimmer'])
+
+    for i, (name, preview, stamp, unread) in enumerate(CHANNEL_CARDS):
+        draw_channel_card(d, g, 0, i, 0, name, preview, stamp, unread, focused=False)
+
+    for i, (name, preview, stamp, unread) in enumerate(DM_CARDS):
+        draw_channel_card(d, g, 1, i, 0, name, preview, stamp, unread, focused=(i == 1))
+
+    hint_bar(d, 'chat', [('↑↓', 'move'), ('←→', 'column'), ('↵', 'open'), ('esc', 'back')])
+    return save(img, '2026-11-18-chat-dm-column.png')
+
+
 # ---------------------------------------------------------------------------------------------- map
 # Rule 9: this map is an INVENTED TEST GRID. No real geography, no coordinates, no place names — the
 # labels are the same fake node names the other previews use, and the grid is drawn from scratch.
@@ -1177,8 +1220,8 @@ def menu():
     return save(img, '2026-11-18-menu-cards.png')
 
 
-RENDERERS = dict(launcher=launcher, menu=menu, nodes=nodes, chat=chat, chat2=chat_cards, map=map_page,
-                 rptr=rptr, settings=settings)
+RENDERERS = dict(launcher=launcher, menu=menu, nodes=nodes, chat=chat, chat2=chat_cards,
+                 chat_dm=chat_dm_column, map=map_page, rptr=rptr, settings=settings)
 
 
 def main(argv):

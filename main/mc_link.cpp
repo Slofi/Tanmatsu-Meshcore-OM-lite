@@ -18,6 +18,7 @@
 #include "mc_identity.h"
 #include "mc_crypto.h"
 #include "mc_wire.h"
+#include "mc_dm.h"      // S513/EST-433/434: TXT_MSG open + the two reply frames
 #include "radio_link.h"
 #include "sd_history.h"   // step 5: the chat history on the card
 #include "chat_layout.h"  // step 5 / S503: historyReadCount, the read-prefix rule for the seen point
@@ -68,6 +69,7 @@ bool                 g_loaded = false;
 ContactStore    g_contacts;
 MessageRing     g_messages;
 ReadState       g_read;
+DmRing          g_dms;   // S513/EST-434: direct-message threads (RAM, item 3); SD history is item 4
 SemaphoreHandle_t g_store_mutex = nullptr;
 
 // Step 5 / S503 — the id each channel's LOG FILE has reached, and the last seen point we appended. Both are per
@@ -94,6 +96,18 @@ char               g_pub_hex[17] = {0};   // first 8 bytes of the public key, fo
 // device runs; the copy-by-value and "refuse when full" semantics are the FreeRTOS queue's.
 TxQueue            g_txq;
 SemaphoreHandle_t  g_tx_lock = nullptr;   // created once in begin()
+
+// A reply that was BUILT on the radio task (a DM ACK / path return) still leaves through the queue: the receive
+// path must not transmit, because a send inside receive handling is how the S501 two-writers race started.
+bool queueFrame(const uint8_t* frame, size_t len) {
+    if (g_tx_lock == nullptr || frame == nullptr || len == 0) return false;
+    xSemaphoreTake(g_tx_lock, portMAX_DELAY);
+    const bool   ok    = g_txq.pushFrame(TxKind::Frame, frame, len);
+    const size_t depth = g_txq.size();
+    xSemaphoreGive(g_tx_lock);
+    if (!ok) ESP_LOGW(TAG, "tx: queue full (%d waiting); a DM reply was NOT queued", (int)depth);
+    return ok;
+}
 
 // Duplicate suppression: a flood can arrive over two paths, and MeshCore itself keeps a seen-table for the
 // same reason. Eight 4-byte fingerprints is plenty for one leaf node and costs 32 bytes.
@@ -263,12 +277,149 @@ static uint32_t pushAndLog(size_t idx, Message& m) {
     return messagesPush(g_messages, m);
 }
 
+// Item 4: a thread restored from the card knows only the first four bytes of its contact's key (the file name).
+// The first real advert for that contact fills in the rest, in the contact row AND in the thread's messages, so the
+// crypto (which needs all 32 bytes) can match the peer again. Called under the store lock, before contactsUpsert.
+bool prefixOnlyKey(const uint8_t* pub) {
+    for (size_t i = 4; i < 32; i++) {
+        if (pub[i] != 0) return false;
+    }
+    return true;
+}
+
+void rebindRestoredDmPeer(const uint8_t pub[32], const char* name) {
+    if (pub == nullptr || contactsFind(g_contacts, pub) >= 0) return;   // already the full key: nothing to do
+    for (size_t i = 0; i < g_contacts.count; i++) {
+        Contact& c = g_contacts.c[i];
+        if (!prefixOnlyKey(c.pub) || memcmp(c.pub, pub, 4) != 0) continue;
+        memcpy(c.pub, pub, sizeof(c.pub));
+        if (name != nullptr && name[0] != '\0') snprintf(c.name, sizeof(c.name), "%s", name);
+        for (size_t j = 0; j < g_dms.count; j++) {
+            DmMessage* m = &g_dms.m[(g_dms.head + j) % kMaxDms];
+            if (!prefixOnlyKey(m->peer_pub) || memcmp(m->peer_pub, pub, 4) != 0) continue;
+            memcpy(m->peer_pub, pub, sizeof(m->peer_pub));
+            if (name != nullptr && name[0] != '\0') snprintf(m->peer_name, sizeof(m->peer_name), "%s", name);
+        }
+        return;
+    }
+}
+
 void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
     meshcore::View v;
     if (!meshcore::decode(buf, len, &v)) {
         ESP_LOGW(TAG, "rx %u B: not a MeshCore frame", (unsigned)len);
         return;
     }
+    // ------------------------------------------------------------------- direct messages (S513/EST-434, item 2)
+    // A TXT_MSG is not channel-scoped either: it is addressed to OUR pub_key[0] and sealed with the shared secret
+    // of one contact. It is handled here, on the radio task, and the reply is only QUEUED — the receive path never
+    // transmits. The DM's timestamp is NOT a clock source (unlike an advert): anyone holding a contact's key can
+    // write any ts, so it is recorded and noteText()/noteAdvert() are deliberately not called.
+    if (v.type() == meshcore::kTypeTxtMsg) {
+        if (!g_has_id) {
+            ESP_LOGW(TAG, "rx %u B TXT_MSG but this node has no identity yet, dropped", (unsigned)len);
+            return;
+        }
+        // A snapshot of the contact table, because dmOpen walks it and two contacts may share pub_key[0]. The
+        // arrays are static: the radio task is the only caller, and 32 contacts must not land on its stack.
+        static uint8_t peer_pubs[kMaxContacts * meshcore::kPubKeyBytes];
+        static char    peer_names[kMaxContacts][kNameBytes];
+        size_t         peer_count = 0;
+        {
+            StoreLock l;
+            peer_count = g_contacts.count;
+            for (size_t i = 0; i < peer_count; i++) {
+                memcpy(&peer_pubs[i * meshcore::kPubKeyBytes], g_contacts.c[i].pub, meshcore::kPubKeyBytes);
+                snprintf(peer_names[i], sizeof(peer_names[i]), "%s", g_contacts.c[i].name);
+            }
+        }
+        if (peer_count == 0) {
+            ESP_LOGI(TAG, "rx %u B TXT_MSG but no contacts are known yet, dropped", (unsigned)len);
+            return;
+        }
+
+        meshcore::DmMessage dm;
+        if (!meshcore::dmOpen(g_id, v, peer_pubs, peer_count, (uint8_t)esp_random(), &dm)) {
+            ESP_LOGI(TAG, "rx %u B TXT_MSG, no contact of ours opens it (src 0x%02X, %d dBm)",
+                     (unsigned)len, v.payload_len > 1 ? v.payload[1] : 0, rssi_dbm);
+            return;
+        }
+        if (seenBefore(payloadFingerprint(v))) {
+            ESP_LOGI(TAG, "rx %u B TXT_MSG: duplicate, already shown", (unsigned)len);
+            return;
+        }
+
+        const uint8_t* peer_pub = &peer_pubs[(size_t)dm.peer * meshcore::kPubKeyBytes];
+        char           peer_name[kNameBytes];
+        snprintf(peer_name, sizeof(peer_name), "%s", peer_names[dm.peer]);
+        if (peer_name[0] == '\0') {
+            // A contact row with no name yet: the 8-hex prefix of its public key is a stable, honest label.
+            snprintf(peer_name, sizeof(peer_name), "%02x%02x%02x%02x", peer_pub[0], peer_pub[1], peer_pub[2],
+                     peer_pub[3]);
+        }
+        ESP_LOGI(TAG, "DM from \"%s\": %s  (ts %u, %d dBm, snr %d dB, %u B, %s)", peer_name, dm.text,
+                 (unsigned)dm.timestamp, rssi_dbm, snr_db, (unsigned)len,
+                 v.path_bytes == 0 ? "direct" : "flood");
+
+        {
+            StoreLock l;
+            DmMessage m;
+            memcpy(m.peer_pub, peer_pub, sizeof(m.peer_pub));
+            snprintf(m.peer_name, sizeof(m.peer_name), "%s", peer_name);
+            m.outgoing = false;
+            m.ts       = dm.timestamp;
+            m.local_ts = (uint32_t)time(nullptr);   // OUR clock, for ordering and the list's HH:MM
+            m.snr_x10  = (int16_t)(snr_db * 10);
+            m.direct   = (v.path_bytes == 0);
+            snprintf(m.text, sizeof(m.text), "%.*s", (int)(sizeof(m.text) - 1), dm.text);
+            // Item 4: the thread's log is dm-<pubkey[0..3] 8 hex>. Its id is per file, kept on the contact row so
+            // evicting the ring cannot reset the numbering; a message that could not be written keeps log_id 0
+            // and can never be what the seen point names (the same rule as channels, S503).
+            const int      ci   = contactsFind(g_contacts, peer_pub);
+            uint32_t       next = (ci >= 0) ? g_contacts.c[ci].dm_log_next
+                                            : dmNewestLogId(g_dms, peer_pub) + 1;
+            if (next == 0) next = 1;
+            if (sdhistory::appendDm(peer_pub, m, next)) {
+                m.log_id = next;
+                if (ci >= 0) g_contacts.c[ci].dm_log_next = next + 1;
+            }
+            (void)dmPush(g_dms, m);
+        }
+
+        if (!dm.ack_valid) {
+            // CLI_DATA / CLI_COMMAND are shown but never acknowledged (BaseChatMesh.cpp:244): there is no ACK
+            // hash for a type MeshCore does not acknowledge.
+            ESP_LOGI(TAG, "DM: txt_type %u is not acknowledged", (unsigned)dm.txt_type);
+            return;
+        }
+
+        uint8_t      frame[256];
+        size_t       n = 0;
+        if (v.route() == meshcore::kRouteFlood) {
+            // A flood arrival gets a PATH packet carrying the route back plus the ACK (createPathReturn).
+            uint8_t secret[meshcore::kSecretBytes];
+            if (meshcore::identitySharedSecret(g_id, peer_pub, secret)) {
+                n = meshcore::dmBuildPathReturn(v, peer_pub[0], g_id.pub, secret, dm.ack, frame, sizeof(frame));
+            }
+        } else {
+            // A direct arrival, and we do not store out_path yet: sendAckTo's OUT_PATH_UNKNOWN branch is a
+            // FLOODED createAck() (BaseChatMesh.cpp:43-58). A later PATH slice passes the stored route in here.
+            n = meshcore::dmBuildAck(nullptr, 0, dm.ack, frame, sizeof(frame));
+        }
+        if (n == 0) {
+            ESP_LOGW(TAG, "DM: could not build the %s reply", v.route() == meshcore::kRouteFlood ? "path return"
+                                                                                              : "ACK");
+            return;
+        }
+        if (!queueFrame(frame, n)) {
+            ESP_LOGW(TAG, "DM: the reply (%u B) could not be queued", (unsigned)n);
+        } else {
+            ESP_LOGI(TAG, "DM: queued a %s (%u B)", v.route() == meshcore::kRouteFlood ? "path return" : "flood ACK",
+                     (unsigned)n);
+        }
+        return;
+    }
+
     // An advert is not channel-scoped (it is a signed node announcement flooded across the mesh), so it is
     // handled BEFORE the channel table is consulted — and it is the only AUTHENTICATED time this device ever
     // hears on its own (Ed25519 signature over pub||ts||app_data). S501 dropped adverts here when no channel
@@ -298,6 +449,7 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
         om::time_source::noteAdvert(ts, pub, sizeof(pub));
         {
             StoreLock l;
+            rebindRestoredDmPeer(pub, name);
             contactsUpsert(g_contacts, pub, name, type, v.path_bytes, ts, (uint32_t)time(nullptr), rssi_dbm,
                            snr_db * 10);
         }
@@ -461,8 +613,12 @@ void serviceRequests() {
 
     if (req.kind == TxKind::Text) {
         doText((size_t)req.channel, req.sender, req.text);   // a COPY of what the main task queued
-    } else {
+    } else if (req.kind == TxKind::Advert) {
         doAdvert(req.sender);
+    } else {
+        // A reply built on the radio task (DM ACK / path return): this is the only place it is transmitted.
+        const int sent = om::radio::send(req.frame, req.frame_len);
+        ESP_LOGI(TAG, "TX reply %u B -> %s", (unsigned)req.frame_len, sent > 0 ? "ok" : "FAILED");
     }
     // Evidence, not a guess: how much stack this task really needed for the work it just did.
     ESP_LOGI(TAG, "radio task stack: %u B free at the low-water mark",
@@ -476,6 +632,7 @@ const char* nodeName() { return kNodeName; }
 ContactStore& contacts() { return g_contacts; }
 MessageRing&  messages() { return g_messages; }
 ReadState&    readState() { return g_read; }
+DmRing&       dmThreads() { return g_dms; }
 
 StoreLock::StoreLock() {
     if (g_store_mutex != nullptr) xSemaphoreTakeRecursive(g_store_mutex, portMAX_DELAY);
@@ -511,6 +668,31 @@ void noteChannelRead(uint8_t ch) {
     if (sdhistory::appendSeen(ch, g_set.ch[ch].hash, g_set.ch[ch].name, newest, 0)) {
         g_seen_written[ch] = newest;
         ESP_LOGI(TAG, "ch%u: seen point -> log id %u", (unsigned)ch, (unsigned)newest);
+    }
+}
+
+// Item 4: restore the DM logs from the card. Runs on the main task after sdhistory::begin() and before the radio
+// task exists, so no lock is needed for the store itself; StoreLock is still used because the pages may read.
+size_t restoreDmHistory() {
+    StoreLock l;
+    const size_t n = sdhistory::restoreDmThreads(g_dms, g_contacts);
+    if (n > 0) ESP_LOGI(TAG, "DM history: %u thread(s) restored from the card", (unsigned)n);
+    return n;
+}
+
+// "The user has now seen this DM thread": mark it read and move the seen point in that contact's log (the format's
+// Meta record). Like a channel, the record is appended only when the point MOVED.
+void noteDmRead(const uint8_t pub[32]) {
+    if (pub == nullptr) return;
+    StoreLock l;
+    const int idx = contactsFind(g_contacts, pub);
+    if (idx < 0) return;
+    dmMarkPeerRead(g_dms, g_contacts, pub);
+    const uint32_t newest = dmNewestLogId(g_dms, pub);
+    if (newest == 0 || newest == g_contacts.c[idx].dm_seen_log) return;
+    if (sdhistory::appendDmSeen(pub, newest, 0)) {
+        g_contacts.c[idx].dm_seen_log = newest;
+        ESP_LOGI(TAG, "DM: seen point -> log id %u", (unsigned)newest);
     }
 }
 

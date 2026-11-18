@@ -35,6 +35,11 @@ struct Contact {
     int16_t  rssi = 0;
     int16_t  snr_x10 = 0;       // dB x 10: the UI prints "3.2 dB"
     bool     favourite = false;
+    // S513/EST-434: the highest DM sequence the user has seen in THIS contact's thread. Unread is counted from
+    // it, exactly like a channel's ReadState — a restored seen point (SD, item 4) will seed it too.
+    uint32_t dm_seen = 0;
+    uint32_t dm_seen_log = 0;   // the log id the on-card Meta record already names (0 = none written this boot)
+    uint32_t dm_log_next = 1;   // the next id in this contact's dm-<8 hex>.log (1 = a fresh file)
 };
 
 struct ContactStore {
@@ -81,6 +86,64 @@ struct MessageRing {
 
 uint32_t       messagesPush(MessageRing& r, const Message& msg);   // returns the id the message got
 const Message* messagesAt(const MessageRing& r, size_t i);   // 0 = oldest retained
+
+// --------------------------------------------------------------------------------- direct-message threads (S513/EST-434)
+// A DM is not a channel message with a different label: it belongs to ONE contact, it is acknowledged on the air,
+// and it is stored in that contact's own log (item 4). The RAM shape matches: one ring of messages, each tagged
+// with the peer's full public key, so a thread is a filtered view and no per-thread ring has to be allocated.
+constexpr size_t kMaxDms = 64;   // all threads together; the oldest goes when it is full (the channel rule)
+
+struct DmMessage {
+    uint32_t seq = 0;           // assigned by dmPush: monotonic, the thing unread is counted against
+    uint8_t  peer_pub[32] = {0};
+    char     peer_name[kNameBytes] = {0};   // the name as it was when the message arrived
+    bool     outgoing = false;
+    char     text[kTextBytes] = {0};
+    uint32_t ts = 0;            // the MeshCore timestamp in the frame (NOT a clock source)
+    uint32_t local_ts = 0;      // our clock when it arrived (ordering and local HH:MM)
+    int16_t  snr_x10 = 0;
+    bool     direct = false;    // path_len 0 in the received frame
+    uint32_t log_id = 0;        // id in that contact's log file (item 4), 0 = not written
+};
+
+struct DmRing {
+    DmMessage m[kMaxDms];
+    size_t    head = 0;
+    size_t    count = 0;
+    uint32_t  next_seq = 0;
+};
+
+uint32_t        dmPush(DmRing& r, const DmMessage& msg);
+const DmMessage* dmAt(const DmRing& r, size_t i);
+
+// Indices of one peer's messages, oldest first. Returns how many were written.
+size_t dmForPeer(const DmRing& r, const uint8_t pub[32], int* out, size_t max_out);
+
+// A peer's messages newer than its contact row's `dm_seen`. The contact row is the seen point (item 3); a peer
+// that is not in the table cannot have a thread yet, so the answer is 0 rather than a guess.
+uint32_t dmUnreadForPeer(const DmRing& r, const ContactStore& s, const uint8_t pub[32]);
+void     dmMarkPeerRead(const DmRing& r, ContactStore& s, const uint8_t pub[32]);
+
+// The newest log id in a peer's thread (0 when it has none): the value the SD seen point moves to.
+uint32_t dmNewestLogId(const DmRing& r, const uint8_t pub[32]);
+
+// One line for the DM column: the newest message and how much of the thread is unread. `contact` is the row in
+// the ContactStore, or -1 when the peer left the table (the preview is still real).
+struct DmSummary {
+    bool        has = false;
+    int         contact = -1;
+    uint8_t     pub[32] = {0};   // the thread's key (prefix-only for a restored thread not yet rebound)
+    const char* name = "";
+    const char* text = "";
+    uint32_t    ts = 0;
+    uint32_t    unread = 0;
+};
+DmSummary dmSummaryForPeer(const DmRing& r, const ContactStore& s, const uint8_t pub[32]);
+
+// The DM column's order: threads that have messages, newest first. Writes one summary per thread (up to
+// `max_out`) and returns how many; a thread with no contact row still appears, named by its 8-hex prefix later.
+size_t dmThreadSummaries(const DmRing& r, const ContactStore& s, DmSummary* out, size_t max_out);
+
 
 // Indices of one channel's messages, oldest first. Returns how many were written (may be fewer than the total).
 size_t messagesForChannel(const MessageRing& r, uint8_t ch, int* out, size_t max_out);

@@ -37,6 +37,77 @@ int historyEncode(const Message& m, uint32_t log_id, uint8_t* out, int cap) {
     return total > 0 ? total : 0;
 }
 
+// S513/EST-434: a DM record. Same header and payload as a channel message; `dm` is the format's own flag and the
+// name field carries the PEER, so the L2's reader shows the thread correctly.
+int historyEncodeDm(const DmMessage& m, uint32_t log_id, uint8_t* out, int cap) {
+    if (out == nullptr || cap <= 0) return 0;
+    om::history::Msg h;
+    h.logId  = log_id != 0 ? log_id : m.seq;
+    h.seq    = m.seq;
+    h.uptime = 0;
+    h.wall   = m.ts ? m.ts : m.local_ts;
+    h.setWallReal(h.wall != 0);
+    h.setMine(m.outgoing);
+    h.setDm(true);
+    h.hops    = (int8_t)(m.direct ? 0 : 1);
+    h.snr4    = (int8_t)(m.snr_x10 / 25);
+    h.repeats = 0;
+    h.pathHashSize = 1;
+    h.pathCount    = 0;
+    h.pathLen      = 0;
+    om::history::msgSetText(h, m.peer_name, m.text);
+
+    uint8_t payload[om::history::kMaxPayload];
+    const int plen = om::history::encodeMsgPayload(h, payload, (int)sizeof(payload));
+    if (plen <= 0) return 0;
+    const int total = om::history::encodeRecord(om::history::Type::Msg, payload, plen, out, cap);
+    return total > 0 ? total : 0;
+}
+
+size_t historyLoadDm(const uint8_t* data, size_t len, const uint8_t peer_pub[32], const char* peer_name,
+                     DmMessage* out, size_t max_out, uint32_t* out_max_log_id) {
+    if (out == nullptr || max_out == 0 || peer_pub == nullptr) return 0;
+    if (out_max_log_id != nullptr) *out_max_log_id = 0;
+    if (data == nullptr) return 0;
+    size_t   kept       = 0;
+    size_t   pos        = 0;
+    uint32_t max_log_id = 0;
+    while (pos + (size_t)om::history::kHeaderBytes <= len) {
+        om::history::RecordRef ref;
+        const int r = om::history::decodeRecordAt(data + pos, (int)(len - pos), (uint32_t)pos, &ref);
+        if (r < 0) break;   // the torn-tail rule, the same one the channel log uses
+        pos += (size_t)r;
+        if (ref.type != om::history::Type::Msg) continue;
+
+        om::history::Msg h;
+        if (!om::history::decodeMsgPayload(ref.payload, (int)ref.len - om::history::kHeaderBytes, &h)) continue;
+        if (h.logId > max_log_id) max_log_id = h.logId;
+
+        DmMessage m;
+        m.seq = (uint32_t)(h.seq ? h.seq : h.logId);
+        m.log_id = h.logId;
+        memcpy(m.peer_pub, peer_pub, sizeof(m.peer_pub));
+        // Incoming records carry the PEER's name; an outgoing record carries ours, so the caller's name wins.
+        const char* name = (!h.mine() && h.name[0] != '\0') ? h.name : (peer_name != nullptr ? peer_name : "");
+        snprintf(m.peer_name, sizeof(m.peer_name), "%.*s", (int)(sizeof(m.peer_name) - 1), name);
+        m.outgoing = h.mine();
+        m.ts       = h.wall;
+        m.local_ts = h.wall;
+        m.snr_x10  = (int16_t)((int)h.snr4 * 25);
+        m.direct   = h.hops <= 0;
+        snprintf(m.text, sizeof(m.text), "%.*s", (int)(sizeof(m.text) - 1), h.text);
+
+        if (kept < max_out) {
+            out[kept++] = m;
+        } else {
+            memmove(&out[0], &out[1], sizeof(DmMessage) * (max_out - 1));
+            out[max_out - 1] = m;
+        }
+    }
+    if (out_max_log_id != nullptr) *out_max_log_id = max_log_id;
+    return kept;
+}
+
 size_t historyLoad(const uint8_t* data, size_t len, uint8_t channel, Message* out, size_t max_out,
                    uint32_t* out_max_log_id) {
     if (out == nullptr || max_out == 0) return 0;

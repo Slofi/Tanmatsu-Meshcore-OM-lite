@@ -154,6 +154,14 @@ int poll(uint8_t* buf, size_t cap, int* rssi_dbm, int* snr_db, uint32_t wait_ms)
     // Per the component's header: rssi_dbm = -raw/2, snr_db = raw/4 (signed, 1/4 dB).
     s_last_rssi = -(int)s_pkt.stats.rssi_pkt_raw / 2;
     s_last_snr  = (int)s_pkt.stats.snr_pkt_raw / 4;
+    // S513/EST-434: print the THREE raw bytes next to the converted values. The vendor's C6-side lora.c:442
+    // writes rssi as rssi_dbm*4 into a uint8 (a negative float into an unsigned byte is 0 on RISC-V) and snr as
+    // -snr*2, which contradicts its own header; these raw bytes are what decides which side is right. The
+    // conversions above are deliberately unchanged until that is settled.
+    ESP_LOGI(TAG, "rx %u B raw rssi %u snr %d signal %u -> rssi %d dBm, snr %d dB, signal %d dBm",
+             (unsigned)n, (unsigned)s_pkt.stats.rssi_pkt_raw, (int)s_pkt.stats.snr_pkt_raw,
+             (unsigned)s_pkt.stats.signal_rssi_pkt_raw, s_last_rssi, s_last_snr,
+             -(int)s_pkt.stats.signal_rssi_pkt_raw / 2);
     if (rssi_dbm != nullptr) *rssi_dbm = s_last_rssi;
     if (snr_db != nullptr) *snr_db = s_last_snr;
     s_rx++;

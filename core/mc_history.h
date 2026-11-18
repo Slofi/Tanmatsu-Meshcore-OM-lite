@@ -26,6 +26,16 @@ namespace mc {
 // falls back to the ring's seq, so an older caller still writes a usable record.
 int historyEncode(const Message& m, uint32_t log_id, uint8_t* out, int cap);
 
+// S513/EST-434: one DM record, in the SAME L2 format. A DM differs only in the format's `dm` flag and in the
+// name (the peer's), so this is the channel encoder with the flag set, not a second layout.
+int historyEncodeDm(const DmMessage& m, uint32_t log_id, uint8_t* out, int cap);
+
+// Reads a DM log back into DmMessages (newest `max_out`, oldest first). `peer_pub` and `peer_name` identify the
+// file's thread: a record does not carry the peer's key (the L2 names the file dm-<8 hex>), so the caller supplies
+// them. The latest Meta record is the seen point and is applied by the caller.
+size_t historyLoadDm(const uint8_t* data, size_t len, const uint8_t peer_pub[32], const char* peer_name,
+                     DmMessage* out, size_t max_out, uint32_t* out_max_log_id = nullptr);
+
 // Reads a whole log (oldest record first) and keeps the NEWEST `max_out` messages, oldest first, so the caller
 // can push them into the ring in order. `channel` is the file's chat, not a record field. Stops at the first
 // record that does not validate, which is exactly the torn-tail rule the L2 uses: a half-written last record

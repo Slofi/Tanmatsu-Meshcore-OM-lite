@@ -15,6 +15,203 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-18 · S513 (EST-433) · direct messages, slice 1: receive, acknowledge, show, keep
+
+> Written by DeepSeek for ticket EST-433 (fenced Paperclip run: no session start/end, nothing installed, nothing
+> flashed, nothing committed). Code + host tests + build only. **Version for Claude's install: 40.** This entry is
+> the ticket's FIRST artefact. The ticket carries a **30-minute cap**: the numbered items are done in order and
+> this entry's Results section says exactly where the run stopped.
+
+### EST-434 (continuation) — the receive path wired, the DM column on the glass
+
+> Written by DeepSeek (S513, EST-434 ticket run, 2026-11-18). Fenced Paperclip run: no session start/end, nothing
+> installed, flashed or committed. **All six numbered items are done.** Version stays **40**.
+
+**0. The ACK routing correction (Claude's review).** `dmBuildAck()` no longer takes the arrived `View`. Its new
+shape is `dmBuildAck(const uint8_t* out_path, uint8_t out_path_len, ack6, out, out_size)`:
+- `out_path == nullptr` means the contact's route is `OUT_PATH_UNKNOWN`, and the frame is upstream's **flooded**
+  `createAck()` (`BaseChatMesh.cpp:43-58`): header `(ACK << 2) | flood` = `0x0D`, `path_len` `0x40` (2-byte
+  hashes, count 0), payload = the 6 ACK bytes and nothing else. A direct arrival today therefore gets
+  `0d40f976f1cc005a`, not the old `0e41abcd…`.
+- A later PATH slice only has to pass the stored route in; `out_path_len` carries the hash mode/count, so
+  `out_path_len = 0x41` with `ab cd` produces the unchanged direct `0e41abcdf976f1cc005a`.
+- **ARM, against the old builder:** the same `test_dm.cpp` compiled with the pre-review `dmBuildAck(View&)`
+  (`paperclip-pilot/sweep/est434-arm/`) is **red**: `FAIL ...:208 got "0e41abcdf976f1cc005a" want
+  "0d40f976f1cc005a"`, **45 checks, 1 failure**. The real tree is **45 checks, 0 failures**.
+
+**2. The radio RX path (`main/mc_link.cpp`).** `onPacket` now handles `TXT_MSG` before the channel table:
+- snapshots the contact table, calls `dmOpen` (every contact with that `src_hash` is tried; the MAC decides),
+- drops a duplicate payload by the existing seen-ring, pushes the message into the RAM DM store,
+- queues the reply through the send queue as the new `TxKind::Frame` request (a complete frame, copied by value);
+  **the receive path never transmits** — `serviceRequests()` is still the only sender. A FLOOD arrival gets
+  `dmBuildPathReturn`, a DIRECT arrival gets the flooded `dmBuildAck` above,
+- the DM timestamp is recorded but **never passed to `noteText`/`noteAdvert`**: it is not a clock source.
+- `main/radio_link.cpp`'s per-packet RX log now prints the three raw stats bytes next to the converted values
+  (`raw rssi %u snr %d signal %u -> rssi %d dBm, snr %d dB, signal %d dBm`). **No conversion was changed** — the
+  vendor's C6-side `lora.c:442` contradiction can be decided from the console first.
+
+**3. Per-contact DM threads in RAM (`core/mc_store.*`).** `DmRing` (64 messages) holds `peer_pub`, the peer's
+name, text, wire/local times, SNR, `direct` and `log_id`; a thread is a filtered view, not a second allocation.
+Unread is counted from each contact's own `dm_seen` sequence (the same rule as a channel's `ReadState`), so reading
+one thread cannot clear another. `dmThreadSummaries()` returns threads newest-first for the column. Host-tested
+(name/preview/unread/order, ring eviction, two threads independent).
+
+**4. SD history (`core/mc_history.*`, `main/sd_history.*`).** One log per contact at
+`/sdcard/om-lite/history/dm-<pubkey[0..3] 8 hex>.log`, in the L2's own record format (`h.setDm(true)`, the peer in
+the name field) and with the L2's Meta seen point. `restoreDmThreads()` scans the directory after the card is
+mounted and before the radio task exists, restores every thread, and seeds unread from the Meta record. A restored
+row knows only the 8-hex prefix the file name holds; the first real advert for that contact rebinds the row and its
+messages to the full 32-byte key (`rebindRestoredDmPeer`). `noteDmRead()` appends the seen point only when it moved.
+Host-tested record round trip (peer, text, log id, timestamps).
+
+**5. The Chat page's DM column (`main/main.cpp`, `main/chat_page.*`).** The right column is filled from
+`dmThreadSummaries`: newest first, contact name or 8-hex prefix, unread badge, newest preview and its **local**
+HH:MM. Enter opens the card exactly like a channel (a DM read view with the same wrap/window/scrolling code);
+Esc goes up and marks it read; the composer slot is a dim **"sending DMs comes next"** line, not a text field and
+not a Send button. The page head now includes the thread count when the column is populated.
+
+**6. Preview:** `shots/2026-11-18-chat-dm-column.png` (**new**, **800x480**), from
+`python3 tools/preview_tanmatsu.py chat_dm` — the same card renderer as `2026-11-18-chat-two-columns.png`, with four
+DM threads, the prefix-named restored one, unread badges and the gold focus ring on the second DM card.
+
+### Results (real exit codes)
+
+- `sh test/host/run.sh` → **HOST_SUITE_FINAL_EXIT=0**, **0 failures** everywhere. Totals **before 1296 across 13
+  suites → after 1348 across 13**: store 99→**127**, history 65→**74**, DM 43→**45** (normal AND ASan), tx queue
+  82→**93**; the other suites are unchanged (192 / 91 / 62 / 115 / 115 / 267 / 99 / 23). **+52 checks.**
+  Logs: `paperclip-pilot/sweep/est434-host-before.log`, `.../est434-host-final3.log`.
+- `make build` → **BUILD_EXIT=0**, **0** `warning:`/`error:` lines. `application.bin` = **0x161120 =
+  1,446,176 B**, **650,976 B (31 %) of the 2 MB app partition free**, **+16,720 B** from the EST-433 image.
+  Log: `.../est434-build-final2.log`; `make size` log: `.../est434-size-final2.log` (1,445,768 B total image).
+- **PNG:** `shots/2026-11-18-chat-dm-column.png`, 800x480, 34,139 B, checked visually.
+- **Version: 40**, code + host tests + build only; **nothing installed or flashed, no commit.**
+
+### Files changed in EST-434
+
+- `core/mc_dm.h`, `core/mc_dm.cpp` — `dmBuildAck` takes an optional stored `out_path`; nullptr = flooded
+  `createAck()` (`0x0D`, `path_len 0x40`, payload = ack6). Direct-with-route form unchanged.
+- `core/tx_queue.h`, `core/tx_queue.cpp` — `TxKind::Frame`, `pushFrame()`, a copied 256-byte frame in `TxRequest`.
+- `core/mc_store.h`, `core/mc_store.cpp` — `DmMessage`/`DmRing`, push/filter/unread/summaries, `dm_seen`,
+  `dm_seen_log`; `DmSummary.pub`.
+- `core/mc_history.h`, `core/mc_history.cpp` — `historyEncodeDm`, `historyLoadDm` (the L2 format, `dm` flag set).
+- `main/sd_history.h`, `main/sd_history.cpp` — `dm-<8 hex>.log` path, append/load/seen, `restoreDmThreads()`.
+- `main/mc_link.h`, `main/mc_link.cpp` — TXT_MSG RX, DM store write + log id, queued ACK/path return, prefix rebind,
+  `restoreDmHistory()`, `noteDmRead()`, `dmThreads()`.
+- `main/radio_link.cpp` — the three raw stats bytes in the per-packet RX log (conversions untouched).
+- `main/chat_page.h`, `main/chat_page.cpp` — `dm_open`, DM title/empty line, dim no-composer line, DM hints, head count.
+- `main/main.cpp` — DM column fill, Enter on a DM card, Esc/refresh mark the thread read, shared wrap/window path.
+- `test/host/test_dm.cpp`, `test_store.cpp`, `test_history.cpp`, `test_txqueue.cpp` — 52 new checks (see totals).
+- `tools/preview_tanmatsu.py` — `chat_dm` renderer (the one shared preview tool, no per-ticket script).
+- `shots/2026-11-18-chat-dm-column.png` (**new**).
+- `docs/PROGRESS.md` — this subsection.
+
+
+
+### What was read (this run)
+- `BRIEF.md`, this file's S513 entries (EST-432, EST-430, EST-429, EST-427, EST-B) for the card style, the
+  notice pattern, the clock rule and the install discipline.
+- `core/mc_wire.*`, `core/mc_identity.*`, `core/mc_store.*`, `core/chat_cards.*`, `core/mc_history.*`,
+  `core/tx_queue.*`, `main/mc_link.*`, `main/chat_page.*`, `main/sd_history.*`.
+- Upstream, line by line, not from memory: `Mesh.cpp:133-205` (TXT_MSG receive / seen-table / first packet
+  wins), `Identity.cpp:155` (`ed25519_key_exchange`), `helpers/BaseChatMesh.cpp:222-270` (plaintext layout and
+  the 6-byte ACK), `Mesh.cpp:448-486` (`createPathReturn`), `Mesh.cpp:560-573` (`createAck`),
+  `Mesh.cpp:693-712` (`sendDirect`), `firmware/src/history/history_log.h:13,478-486` (the `dm-<8 hex>` id).
+
+### 1. The pure decoder and the ACK builders: `core/mc_dm.*`
+
+`dmOpen(self, pkt, peers, count, out)` follows `Mesh.cpp:133-205`:
+- payload = `dest_hash(1) src_hash(1) MAC(2) ciphertext`; it is opened ONLY when `dest_hash == self.pub[0]`;
+- EVERY contact whose `pub[0] == src_hash` is tried, in table order, and the 2-byte MAC decides; the first that
+  opens wins (upstream's "first packet wins");
+- the secret is `ed25519_key_exchange(their_pub, our_prv)` (`Identity.cpp:155`), the already-vendored
+  `core/ed25519/key_exchange.c`; MAC-then-decrypt goes through `mc_wire`'s own helpers (exposed, not copied);
+- the plaintext is read exactly as `BaseChatMesh.cpp:222-270`: `ts(4, LE)`, `flags = data[4]`,
+  `txt_type = flags >> 2`, `attempt = flags & 3`, text from `data[5]` to the first NUL.
+
+Only `TXT_TYPE_PLAIN` produces an ACK; every other txt_type is reported with its type and no ack. The 6-byte
+ACK is the ticket's rule: `sha256(data[0 .. 5+text_len) || SENDER pub)[0..4]`, then byte 4 = the extended
+attempt byte (`data[5+text_len+1]`) and byte 5 = a caller-supplied random byte (so the host test is
+deterministic). Every length is clamped/refused before a copy; the parser joins the ASan stage.
+
+The two frames are byte-for-byte ports of upstream builders:
+- `dmBuildPathReturn` — `header = (0x08 << 2) | ROUTE_TYPE_FLOOD`, `path_len = 0x40` (2-byte path hashes, count
+  0), payload = `dest_hash(1) src_hash(1)` + `encryptThenMAC(secret, path_len || path || 0x03(Ack) || ack6)`.
+  This is `createPathReturn` + `sendFlood` (`Mesh.cpp:448-486, 641-676`).
+- `dmBuildAck` — `header = (0x03 << 2) | ROUTE_TYPE_DIRECT` (0x0E), the incoming frame's path copied back,
+  payload = the 6 ACK bytes. This is `createAck` + `sendDirect` (`Mesh.cpp:560-573, 693-712`).
+
+### Results (real exit codes)
+
+**Where this run stopped: after numbered item 1, because of the ticket's 30-minute cap.** The decoder, the two ACK
+builders, the oracle suite, the ARM and the build are finished and green. Items 2-6 (the `mc_link.cpp` RX wiring,
+the per-contact store, the SD `dm-` logs, the Chat UI and the preview PNG) are **NOT started** — nothing of them is
+half-written in the tree. Installing this build therefore shows **no visible change**: it is the receive path's
+portable core only, waiting for item 2.
+
+- **Independent oracle:** `test/host/test_dm.cpp` was written from a Python oracle (PyNaCl +
+  `cryptography` + `hashlib`/`hmac`) and **its first version was wrong**, which is why the vectors were
+  regenerated: orlp's keypair stores `SHA-512(seed)[:32]`, clamped, as the private scalar, so
+  `X25519PrivateKey.from_private_bytes(seed)` does **not** reproduce `key_exchange.c`. The corrected oracle uses
+  PyNaCl's `crypto_sign_ed25519_sk_to_curve25519` + `crypto_scalarmult`; both directions then agree with the C++
+  (`f6f92e…` for self/A, checked side by side). This is stated because it is exactly the kind of oracle mistake
+  that would have made a real incompatibility look green.
+- **ARM FIRST — the suite is red against deliberately wrong rules.** The same `test_dm.cpp` was compiled against
+  a sweep-only copy (`paperclip-pilot/sweep/est433/mc_dm_wrong.cpp`, outside the tree and not built by `run.sh`)
+  with the destination-hash check removed and only the FIRST contact sharing a `src_hash` tried.
+  **ARM_EXIT=1**, **43 checks, 4 failures**; the FAIL lines, verbatim
+  (`paperclip-pilot/sweep/est433/arm.log`):
+
+      FAIL test/host/test_dm.cpp:155  !openFrame(kFrameNotOurs, g_a, 1, &m)
+      FAIL test/host/test_dm.cpp:164  openFrame(kFrameA, &both[0][0], 2, &m)
+      FAIL test/host/test_dm.cpp:165  m.peer == 1
+      FAIL test/host/test_dm.cpp:166  got "" want "hello from A"
+
+  The same file against the real `core/mc_dm.cpp`: **43 checks, 0 failures**.
+- `sh test/host/run.sh` → **HOST_SUITE_FINAL_EXIT=0**. Suites: 192 / 91 / 99 / 65 / 62 / 115 (MeshCore) /
+  **43 (DM, new)** / 115 (MeshCore under ASan+UBSan) / **43 (DM under ASan+UBSan, new)** / 267 (map) / 82 (tx
+  queue) / 99 (chat cards) / 23 (menu cards) — **0 failures** everywhere, **0** `AddressSanitizer` lines. The
+  ASan stage includes the ticket's **186-byte junk TXT_MSG**, which is refused before any copy. Totals: **1210
+  checks across 11 suites before, 1296 across 13 after**. **Stated honestly:** the EST-432 entry quoted the map
+  suite as 260; the clean tree at 37d3932 actually runs **267** here, so the "before" total is the measured 1210,
+  not the historical 1203. Nothing in this ticket touches `test_map.cpp`.
+- `make build` → **BUILD_EXIT=0**, **0** `warning:` lines. `application.bin` = **0x15CFD0 = 1,429,456 B**,
+  **0xA3030 = 667,696 B (32 %) of the 2 MB app partition free**, **+464 B** from v39 (0x15CE00 = 1,428,992 B).
+  Logs: `paperclip-pilot/sweep/est433/host.log`, `.../build.log`.
+- **Preview PNG: NOT produced** — item 6 was not reached. The ticket's path
+  `shots/2026-11-18-chat-dm-column.png` does **not** exist, and no file was added under `shots/`.
+- **Version: 40** as the ticket says, with the caveat above: it is core code only, no UI change.
+
+### Files changed
+
+- `core/mc_dm.h`, `core/mc_dm.cpp` (**new**) — `dmOpen` (dest/src hashes, every matching contact tried, MAC
+  decides, plaintext layout, plain-only ACK), `dmBuildAck` (direct), `dmBuildPathReturn` (flood). Every length
+  from the air is checked before use; no allocation.
+- `core/mc_wire.h`, `core/mc_wire.cpp` — `sealPayload` / `openPayload` expose the existing MAC-then-decrypt
+  helpers so `mc_dm` reuses them instead of keeping a second copy.
+- `core/mc_identity.h`, `core/mc_identity.cpp` — `identitySharedSecret`: `ed25519_key_exchange(their_pub,
+  our_prv)`, the one-line port of `Identity.cpp:155`.
+- `core/CMakeLists.txt` — `mc_dm.cpp` added to the component.
+- `test/host/test_dm.cpp` (**new**) — 43 checks: A opens / B does not, wrong MAC, dest_hash not ours, two
+  contacts sharing `src_hash` (both orders), CLI_DATA not acked, ACK bytes and both answer frames against the
+  oracle, and the bounds cases (186-byte junk, 19-byte payload, non-block ciphertext, null output).
+- `test/host/run.sh` — the DM suite and a second DM stage under ASan+UBSan.
+- `docs/PROGRESS.md` — this entry.
+
+### What could NOT be checked (honest list)
+
+- **Items 2-6 are not done:** `main/mc_link.cpp` does not handle TXT_MSG yet, there is no per-contact DM store,
+  no `dm-<8 hex>` SD log, no DM card in the Chat column, no dim "sending DMs comes next" line, and no PNG. A DM
+  arriving at the device today is still logged as "not a channel text" and dropped.
+- **Nothing installed, flashed or committed** (ticket terms). No glass test, and the ticket's Claude-on-glass
+  check ("L2 sends a DM to TNMT (SI)") **cannot pass yet** — the RX wiring is item 2.
+- The ACK builders are oracle-checked as bytes, but **not yet sent**: the tx-queue request kind for an ACK and
+  the radio-task path are part of item 2.
+- The direct ACK's path is copied from the arrival's path (the only route this slice has); upstream uses the
+  contact's stored `out_path` (`BaseChatMesh.cpp:41-57`). That needs the per-contact store (item 3) to be exact
+  on a multi-hop direct link; it is identical for a zero-hop path.
+
+---
+
 ## 2026-11-18 · S513 (EST-432) · the menu redone: three app cards
 
 > Written by DeepSeek for ticket EST-432 (fenced Paperclip run: no session start/end, nothing installed, nothing

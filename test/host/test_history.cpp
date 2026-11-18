@@ -215,6 +215,39 @@ void test_seen_point_collapses_on_corruption() {
     CHECK_EQ(sp.found, false);
 }
 
+// S513/EST-434: a DM record goes through the SAME L2 format, and the peer supplied by the caller comes back with
+// the message. This is the mapping under test, not the format (that is the L2's and is already exercised above).
+void test_dm_record_round_trip() {
+    uint8_t pub[32];
+    for (size_t i = 0; i < sizeof(pub); i++) pub[i] = (uint8_t)(0x40 + i);
+
+    om::mc::DmMessage m;
+    memcpy(m.peer_pub, pub, sizeof(pub));
+    snprintf(m.peer_name, sizeof(m.peer_name), "Alpha");
+    m.outgoing = false;
+    snprintf(m.text, sizeof(m.text), "hi there");
+    m.ts       = 1750000000u;
+    m.local_ts = 1750000100u;
+    m.snr_x10  = 25;
+    m.direct   = true;
+
+    uint8_t   rec[512];
+    const int n = om::mc::historyEncodeDm(m, 7, rec, (int)sizeof(rec));
+    CHECK_EQ(n > 0, true);
+
+    om::mc::DmMessage out[4];
+    uint32_t          max_id = 0;
+    const size_t      got    = om::mc::historyLoadDm(rec, (size_t)n, pub, "fallback", out, 4, &max_id);
+    CHECK_EQ(got, 1u);
+    CHECK_EQ(max_id, 7u);
+    CHECK_EQ(out[0].log_id, 7u);
+    CHECK_EQ(out[0].outgoing, false);
+    CHECK(strcmp(out[0].text, "hi there") == 0);
+    CHECK(memcmp(out[0].peer_pub, pub, 32) == 0);
+    CHECK_EQ(out[0].ts, 1750000000u);
+    CHECK_EQ(out[0].direct, true);
+}
+
 }  // namespace
 
 int main() {
@@ -225,6 +258,7 @@ int main() {
     test_log_id_is_the_files_own_id();     // S503
     test_seen_point_round_trip();          // S503
     test_seen_point_collapses_on_corruption();
+    test_dm_record_round_trip();           // S513/EST-434
 
     printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

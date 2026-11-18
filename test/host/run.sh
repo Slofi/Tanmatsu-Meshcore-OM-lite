@@ -18,10 +18,12 @@ MAP="$(mktemp /tmp/tm-map.XXXXXX)"
 TXQ="$(mktemp /tmp/tm-txq.XXXXXX)"
 CARDS="$(mktemp /tmp/tm-cards.XXXXXX)"
 MENU="$(mktemp /tmp/tm-menu.XXXXXX)"
+DM="$(mktemp /tmp/tm-dm.XXXXXX)"
 MCASAN="$(mktemp /tmp/tm-mc-asan.XXXXXX)"
+DMASAN="$(mktemp /tmp/tm-dm-asan.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$MCASAN"; rm -rf "$ED" "$EDASAN"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$DM" "$MCASAN" "$DMASAN"; rm -rf "$ED" "$EDASAN"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -73,6 +75,18 @@ done
     -o "$MC"
 "$MC"
 
+# Direct messages (S513/EST-433): open a TXT_MSG against a contact list and build the ACK / path return. Every
+# expected frame comes from the independent Python oracle quoted in test_dm.cpp, so this compares two
+# implementations, not one with itself.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core -I ../../core/ed25519 \
+    test_dm.cpp \
+    ../../core/mc_dm.cpp ../../core/mc_wire.cpp ../../core/mc_crypto_psa.cpp \
+    ../../core/mc_identity.cpp \
+    "$ED"/*.o \
+    -lmbedcrypto \
+    -o "$DM"
+"$DM"
+
 # The SAME MeshCore suite under AddressSanitizer + UBSan (S513/EST-427). The advert parser copies lengths taken
 # straight off the air, so a bounds mistake there is a stack overflow reachable by any transmitter — this stage
 # turns that class into a red test instead of a field report. -O1 -g keeps the report's line numbers useful; the
@@ -89,6 +103,18 @@ done
     -lmbedcrypto \
     -o "$MCASAN"
 ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$MCASAN"
+
+# The DM parser under the same sanitizers. Its lengths come straight off the air too: the 186-byte junk TXT_MSG
+# case here is the S513 advert-overflow lesson applied to the DM path.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I ../../core -I ../../core/ed25519 \
+    test_dm.cpp \
+    ../../core/mc_dm.cpp ../../core/mc_wire.cpp ../../core/mc_crypto_psa.cpp \
+    ../../core/mc_identity.cpp \
+    "$EDASAN"/*.o \
+    -lmbedcrypto \
+    -o "$DMASAN"
+ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$DMASAN"
 
 # The map pack rules (S503, step 6): record parse, binary search over the index, zoom -> pack, slippy maths.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \

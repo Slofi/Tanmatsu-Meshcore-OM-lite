@@ -30,6 +30,9 @@ idf_component_register(
          # S513: the send queue's rules (four request slots, FIFO, refuse when full) — the code the radio task
          # pushes to and pops from, and the code the host tests cover.
          "tx_queue.cpp"
+         # S513/EST-433: direct messages — open a TXT_MSG against the contact list and build the ACK / path
+         # return. Pure, bounds-checked, host-tested against an independent Python oracle.
+         "mc_dm.cpp"
          # Ed25519, vendored from firmware/lib/meshcore_ed25519 (orlp/ed25519, zlib licence): the same code
          # the L2 signs with, so the signatures match by construction rather than by hope.
          "ed25519/add_scalar.c" "ed25519/fe.c" "ed25519/ge.c" "ed25519/key_exchange.c"

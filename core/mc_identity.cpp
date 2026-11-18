@@ -25,6 +25,15 @@ bool identityFromSeed(Identity& id, const uint8_t seed[kSeedBytes]) {
     return true;
 }
 
+bool identitySharedSecret(const Identity& id, const uint8_t other_pub[kPubKeyBytes],
+                          uint8_t out[kSecretBytes]) {
+    if (other_pub == nullptr || out == nullptr) return false;
+    // LocalIdentity::calcSharedSecret (Identity.cpp:155): ed25519_key_exchange(secret, other_pub, our_prv).
+    // orlp's key_exchange reads the first 32 bytes of the 64-byte private key (the seed) and clamps them.
+    ed25519_key_exchange(out, other_pub, id.priv);
+    return true;
+}
+
 bool identitySign(const Identity& id, const uint8_t* msg, size_t len, uint8_t out[kSignatureBytes]) {
     if (msg == nullptr && len > 0) return false;
     ed25519_sign(out, msg, len, id.pub, id.priv);

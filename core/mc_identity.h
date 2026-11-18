@@ -49,6 +49,12 @@ struct Identity {
 // Derive both keys from a 32-byte seed. The seed is what must be stored (that is what MeshCore keeps).
 bool identityFromSeed(Identity& id, const uint8_t seed[kSeedBytes]);
 
+// The 32-byte shared secret with another node: ed25519_key_exchange(their_pub, our_prv), exactly
+// LocalIdentity::calcSharedSecret (Identity.cpp:155). This is what a direct message is encrypted with; a channel
+// uses a symmetric key instead.
+bool identitySharedSecret(const Identity& id, const uint8_t other_pub[kPubKeyBytes],
+                          uint8_t out[kSecretBytes]);
+
 bool identitySign(const Identity& id, const uint8_t* msg, size_t len, uint8_t out[kSignatureBytes]);
 bool identityVerify(const uint8_t pub[kPubKeyBytes], const uint8_t* msg, size_t len,
                     const uint8_t sig[kSignatureBytes]);

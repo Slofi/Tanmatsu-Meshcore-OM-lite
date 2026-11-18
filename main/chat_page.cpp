@@ -95,8 +95,14 @@ void drawChat(Screen& s, const ChatView& v) {
         // the one place on the page that already says something short-lived.
         if (v.notice != nullptr && v.notice[0] != '\0') snprintf(head_right, sizeof(head_right), "%s", v.notice);
     } else {
-        snprintf(head_right, sizeof(head_right), "%d channel%s \xc2\xb7 %d unread", v.channel_count,
-                 v.channel_count == 1 ? "" : "s", v.unread_total);
+        if (v.dm_count > 0) {
+            snprintf(head_right, sizeof(head_right), "%d channel%s \xc2\xb7 %d unread \xc2\xb7 %d DM thread%s",
+                     v.channel_count, v.channel_count == 1 ? "" : "s", v.unread_total, v.dm_count,
+                     v.dm_count == 1 ? "" : "s");
+        } else {
+            snprintf(head_right, sizeof(head_right), "%d channel%s \xc2\xb7 %d unread", v.channel_count,
+                     v.channel_count == 1 ? "" : "s", v.unread_total);
+        }
     }
     const int head_bot = drawPageHead(s, "Chat", head_right);
 
@@ -131,17 +137,17 @@ void drawChat(Screen& s, const ChatView& v) {
             }
         }
 
-        // The DM column: this app has no TXT_MSG receive or send, so there are no direct messages and none are
-        // invented. The L2's own empty line, in the dim colour, and no card (firmware/src/ui/chat_selector.cpp).
+        // The DM column's empty state: the L2's own line, in the dim colour, and no card.
         if (v.dm_count == 0)
             drawText(s, Face::Body, g.col_x[mc::kColDms] + 12, textBaseline(s, Face::Body, g.cards_y, 24),
                      "No direct messages yet", kDim);
     }
 
-    // ======================================================================================= one channel
+    // ======================================================================================= one chat
     if (v.open) {
         char title[40];
-        snprintf(title, sizeof(title), "# %s", v.channel_name);
+        if (v.dm_open) snprintf(title, sizeof(title), "DM: %s", v.channel_name);
+        else snprintf(title, sizeof(title), "# %s", v.channel_name);
         drawTextClipped(s, Face::Row, kTmPad, textBaseline(s, Face::Row, work_top, 34), W - 2 * kTmPad - 120,
                         title, kInk);
 
@@ -181,34 +187,44 @@ void drawChat(Screen& s, const ChatView& v) {
             y += kTmChatHeadH + lines * kTmChatLineH + kTmChatGapH;
         }
         if (v.msg_count == 0) {
-            drawText(s, Face::Body, kTmPad + 58, kTmChatTop + 24, "No messages on this channel yet.", kDim);
-            drawText(s, Face::Body, kTmPad + 58, kTmChatTop + 48, "Type below and press Enter to send.", kDimmer);
+            drawText(s, Face::Body, kTmPad + 58, kTmChatTop + 24,
+                     v.dm_open ? "No messages in this thread yet." : "No messages on this channel yet.", kDim);
+            if (!v.dm_open)
+                drawText(s, Face::Body, kTmPad + 58, kTmChatTop + 48, "Type below and press Enter to send.",
+                         kDimmer);
         }
 
-        // ---- composer: one line, a caret, and the Send key hint
+        // ---- composer: one line, a caret, and the Send key hint. A DM thread has no composer yet (sending is the
+        // next slice): the same box holds a dim line, so the geometry does not jump when sending arrives.
         const int cy0 = work_bot - kTmChatComposerH - 4;
         s.fillRect(kTmPad, cy0, W - 2 * kTmPad, kTmChatComposerH, kPanel);
         s.frame(kTmPad, cy0, W - 2 * kTmPad, kTmChatComposerH, 1, kLine);
         const int bl = textBaseline(s, Face::Body, cy0, kTmChatComposerH);
-        const bool empty = (v.composer == nullptr || v.composer[0] == '\0');
-        drawText(s, Face::Body, kTmPad + 12, bl, empty ? "message the channel, Enter sends" : v.composer,
-                 empty ? (uint16_t)kDimmer : (uint16_t)kInk);
-        if (!empty) {
-            const Font* f = fontFor(Face::Body);
-            const int   tw = (f && f->ready()) ? f->textWidth(v.composer) : 0;
-            const int   cx = kTmPad + 12 + tw + 3;
-            s.fillRect(cx, cy0 + 12, 2, kTmChatComposerH - 24, kAcc);   // caret
+        if (v.dm_open) {
+            drawText(s, Face::Body, kTmPad + 12, bl, "sending DMs comes next", kDimmer);
+        } else {
+            const bool empty = (v.composer == nullptr || v.composer[0] == '\0');
+            drawText(s, Face::Body, kTmPad + 12, bl, empty ? "message the channel, Enter sends" : v.composer,
+                     empty ? (uint16_t)kDimmer : (uint16_t)kInk);
+            if (!empty) {
+                const Font* f = fontFor(Face::Body);
+                const int   tw = (f && f->ready()) ? f->textWidth(v.composer) : 0;
+                const int   cx = kTmPad + 12 + tw + 3;
+                s.fillRect(cx, cy0 + 12, 2, kTmChatComposerH - 24, kAcc);   // caret
+            }
+            const int bw = 86, bh = 34;
+            const int bx = W - kTmPad - bw - 8, by = cy0 + (kTmChatComposerH - bh) / 2;
+            s.fillRect(bx, by, bw, bh, kSelBg2);
+            s.frame(bx, by, bw, bh, 1, kAcc);
+            drawTextCentred(s, Face::Hint, bx + bw / 2, textBaseline(s, Face::Hint, by, bh), "Send", kAccInk);
         }
-        const int bw = 86, bh = 34;
-        const int bx = W - kTmPad - bw - 8, by = cy0 + (kTmChatComposerH - bh) / 2;
-        s.fillRect(bx, by, bw, bh, kSelBg2);
-        s.frame(bx, by, bw, bh, 1, kAcc);
-        drawTextCentred(s, Face::Hint, bx + bw / 2, textBaseline(s, Face::Hint, by, bh), "Send", kAccInk);
     }
 
     static const HintItem hints_list[] = {{"up/dn", "move"}, {"l/r", "column"}, {"ret", "open"}, {"esc", "back"}};
     static const HintItem hints_open[] = {{"type", "write"}, {"up/dn", "scroll"}, {"ret", "send"}, {"esc", "back"}};
-    drawHintBar(s, tm::Page::Chat, v.open ? hints_open : hints_list, v.open ? 4 : 4);
+    static const HintItem hints_dm[]   = {{"up/dn", "scroll"}, {"esc", "back"}};
+    if (v.open && v.dm_open) drawHintBar(s, tm::Page::Chat, hints_dm, 2);
+    else drawHintBar(s, tm::Page::Chat, v.open ? hints_open : hints_list, 4);
 }
 
 }  // namespace ui

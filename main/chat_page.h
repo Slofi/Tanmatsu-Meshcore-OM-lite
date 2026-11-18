@@ -71,9 +71,9 @@ struct ChatView {
     // (this app has no TXT_MSG receive or send), and the page draws the L2's "No direct messages yet" line.
     ChatRowView rows[kChatRows];      // Channels (column 0)
     int         row_count = 0;
-    ChatRowView dms[kChatRows];       // Direct messages (column 1) — empty today
+    ChatRowView dms[kChatRows];       // Direct messages (column 1), newest thread first
     int         dm_count = 0;
-    int         focus_col = mc::kColChannels;   // an empty column cannot take focus, so this is 0 today
+    int         focus_col = mc::kColChannels;   // an empty column cannot take focus
     int         focus_row = 0;
     int         scroll[mc::kCardCols] = {0, 0}; // each column scrolls by itself to keep its focused card visible
     int         channel_count = 0;
@@ -82,6 +82,7 @@ struct ChatView {
     // ---- open mode
     int  channel = 0;
     char channel_name[32] = "";
+    bool dm_open = false;               // S513/EST-434: the open chat is a DM thread, not a channel
     int  msg_count = 0;
     // A channel's messages, oldest first, already windowed to what fits (S503: the window moves with `scroll`).
     struct Msg {
