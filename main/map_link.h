@@ -20,9 +20,6 @@ namespace maplink {
 void begin();
 bool ready();
 
-// Forget the pack handles, the cache and any queued work (card gone, or a new pack set).
-void forget();
-
 // ---------------------------------------------------------------------------------- the page (never decodes here)
 // Copy one decoded tile into the caller's panel through `blit`. Returns false when the tile is not decoded yet or
 // the pack does not have it: the caller leaves the void colour there, and the worker brings it if it exists.

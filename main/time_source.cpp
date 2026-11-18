@@ -33,14 +33,15 @@ constexpr const char* kNvsEpochKey  = "epoch";
 // (CET-1 = UTC+1 in winter, CEST in summer from the last Sunday of March to the last Sunday of October.)
 constexpr const char* kTimezone = "CET-1CEST,M3.5.0,M10.5.0/3";
 
-// What the radio task recorded and the main task has not applied yet. One slot, two tasks: the pointer-sized
-// fields are published under a spinlock rather than trusted to be "probably written in the right order" — the
-// cost is a handful of instructions per packet, and the class of bug (a mangled label, a half-updated ts) is
-// exactly the sort that shows up once and then hides.
-portMUX_TYPE      g_mux         = portMUX_INITIALIZER_UNLOCKED;
-volatile uint32_t g_seen_ts     = 0;
-volatile bool     g_seen        = false;
-char              g_seen_what[16] = {0};
+// What the radio task recorded: recent ADVERT time samples, which the main task snapshots and decides on
+// (core/clock.h owns the rules). The spinlock publishes the fixed-size table; the class of bug it keeps out
+// (a half-updated sample read by the other task) is exactly the sort that shows up once and then hides.
+portMUX_TYPE         g_mux = portMUX_INITIALIZER_UNLOCKED;
+om::clock::Agreement g_agree;
+om::clock::Warned    g_warned;   // main task only: "this sender was already reported once" (rule a)
+
+// Where this boot's time came from: rules (a) and (b) differ by it. Set in begin(), read in service().
+om::clock::Source g_boot_kind = om::clock::Source::None;
 
 // Our knowledge of the coprocessor's RTC: its value at `s_rtc_us` and the monotonic time then, so we can tell
 // how far off it is without reading the CH32 on every loop.
@@ -53,6 +54,18 @@ uint32_t g_stored = 0;
 char g_boot_source[8] = "none";
 
 uint32_t systemNow() { return (uint32_t)time(nullptr); }
+
+// Our own monotonic seconds: the timeline a sample is recorded on and projected along. It must NOT move when
+// the wall clock is corrected, or "listened to it 10 minutes ago" would change meaning mid-flight.
+uint32_t monotonicSeconds() { return (uint32_t)(esp_timer_get_time() / 1000000); }
+
+// A public key folded to the 64-bit prefix the agreement table compares. 8 bytes is enough to tell two
+// independent nodes apart on a leaf node's mesh (and the ticket names "pubkey prefix" as the identity).
+uint64_t keyPrefix(const uint8_t* pub, size_t len) {
+    uint64_t k = 0;
+    for (size_t i = 0; i < 8 && i < len; i++) k |= (uint64_t)pub[i] << (8 * i);
+    return k;
+}
 
 void setSystemTime(uint32_t epoch) {
     const struct timeval tv = {.tv_sec = (time_t)epoch, .tv_usec = 0};
@@ -123,6 +136,7 @@ void begin() {
     g_stored = loadStoredEpoch();
     const uint32_t stored = g_stored;
     const om::clock::Start s = om::clock::chooseStart(rtc, stored);
+    g_boot_kind = s.source;   // rules (a) and (b) in service() differ by where this boot's time came from
 
     char rtc_iso[24] = "unreadable";
     if (r == ESP_OK) isoUtc(rtc_iso, sizeof(rtc_iso), rtc);
@@ -167,56 +181,76 @@ void begin() {
     if (s.epoch != 0 && om::clock::shouldPersist(s.epoch, stored)) storeEpoch(s.epoch);
 }
 
-void noteSeen(uint32_t ts, const char* what) {
-    if (!om::clock::plausible(ts)) return;
-    if (!om::clock::shouldAdopt(systemNow(), ts)) return;   // cheaper to filter here: no wake-up for noise
-
-    // Copy the label OUTSIDE the critical section, then publish everything with one short locked step.
-    char label[sizeof(g_seen_what)];
-    snprintf(label, sizeof(label), "%s", what != nullptr ? what : "mesh");
-
+void noteAdvert(uint32_t ts, const uint8_t* pub_key, size_t len) {
+    if (pub_key == nullptr || len < 8) return;   // no usable identity -> cannot be a witness
+    const uint64_t key   = keyPrefix(pub_key, len);
+    const uint32_t local = monotonicSeconds();
     taskENTER_CRITICAL(&g_mux);
-    for (size_t i = 0; i < sizeof(g_seen_what); i++) g_seen_what[i] = label[i];
-    g_seen_ts = ts;
-    g_seen    = true;
+    om::clock::agreementRecord(g_agree, om::clock::Origin::Advert, key, ts, local);
+    taskEXIT_CRITICAL(&g_mux);
+}
+
+void noteText(uint32_t ts) {
+    // Recorded for symmetry and honesty, but a channel text is not a witness: the MAC proves the channel key
+    // and the sender name is whatever the sender typed. agreementRecord drops it (rule b).
+    const uint32_t local = monotonicSeconds();
+    taskENTER_CRITICAL(&g_mux);
+    om::clock::agreementRecord(g_agree, om::clock::Origin::Text, 0, ts, local);
     taskEXIT_CRITICAL(&g_mux);
 }
 
 void service() {
-    uint32_t ts = 0;
-    char     what[16] = {0};
+    const uint32_t mono_now = monotonicSeconds();
+
+    // Snapshot the table: the radio task may be adding a sample while we decide, and a short critical
+    // section around a fixed-size copy keeps the decision on ONE consistent set of witnesses.
+    om::clock::Agreement snap;
     taskENTER_CRITICAL(&g_mux);
-    const bool pending = g_seen;
-    if (pending) {
-        ts    = g_seen_ts;
-        g_seen = false;
-        for (size_t i = 0; i < sizeof(what); i++) what[i] = g_seen_what[i];
-        what[sizeof(what) - 1] = '\0';
-    }
+    snap = g_agree;
     taskEXIT_CRITICAL(&g_mux);
 
-    if (pending) {
-        const uint32_t before = systemNow();
-        if (om::clock::shouldAdopt(before, ts)) {
-            setSystemTime(ts);
+    if (g_boot_kind == om::clock::Source::Rtc) {
+        // Rule (a): this boot's time is the battery-kept RTC's, so the mesh may NOT move it. A peer more than
+        // 10 minutes off is worth one log line per sender, and that is all: no clock, RTC or NVS write.
+        const uint32_t now = systemNow();
+        for (size_t i = 0; i < om::clock::kAgreementSlots; i++) {
+            const om::clock::Sample& s = snap.slot[i];
+            if (s.key == 0) continue;
+            const uint32_t peer = om::clock::projectSample(s.seen, s.local, mono_now);
+            if (!om::clock::farFromRtc(now, peer)) continue;
+            if (!om::clock::warnOnce(g_warned, s.key)) continue;
+            char theirs[24], ours[24];
+            isoUtc(theirs, sizeof(theirs), peer);
+            isoUtc(ours, sizeof(ours), now);
+            ESP_LOGW(TAG, "clock: a peer (%016llx) says %s, the RTC says %s (%+ld s off): NOT adopting a mesh "
+                          "time on an RTC clock (S513/EST-429); recovery is manual, see PROGRESS",
+                     (unsigned long long)s.key, theirs, ours, (long)((int64_t)peer - (int64_t)now));
+        }
+    } else {
+        // Rules (b)+(c): adopt only a time two DIFFERENT advert keys agree on within 120 s, never below the
+        // stored floor and never backwards. This is the ONLY path that writes the clock, the RTC or NVS.
+        uint32_t agreed = 0;
+        const uint32_t now = systemNow();
+        if (om::clock::decideAdoption(snap, g_boot_kind, now, g_stored, mono_now, &agreed)) {
+            setSystemTime(agreed);
             char iso[24], local[8];
-            isoUtc(iso, sizeof(iso), ts);
-            localHhmm(local, sizeof(local), ts);
-            ESP_LOGI(TAG, "clock: now %s local (%s), %+ld s from a %s", local, iso,
-                     (long)((int64_t)ts - (int64_t)before), what);
+            isoUtc(iso, sizeof(iso), agreed);
+            localHhmm(local, sizeof(local), agreed);
+            ESP_LOGI(TAG, "clock: now %s local (%s), %+ld s: two independent adverts agree", local, iso,
+                     (long)((int64_t)agreed - (int64_t)now));
 
-            // The CH32 RTC is the one clock that survives a power loss, so a learned time goes back there too —
+            // The CH32 RTC is the one clock that survives a power loss, so an agreed time goes back there too —
             // but only when it is meaningfully off, and only from this task (one owner of the coprocessor).
             const uint32_t rtc_now = rtcEstimate();
-            if (om::clock::shouldWriteBack(rtc_now, ts)) {
-                if (bsp_rtc_set_time(ts) == ESP_OK) {
-                    rememberRtc(ts);
+            if (om::clock::shouldWriteBack(rtc_now, agreed)) {
+                if (bsp_rtc_set_time(agreed) == ESP_OK) {
+                    rememberRtc(agreed);
                     ESP_LOGI(TAG, "clock: coprocessor RTC corrected to %s", iso);
                 } else {
                     ESP_LOGW(TAG, "clock: could not correct the coprocessor RTC");
                 }
             }
-            storeEpoch(ts);
+            storeEpoch(agreed);
             return;
         }
     }

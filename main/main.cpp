@@ -571,6 +571,10 @@ extern "C" void app_main(void) {
     int     map_z  = 16;
     char   composer[120] = {0};
     size_t composer_len  = 0;
+    // S513: a short-lived line for the one thing the composer cannot say by itself — that a send was REFUSED
+    // because the radio's queue is full. The text stays in the composer; this says why nothing left.
+    const char* chat_notice          = nullptr;
+    int64_t     chat_notice_until_us = 0;
 
     auto clockText = []() { return om::time_source::hhmm(); };
 
@@ -613,6 +617,8 @@ extern "C" void app_main(void) {
         cv.charging      = view.charging;
         cv.focused       = chat_focus;
         cv.composer      = composer;
+        // S513: the notice is only in the view while it is live, so the page needs no clock of its own.
+        cv.notice        = (chat_notice != nullptr && esp_timer_get_time() < chat_notice_until_us) ? chat_notice : nullptr;
         const int chans  = (int)om::mc::channelCount();
         cv.channel_count = chans;
         {
@@ -784,10 +790,16 @@ extern "C" void app_main(void) {
                             if (om::mc::queueText((size_t)chat_focus, composer)) {
                                 ESP_LOGI(TAG, "chat: queued for channel %d (%u chars)", chat_focus,
                                          (unsigned)composer_len);
-                                composer[0]  = '\0';
-                                composer_len = 0;
+                                composer[0]           = '\0';
+                                composer_len          = 0;
+                                chat_notice           = nullptr;   // a send that worked clears the last refusal
+                                chat_notice_until_us  = 0;
                             } else {
-                                ESP_LOGW(TAG, "chat: a send was already pending; the text is kept");
+                                // S513: the queue is FULL (four requests waiting). Nothing is replaced, so the
+                                // text stays in the composer and the page says why for three seconds.
+                                chat_notice          = "radio busy, not sent";
+                                chat_notice_until_us = esp_timer_get_time() + 3 * 1000 * 1000;
+                                ESP_LOGW(TAG, "chat: the send queue is full; the text is kept in the composer");
                             }
                         }
                         handled = true;

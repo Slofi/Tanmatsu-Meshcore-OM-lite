@@ -78,6 +78,9 @@ struct ChatView {
     int hidden_above = 0;
     int hidden_below = 0;
     const char* composer = "";
+    // S513: a transient line that replaces the head's right-hand status while it is set ("radio busy, not sent").
+    // It lives in the same slot as "N messages" so the composer and the message list keep their geometry.
+    const char* notice = nullptr;
     bool        sending = false;   // a send is in flight (the log says when it lands)
 
     // ---- chrome

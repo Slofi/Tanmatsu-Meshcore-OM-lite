@@ -36,7 +36,9 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db);
 // radio task drove the same link, and the returning flood was verified on a 4 KB stack, which panicked with a
 // stack protection fault. Queueing also removes the two-writers race on the radio.
 //
-// Both return false when a request is already pending (the previous one is dropped, and the log says so).
+// Both COPY the request into a queue of FOUR (core/tx_queue.*) and return false when that queue is FULL: nothing
+// is ever replaced, so a caller that gets false still owns its text and must keep it (S513 — before this, the
+// second request replaced the first and a message could vanish after the composer had cleared).
 // The SENDER name is not a parameter: it is the node's name (see nodeName()), so a message and an advert can
 // never announce two different identities.
 bool queueText(size_t i, const char* text);

@@ -5,9 +5,11 @@
 // keeps the last good time in NVS, accepts time from the mesh, and formats the status bar.
 //
 // ⚠️ The CH32 coprocessor and NVS are touched by ONE task at a time: the radio task only RECORDS a time it has
-// seen (noteSeen) and the main task applies it (service). That is the same shape as the radio's single owner.
+// seen (noteAdvert / noteText) and the main task decides and applies it (service). That is the same shape as
+// the radio's single owner, and since S513/EST-429 it is also what keeps the mesh from moving an RTC clock.
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 namespace om {
@@ -17,12 +19,16 @@ namespace time_source {
 // and say so. Also sets the timezone. Needs badge-bsp initialised and NVS mounted; call once.
 void begin();
 
-// The radio task: remember an authenticated timestamp we received (an advert's ts, or a channel text's ts).
-// `what` is copied; pass a short literal ("advert", "text"). Cheap, no NVS, no coprocessor, safe per packet.
-void noteSeen(uint32_t ts, const char* what);
+// The radio task: record an authenticated timestamp we received. A verified ADVERT carries the public key
+// that signed it, which is what makes two independent witnesses possible; a channel TEXT has no such key
+// (its MAC only proves the channel key, and that key can be public), so it is recorded and never counts
+// toward the clock. Cheap, no NVS, no coprocessor, safe per packet; the DECISION is in service().
+void noteAdvert(uint32_t ts, const uint8_t* pub_key, size_t len);
+void noteText(uint32_t ts);
 
-// The main task, every couple of seconds: apply a recorded time (set the clock, correct the RTC, store the
-// floor), and keep the stored floor fresh. Never called from the radio task.
+// The main task, every couple of seconds: snapshot the samples the radio task recorded, adopt a time only when
+// two DIFFERENT advert keys agree (and never on an RTC boot), then correct the RTC / store the floor, and keep
+// the stored floor fresh. Never called from the radio task.
 void service();
 
 // "22:31" in local time (central European time), or "--:--" while the clock is not plausible.

@@ -33,6 +33,21 @@ bool decodeEntry(const uint8_t* rec, Entry* out);
 // Read record `i` of an index. `ctx` is the caller's (a FILE*, an array); returns false on a short read.
 using RecordReader = bool (*)(void* ctx, uint32_t i, Entry* out);
 
+// How a tile read is issued: offset and length in the width the device's read call takes them — FatFs's FSIZE_t,
+// a 32-bit UNSIGNED DWORD while FF_FS_EXFAT is 0, so it reaches 4 GiB - 1.
+//
+// ⚠️ S513, measured on the P4: picolibc's off_t is a SIGNED 32-bit long, so fseek() cannot pass an offset above
+// 2^31-1. The slo17 pack is 3,590,722,268 bytes and its index is sorted by column, so every z17 tile east of about
+// 15.35 E (~38.6 % of the records) failed in fseek and landed in the failed ring as a silent hole: Maribor, Ptuj,
+// Murska Sobota, Krsko drew as void. That pack is read through FatFs now, and this function is the rule that keeps
+// the offset unsigned the whole way: an Entry (uint64) becomes the two uint32 values a read call takes, and a
+// record that cannot exist on FAT32 (offset + length past 4 GiB - 1) is REFUSED, not wrapped into a small one.
+struct ReadRange {
+    uint32_t offset = 0;
+    uint32_t length = 0;
+};
+bool readRangeFor(const Entry& e, ReadRange* out);
+
 // The pack layout the L2 already uses (firmware/src/map.cpp): z9-15 in "slo", z16 in "slo16", z17 in "slo17".
 // Returns nullptr for a zoom no pack covers.
 const char* packDirForZoom(int z);

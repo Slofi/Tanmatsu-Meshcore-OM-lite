@@ -9,6 +9,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "ff.h"   // S513: the pack is read through FatFs, whose FSIZE_t reaches 4 GiB - 1
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -36,10 +37,12 @@ constexpr int kWorkerPriority = 2;
 // The pack currently open. One at a time: zooming across a band boundary closes the old pair and opens the new
 // one, which keeps the mount's open-file count at two instead of six.
 struct OpenPack {
-    int      z     = -1;
-    FILE*    idx   = nullptr;
-    FILE*    pack  = nullptr;
-    uint32_t count = 0;
+    int      z         = -1;
+    FILE*    idx       = nullptr;   // tiles.idx stays on stdio: at most 21.6 MB, read by record number
+    FIL      pack      = {};        // tiles.pack goes through FatFs: 3.6 GB, past what a signed long can seek
+    bool     pack_open = false;
+    char     drive     = 0;         // the FatFs drive the pack was found on ('0'..'9'), for the log and errors
+    uint32_t count     = 0;
 };
 
 OpenPack           g_pack;
@@ -80,6 +83,10 @@ struct RowHint {
 constexpr int kHints = 8;   // a 386 px view is at most 5 columns wide; 8 slots means no two of them collide
 RowHint       g_hint[kHints];
 
+// S513: a card read that failed is logged ONCE per fill, with its offset. Silence is what made the z17 holes
+// invisible for a whole session: the tiles just landed in the failed ring and the map drew void.
+bool g_read_fail_logged = false;
+
 // What one drain of the queue cost, logged once, so the glass gives a number instead of a feel.
 int      g_fill_tiles    = 0;
 int64_t  g_fill_start_us = 0;
@@ -99,24 +106,52 @@ bool readRecord(void* ctx, uint32_t i, om::map::Entry* out) {
 
 void closePack() {
     if (g_pack.idx) fclose(g_pack.idx);
-    if (g_pack.pack) fclose(g_pack.pack);
+    if (g_pack.pack_open) f_close(&g_pack.pack);
     g_pack = OpenPack{};
     for (int i = 0; i < kHints; i++) g_hint[i] = RowHint{};
 }
 
+// The FatFs drive the packs are on. This is NOT guessed and it is not the mount point: the drive letter is
+// '0' + the volume index FatFs handed out when the card was mounted
+// (managed_components/badgeteam__badge-bsp/targets/tanmatsu/badge_bsp_storage.c:248 calls
+// esp_vfs_fat_sdmmc_mount, and IDF components/fatfs/vfs/vfs_fat_sdmmc.c:116,147-152 make that drive from
+// ff_diskio_get_drive() — the first free FF_VOLUMES slot). It is "0:" today, but it would be another letter the
+// day anything else mounts a FAT volume first. So instead of assuming, the drive is PROBED for the pack we want
+// and logged, and the boot log says which one it was.
+char probeDrive(const char* dir) {
+    char    path[80];
+    FILINFO info;
+    for (char d = '0'; d <= '9'; d++) {
+        snprintf(path, sizeof(path), "%c:/maps/%s/tiles.pack", d, dir);
+        if (f_stat(path, &info) == FR_OK && info.fsize > 0) {
+            ESP_LOGI(TAG, "fat: the %s pack is on drive %c: (%lu B)", dir, d, (unsigned long)info.fsize);
+            return d;
+        }
+    }
+    ESP_LOGW(TAG, "fat: no mounted drive has /maps/%s/tiles.pack (probed 0:-9:)", dir);
+    return 0;
+}
+
 // Open the pack that serves `z`, reusing it when it is already the open one. Single-owner: the worker task, or
-// boot before any view exists.
+// boot before any view exists. The FIL lives here and is closed in closePack() — the om-map worker is the only
+// opener, which is what keeps the mount's open-file count at two.
 bool ensurePack(int z) {
-    if (g_pack.z == z && g_pack.idx != nullptr) return true;
+    if (g_pack.z == z && g_pack.idx != nullptr && g_pack.pack_open) return true;
     closePack();
     const char* dir = om::map::packDirForZoom(z);
     if (dir == nullptr) {
         ESP_LOGW(TAG, "z%d: no pack covers this zoom", z);
         return false;
     }
-    char idxPath[72], packPath[72];
+    const char drive = probeDrive(dir);
+    if (drive == 0) return false;
+
+    char idxPath[80], packPath[80];
+    // S513 (Claude, review of EST-428): the index stays on STDIO, so it needs the VFS mount path. A FatFs drive
+    // path ("0:/...") matches no VFS prefix (components/vfs/vfs.c:845 matches by path_prefix, here "/sdcard"),
+    // so fopen() on it fails and EVERY pack would refuse to open. Only the pack goes through FatFs.
     snprintf(idxPath, sizeof(idxPath), "/sdcard/maps/%s/tiles.idx", dir);
-    snprintf(packPath, sizeof(packPath), "/sdcard/maps/%s/tiles.pack", dir);
+    snprintf(packPath, sizeof(packPath), "%c:/maps/%s/tiles.pack", drive, dir);
     FILE* idx = fopen(idxPath, "rb");
     if (idx == nullptr) {
         ESP_LOGW(TAG, "%s: not on the card", idxPath);
@@ -132,17 +167,21 @@ bool ensurePack(int z) {
         fclose(idx);
         return false;
     }
-    FILE* pf = fopen(packPath, "rb");
-    if (pf == nullptr) {
-        ESP_LOGW(TAG, "%s: not on the card", packPath);
+    // Opened straight into the OpenPack, so there is no FIL copy to get wrong: one owner, closed in closePack().
+    const FRESULT fr = f_open(&g_pack.pack, packPath, FA_READ);
+    if (fr != FR_OK) {
+        ESP_LOGW(TAG, "%s: f_open failed (%d)", packPath, (int)fr);
+        g_pack.pack = FIL{};
         fclose(idx);
         return false;
     }
-    g_pack.z     = z;
-    g_pack.idx   = idx;
-    g_pack.pack  = pf;
-    g_pack.count = (uint32_t)(size / (long)om::map::kIdxRecordBytes);
-    ESP_LOGI(TAG, "z%d: pack %s open, %u tiles", z, dir, (unsigned)g_pack.count);
+    g_pack.z         = z;
+    g_pack.idx       = idx;
+    g_pack.pack_open = true;
+    g_pack.drive     = drive;
+    g_pack.count     = (uint32_t)(size / (long)om::map::kIdxRecordBytes);
+    ESP_LOGI(TAG, "z%d: pack %s open on drive %c:, %u tiles, %lu B", z, dir, drive, (unsigned)g_pack.count,
+             (unsigned long)f_size(&g_pack.pack));
     return true;
 }
 
@@ -197,18 +236,46 @@ bool lookupEntry(uint8_t z, uint32_t x, uint32_t y, om::map::Entry* out) {
 
 // Read the compressed bytes of one tile into a fresh PSRAM buffer. nullptr = the pack does not have it, or the card
 // refused. The caller frees it.
+//
+// S513: the read is f_lseek/f_read on the FatFs FIL, NOT fseek/fread. picolibc's off_t is a signed 32-bit long, so
+// `(long)e.offset` turned every z17 offset past 2^31-1 negative, fseek returned -1, and the tile became a silent
+// hole in the failed ring (Maribor, Ptuj, Murska Sobota, Krsko). FSIZE_t here is a 32-bit UNSIGNED DWORD
+// (ffconf.h:282 FF_FS_EXFAT 0 -> ff.h:82), so the whole 4 GiB - 1 is reachable; FF_FS_REENTRANT is 1
+// (ffconf.h:326), so a direct call is safe next to the VFS.
 uint8_t* readTileBytes(uint8_t z, uint32_t x, uint32_t y, uint32_t* out_len) {
     if (!ensurePack(z)) return nullptr;
     om::map::Entry e;
     if (!lookupEntry(z, x, y, &e)) return nullptr;
-    uint8_t* raw = (uint8_t*)allocDecoderMem(e.length, JPEG_DEC_ALLOC_INPUT_BUFFER);
+
+    om::map::ReadRange rr;
+    if (!om::map::readRangeFor(e, &rr)) {
+        // Cannot be a FAT32 range: say so with the numbers instead of seeking somewhere else on the card.
+        if (!g_read_fail_logged) {
+            g_read_fail_logged = true;
+            ESP_LOGE(TAG, "z%d %u/%u: offset %llu + %u B is past 4 GiB - 1, not a FAT32 tile (logged once per fill)",
+                     z, (unsigned)x, (unsigned)y, (unsigned long long)e.offset, (unsigned)e.length);
+        }
+        return nullptr;
+    }
+
+    uint8_t* raw = (uint8_t*)allocDecoderMem(rr.length, JPEG_DEC_ALLOC_INPUT_BUFFER);
     if (raw == nullptr) return nullptr;
-    if (fseek(g_pack.pack, (long)e.offset, SEEK_SET) != 0 || fread(raw, 1, e.length, g_pack.pack) != e.length) {
-        ESP_LOGW(TAG, "z%d %u/%u: read failed", z, (unsigned)x, (unsigned)y);
+    UINT          br = 0;
+    const FRESULT seek = f_lseek(&g_pack.pack, (FSIZE_t)rr.offset);
+    const FRESULT read = (seek == FR_OK) ? f_read(&g_pack.pack, raw, rr.length, &br) : seek;
+    if (seek != FR_OK || read != FR_OK || br != rr.length) {
+        // Once per fill: a hole must never be silent again, and a flood of the same line is not more information.
+        if (!g_read_fail_logged) {
+            g_read_fail_logged = true;
+            ESP_LOGE(TAG, "z%d %u/%u: READ FAILED at offset %u (%u B, seek %d read %d got %u) on drive %c: "
+                          "- logged once per fill",
+                     z, (unsigned)x, (unsigned)y, (unsigned)rr.offset, (unsigned)rr.length, (int)seek, (int)read,
+                     (unsigned)br, g_pack.drive);
+        }
         heap_caps_free(raw);
         return nullptr;
     }
-    *out_len = e.length;
+    *out_len = rr.length;
     return raw;
 }
 
@@ -395,17 +462,6 @@ void begin() {
 
 bool ready() { return g_ready; }
 
-void forget() {
-    if (g_lock) xSemaphoreTake(g_lock, portMAX_DELAY);
-    g_ready  = false;
-    g_req_n  = g_req_i = 0;
-    g_busy   = false;
-    g_landed = false;
-    closePack();
-    g_cache.reset();
-    if (g_lock) xSemaphoreGive(g_lock);
-}
-
 bool drawTile(uint8_t z, uint32_t x, uint32_t y, int dx, int dy, TileBlit blit, void* ctx) {
     if (!g_ready || g_lock == nullptr || blit == nullptr) return false;
     // A short take, not portMAX_DELAY: if the worker ever held the lock for longer than a moment, the page skips
@@ -436,9 +492,10 @@ int showView(uint8_t z, const om::map::ViewTiles& vt) {
     g_req_i = 0;
     if (n > 0) {
         if (!g_busy) {   // a new fill starts: reset the accounting
-            g_fill_tiles    = 0;
-            g_card_reads    = 0;
-            g_fill_start_us = esp_timer_get_time();
+            g_fill_tiles       = 0;
+            g_card_reads       = 0;
+            g_read_fail_logged = false;   // one read failure per fill is logged, not one per tile
+            g_fill_start_us    = esp_timer_get_time();
         }
         g_busy = true;
     }
@@ -457,39 +514,50 @@ bool takeLanded() {
 
 // ---------------------------------------------------------------------------------------------- boot checks
 
+// One probe point: read and decode a single tile at `z` and log the numbers. Shared by both probe points so the
+// second one cannot drift from the first.
+void probeOne(int z, double lat, double lon) {
+    const uint32_t tx = om::map::tileXForLon(lon, z);
+    const uint32_t ty = om::map::tileYForLat(lat, z);
+
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+    const int       slot = g_cache.take((uint8_t)z, tx, ty);
+    uint16_t* const out  = slotPixels(slot);
+    xSemaphoreGive(g_lock);
+    if (slot < 0 || out == nullptr) {
+        ESP_LOGW(TAG, "z%d %u/%u: no cache slot", z, (unsigned)tx, (unsigned)ty);
+        return;
+    }
+
+    const int64_t t0      = esp_timer_get_time();
+    int           w = 0, h = 0;
+    bool          used_hw = false;
+    const bool    ok      = decodeInto((uint8_t)z, tx, ty, out, &w, &h, &used_hw);
+    const long    us      = (long)(esp_timer_get_time() - t0);
+
+    xSemaphoreTake(g_lock, portMAX_DELAY);
+    g_cache.commit(slot, ok);
+    xSemaphoreGive(g_lock);
+
+    if (!ok) {
+        ESP_LOGW(TAG, "z%d %u/%u: not available", z, (unsigned)tx, (unsigned)ty);
+        return;
+    }
+    ESP_LOGI(TAG, "z%d tile %u/%u -> %dx%d in %ld ms (%s), px0 0x%04X", z, (unsigned)tx, (unsigned)ty, w, h,
+             us / 1000, used_hw ? "hw" : "sw", out[0]);
+}
+
 void probe(double lat, double lon) {
     if (!g_ready || g_lock == nullptr) return;
+    g_read_fail_logged = false;   // a boot probe reports its own failure, even if a fill already logged one
     ESP_LOGI(TAG, "probe: %.5f, %.5f (%s decoder)", lat, lon, g_hw ? "hardware" : "software");
-    for (int z = 16; z >= 15; z--) {
-        const uint32_t tx = om::map::tileXForLon(lon, z);
-        const uint32_t ty = om::map::tileYForLat(lat, z);
+    for (int z = 16; z >= 15; z--) probeOne(z, lat, lon);
 
-        xSemaphoreTake(g_lock, portMAX_DELAY);
-        const int       slot = g_cache.take((uint8_t)z, tx, ty);
-        uint16_t* const out  = slotPixels(slot);
-        xSemaphoreGive(g_lock);
-        if (slot < 0 || out == nullptr) {
-            ESP_LOGW(TAG, "z%d %u/%u: no cache slot", z, (unsigned)tx, (unsigned)ty);
-            continue;
-        }
-
-        const int64_t t0      = esp_timer_get_time();
-        int           w = 0, h = 0;
-        bool          used_hw = false;
-        const bool    ok      = decodeInto((uint8_t)z, tx, ty, out, &w, &h, &used_hw);
-        const long    us      = (long)(esp_timer_get_time() - t0);
-
-        xSemaphoreTake(g_lock, portMAX_DELAY);
-        g_cache.commit(slot, ok);
-        xSemaphoreGive(g_lock);
-
-        if (!ok) {
-            ESP_LOGW(TAG, "z%d %u/%u: not available", z, (unsigned)tx, (unsigned)ty);
-            continue;
-        }
-        ESP_LOGI(TAG, "z%d tile %u/%u -> %dx%d in %ld ms (%s), px0 0x%04X", z, (unsigned)tx, (unsigned)ty, w, h,
-                 us / 1000, used_hw ? "hw" : "sw", out[0]);
-    }
+    // S513: the SECOND probe point, and the reason it exists — this one is z17 on the far side of the 2 GiB mark of
+    // slo17 (offset ~2.49 GB), which the old signed-long fseek() could not read at all. If the boot log shows this
+    // line with real pixels, the FatFs path reaches the whole pack; if it does not, the line says so with an offset.
+    ESP_LOGI(TAG, "probe: %.5f, %.5f (east, past 2 GiB of slo17)", 46.5547, 15.6459);
+    probeOne(17, 46.5547, 15.6459);
 }
 
 // Mean per-pixel channel distance between two RGB565 buffers, over a sample. Small (a few LSB) means "the same

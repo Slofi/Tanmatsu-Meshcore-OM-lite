@@ -305,6 +305,91 @@ void testIdentityAdvert() {
     CHECK(meshcore::advertBuild(id, 1750000000u, "", 2, frame, sizeof(frame)) == 0);
 }
 
+// The flags-aware app_data (S513/EST-427). Each frame below was produced by the SAME independent oracle as the
+// advert vector above (python3, `cryptography`'s Ed25519 over pub || ts || app_data), with seed = bytes(range(32))
+// and ts = 1750000000. app_data is flags, then the fields the flags announce, then the name:
+//   name_only         0x81 + "EDCT"
+//   latlon_name       0x91 + lat(46150000) lon(14990000) + "EDCT"        (int32 LE, x1e6)
+//   latlon_feat1_name 0xB1 + lat lon + 0x1234 + "EDCT"                  (ADV_FEAT1_MASK skips 2 bytes)
+//   trunc_latlon      0x91 + "ED"                                        (flags lie: only 2 bytes follow)
+const char* kAdvertNameOnlyFrame =
+    "114003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b880e14e68"
+    "8a826734ba1bd7f5f5be0f4718b0c88a1686e22d4aa0a9ec2eefa6a52e1125df952343ccd43d3fc7"
+    "ad63ea835241264da9206c93942da1eae638ee85264b66028145444354";
+const char* kAdvertLatLonFrame =
+    "114003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b880e14e68"
+    "d0e9958af2fa0bcac1f25499bffb62d87febd7425a1c50aeb8169492630a755701c3661c2956a7a8"
+    "25d8ea458099c5dde3d40e8fb51a5bd674ee2afa6f3ca80b917031c002b0bae40045444354";
+const char* kAdvertLatLonFeat1Frame =
+    "114003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b880e14e68"
+    "512f1fb3df2ee8b7863eea3148b89ef7c5e35fd09f67041f2aa85d7bdb0f570b38c64f25acd2fc06"
+    "a0d75ad6af430ea1134f47af09a18111b15d15aeb1378606b17031c002b0bae400341245444354";
+const char* kAdvertTruncLatLonFrame =
+    "114003a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b880e14e68"
+    "04c9ecf4b8b61029454bf131cf0401e65dacf7c8a85141b1d5c83a1fa01e1f8a32dc27a19d8e72"
+    "632dc6d3d633fe0355282f848cda5cf000bba81b201fc4080d914544";
+
+bool parseAdvertHex(const char* hex, char* name, size_t name_size, meshcore::AdvertPosition* pos) {
+    uint8_t frame[256];
+    const size_t n = fromHex(frame, sizeof(frame), hex);
+    meshcore::View v;
+    if (!meshcore::decode(frame, n, &v)) return false;
+    uint8_t  pub[32];
+    uint32_t ts = 0;
+    return meshcore::advertParse(v, pub, &ts, name, name_size, nullptr, pos);
+}
+
+void testAdvertFlags() {
+    char name[32] = {0};
+    meshcore::AdvertPosition pos;
+
+    // 1. Name only: the old behaviour is still right here, and the position must say "none".
+    CHECK(parseAdvertHex(kAdvertNameOnlyFrame, name, sizeof(name), &pos));
+    CHECK_STR(name, "EDCT");
+    CHECK(!pos.has_position);
+    CHECK(pos.lat_e6 == 0 && pos.lon_e6 == 0);
+
+    // 2. The regression this ticket is about: 8 bytes of binary used to be copied in front of the name.
+    CHECK(parseAdvertHex(kAdvertLatLonFrame, name, sizeof(name), &pos));
+    CHECK_STR(name, "EDCT");
+    CHECK(pos.has_position);
+    CHECK(pos.lat_e6 == 46150000);
+    CHECK(pos.lon_e6 == 14990000);
+
+    // 3. ADV_FEAT1 (0x20) also comes before the name: 2 more bytes to skip.
+    CHECK(parseAdvertHex(kAdvertLatLonFeat1Frame, name, sizeof(name), &pos));
+    CHECK_STR(name, "EDCT");
+    CHECK(pos.has_position);
+    CHECK(pos.lat_e6 == 46150000);
+    CHECK(pos.lon_e6 == 14990000);
+
+    // 4. Flags claim lat/lon but app_data ends inside the field: no name, no position, never an over-read.
+    CHECK(parseAdvertHex(kAdvertTruncLatLonFrame, name, sizeof(name), &pos));
+    CHECK_STR(name, "");
+    CHECK(!pos.has_position);
+    CHECK(pos.lat_e6 == 0 && pos.lon_e6 == 0);
+}
+
+// A 186-byte frame any LoRa transmitter can send: advert << 2 | flood, 2-byte path hashes, 184 payload bytes.
+// app_len = 184 - 100 = 84 but the signed message buffer is 32 + 4 + 32 = 68, so the copy must be clamped
+// (upstream Mesh.cpp:269 does exactly this). ASan must catch an unclamped copy here for every future change.
+void testAdvertOversizeFrame() {
+    uint8_t frame[186];
+    frame[0] = (uint8_t)((meshcore::kTypeAdvert << 2) | meshcore::kRouteFlood);
+    frame[1] = 0x40;
+    memset(&frame[2], 0x41, 184);
+
+    meshcore::View v;
+    CHECK(meshcore::decode(frame, sizeof(frame), &v));
+    CHECK(v.payload_len == 184);
+
+    uint8_t  pub[32];
+    uint32_t ts = 0;
+    char     name[32] = {0};
+    // A forged signature, so parse must refuse it — but only AFTER a bounded copy.
+    CHECK(!meshcore::advertParse(v, pub, &ts, name, sizeof(name)));
+}
+
 // Optional: the REAL channel key, from the environment. Never written anywhere.
 void testRealKey() {
     const char* hex = getenv("MC_TEST_CHANNEL_KEY");
@@ -347,6 +432,8 @@ int main() {
     testRefusals();
     testChannelTable();
     testIdentityAdvert();
+    testAdvertFlags();
+    testAdvertOversizeFrame();
     testRealKey();
 
     printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);

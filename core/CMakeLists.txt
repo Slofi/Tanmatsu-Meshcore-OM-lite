@@ -21,6 +21,9 @@ idf_component_register(
          "map_pack.cpp"
          # The Map page arithmetic (S503): view tiles, panning, zooming, and the decoded-tile cache.
          "map_view.cpp"
+         # S513: the send queue's rules (four request slots, FIFO, refuse when full) — the code the radio task
+         # pushes to and pops from, and the code the host tests cover.
+         "tx_queue.cpp"
          # Ed25519, vendored from firmware/lib/meshcore_ed25519 (orlp/ed25519, zlib licence): the same code
          # the L2 signs with, so the signatures match by construction rather than by hope.
          "ed25519/add_scalar.c" "ed25519/fe.c" "ed25519/ge.c" "ed25519/key_exchange.c"

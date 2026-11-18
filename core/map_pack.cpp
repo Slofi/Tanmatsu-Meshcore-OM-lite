@@ -49,6 +49,17 @@ const char* packDirForZoom(int z) {
     return nullptr;
 }
 
+bool readRangeFor(const Entry& e, ReadRange* out) {
+    if (out == nullptr) return false;
+    if (e.length == 0) return false;   // decodeEntry already refuses this; a read of nothing is not a request
+    // FAT32's largest file byte is 4 GiB - 1, so a range that ends past it cannot be a real tile: refuse it here
+    // rather than let it wrap to a small offset and read someone else's bytes.
+    if (e.offset + (uint64_t)e.length > 0xFFFFFFFFull) return false;
+    out->offset = (uint32_t)e.offset;   // the cast is safe: the check above bounds it by 4 GiB - 1
+    out->length = e.length;
+    return true;
+}
+
 int findTile(uint32_t count, RecordReader read, void* ctx, uint8_t z, uint32_t x, uint32_t y) {
     if (read == nullptr || count == 0) return -1;
     uint32_t lo = 0;

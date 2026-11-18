@@ -14,6 +14,7 @@
 #include "nvs.h"
 
 #include "mc_channels.h"
+#include "tx_queue.h"   // S513: the send queue's rules, host-tested
 #include "mc_identity.h"
 #include "mc_crypto.h"
 #include "mc_wire.h"
@@ -84,12 +85,15 @@ char               g_pub_hex[17] = {0};   // first 8 bytes of the public key, fo
 
 // The radio has ONE owner (the radio task). Key handlers queue a request; the task performs it. See mc_link.h
 // for why: the S501 stack-protection panic came from crypto on the wrong task and two writers on the link.
-enum class Pending { None, Text, Advert };
-Pending g_pending         = Pending::None;
-size_t  g_pending_channel = 0;
-char    g_pending_sender[32] = {0};
-char    g_pending_text[200]  = {0};
-char    g_pending_name[32]   = {0};
+//
+// S513: the queue used to be ONE global slot, read by the radio task while the main task could overwrite it — a
+// second Enter during a ~0.5 s airtime could transmit a torn text, and a second request REPLACED the first, so a
+// message could vanish after the composer had already been cleared. It is now a ring of FOUR complete requests
+// (core/tx_queue.*, host-tested) and every push/pop holds g_tx_lock for a few microseconds — never across a
+// transmission. The ring is the pure rule rather than an xQueueCreate() so the host tests exercise the code the
+// device runs; the copy-by-value and "refuse when full" semantics are the FreeRTOS queue's.
+TxQueue            g_txq;
+SemaphoreHandle_t  g_tx_lock = nullptr;   // created once in begin()
 
 // Duplicate suppression: a flood can arrive over two paths, and MeshCore itself keeps a seen-table for the
 // same reason. Eight 4-byte fingerprints is plenty for one leaf node and costs 32 bytes.
@@ -191,6 +195,7 @@ void loadChannels() {
 
 void begin() {
     if (g_store_mutex == nullptr) g_store_mutex = xSemaphoreCreateRecursiveMutex();
+    if (g_tx_lock == nullptr) g_tx_lock = xSemaphoreCreateMutex();   // S513: the send queue, created once
     loadOrCreateIdentity();
     loadChannels();
     g_loaded = true;
@@ -287,8 +292,10 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
         for (size_t i = 0; i < 8; i++) snprintf(&prefix[2 * i], 3, "%02x", pub[i]);
         ESP_LOGI(TAG, "ADVERT \"%s\" from %s (ts %u, %d dBm, snr %d dB, %u B)", name, prefix,
                  (unsigned)ts, rssi_dbm, snr_db, (unsigned)len);
-        // A verified advert is a verified clock: this is the app's own way out of a 1970 RTC without Wi-Fi.
-        om::time_source::noteSeen(ts, "advert");
+        // A verified advert is a verified CLOCK CANDIDATE, not a clock: the signature proves who signed it,
+        // never that their clock is right. The radio task only records the sample (with the key that signed
+        // it); the main task adopts it only when a second, DIFFERENT node agrees (core/clock.h, S513/EST-429).
+        om::time_source::noteAdvert(ts, pub, sizeof(pub));
         {
             StoreLock l;
             contactsUpsert(g_contacts, pub, name, type, v.path_bytes, ts, (uint32_t)time(nullptr), rssi_dbm,
@@ -324,8 +331,10 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
              (unsigned)idx, g_set.ch[idx].name, sender, text, (unsigned)ts, rssi_dbm, snr_db,
              (unsigned)len);
     // The ts is only a time if the MAC that opened it verified, which it just did: this frame is a bonafide
-    // holder of the channel key. Adopt it like an advert's (core/clock.h decides whether it is worth it).
-    om::time_source::noteSeen(ts, "text");
+    // holder of the channel key. But that proves the KEY, not the sender and not the time (a channel key can
+    // be public, and the sender name is self-declared), so a text is recorded and never counts as a witness
+    // for the clock. Adverts only: two different signed nodes must agree (core/clock.h, S513/EST-429).
+    om::time_source::noteText(ts);
     {
         StoreLock l;
         Message m;
@@ -353,8 +362,8 @@ static int doText(size_t i, const char* sender, const char* text) {
 
     // MeshCore puts a unix timestamp in the plaintext; it is what the receiving app shows as the message time.
     // Since S502 it is the app's OWN clock (main/time_source.cpp): the coprocessor's RTC at boot, the stored
-    // floor if that was empty, and a peer's authenticated timestamp once one is heard. Logged, so a wrong one
-    // is visible rather than silent.
+    // floor if that was empty, and — only since S513/EST-429 — a time two DIFFERENT adverts agree on. One
+    // wrong node can no longer move it. Logged, so a wrong one is visible rather than silent.
     const uint32_t ts = (uint32_t)time(nullptr);
 
     uint8_t      frame[256];
@@ -409,47 +418,51 @@ static int doAdvert(const char* name) {
 }
 
 bool queueText(size_t i, const char* text) {
-    if (i >= g_set.count || text == nullptr) return false;
-    if (g_pending != Pending::None) {
-        ESP_LOGW(TAG, "tx: a %s request was still pending; it is replaced",
-                 g_pending == Pending::Text ? "text" : "advert");
-    }
-    g_pending_channel = i;
-    snprintf(g_pending_sender, sizeof(g_pending_sender), "%s", kNodeName);
-    snprintf(g_pending_text, sizeof(g_pending_text), "%s", text);
-    g_pending = Pending::Text;
-    return true;
+    if (i >= g_set.count || text == nullptr || g_tx_lock == nullptr) return false;
+    if (i > 0xFF) return false;   // the request carries a uint8 channel; a longer table is not a message
+    xSemaphoreTake(g_tx_lock, portMAX_DELAY);
+    const bool   ok    = g_txq.pushText((uint8_t)i, kNodeName, text);
+    const size_t depth = g_txq.size();
+    xSemaphoreGive(g_tx_lock);
+    if (!ok) ESP_LOGW(TAG, "tx: the send queue is full (%d waiting); the text was NOT queued", (int)depth);
+    return ok;
 }
 
 bool queueAdvert() {
-    if (g_pending != Pending::None) {
-        ESP_LOGW(TAG, "tx: a %s request was still pending; it is replaced",
-                 g_pending == Pending::Text ? "text" : "advert");
-    }
-    snprintf(g_pending_name, sizeof(g_pending_name), "%s", kNodeName);
-    g_pending = Pending::Advert;
-    return true;
+    if (g_tx_lock == nullptr) return false;
+    xSemaphoreTake(g_tx_lock, portMAX_DELAY);
+    const bool ok = g_txq.pushAdvert(kNodeName);
+    xSemaphoreGive(g_tx_lock);
+    if (!ok) ESP_LOGW(TAG, "tx: the send queue is full; the advert was NOT queued");
+    return ok;
 }
 
 void serviceRequests() {
+    if (g_tx_lock == nullptr) return;
+
     // The schedule first: an advert at start and every kAdvertIntervalUs. This is what makes the node
-    // discoverable on its own; the 'a' key only forces one early.
+    // discoverable on its own; the 'a' key only forces one early. It goes to the BACK of the queue and only when
+    // nothing the user typed is waiting — a scheduled advert must never displace, or delay, a message.
     static int64_t s_last_advert_us = 0;
     if (g_has_id && (s_last_advert_us == 0 || esp_timer_get_time() - s_last_advert_us >= kAdvertIntervalUs)) {
-        if (g_pending == Pending::None) {
-            g_pending = Pending::Advert;   // a queued request (a message) takes priority: it is not replaced
-            snprintf(g_pending_name, sizeof(g_pending_name), "%s", kNodeName);
-        }
+        xSemaphoreTake(g_tx_lock, portMAX_DELAY);
+        if (!g_txq.hasText() && g_txq.pushAdvert(kNodeName)) s_last_advert_us = esp_timer_get_time();
+        xSemaphoreGive(g_tx_lock);
     }
 
-    const Pending what = g_pending;
-    if (what == Pending::None) return;
-    g_pending = Pending::None;
-    if (what == Pending::Advert) s_last_advert_us = esp_timer_get_time();
-    if (what == Pending::Text) {
-        doText(g_pending_channel, g_pending_sender, g_pending_text);
+    // One request per loop, so a burst cannot hold the radio task away from receiving.
+    TxRequest req;
+    xSemaphoreTake(g_tx_lock, portMAX_DELAY);
+    const bool   have = g_txq.pop(&req);
+    const size_t left = g_txq.size();
+    xSemaphoreGive(g_tx_lock);
+    if (!have) return;
+    if (left > 0) ESP_LOGI(TAG, "tx: %u more request(s) queued", (unsigned)left);
+
+    if (req.kind == TxKind::Text) {
+        doText((size_t)req.channel, req.sender, req.text);   // a COPY of what the main task queued
     } else {
-        doAdvert(g_pending_name);
+        doAdvert(req.sender);
     }
     // Evidence, not a guess: how much stack this task really needed for the work it just did.
     ESP_LOGI(TAG, "radio task stack: %u B free at the low-water mark",

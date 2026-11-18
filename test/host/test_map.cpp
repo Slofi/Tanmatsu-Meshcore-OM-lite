@@ -361,6 +361,63 @@ void test_plan_tiles_order() {
     CHECK_EQ(req[0].y, 201);
 }
 
+// S513: the z17 pack is 3,590,722,268 bytes, i.e. past the 2 GiB mark where a SIGNED 32-bit offset turns negative.
+// The device reads that pack through FatFs (FSIZE_t = a 32-bit UNSIGNED DWORD). This is the arm against the old
+// behaviour: an offset above 2^31-1 must survive Entry -> read-call as an unsigned 32-bit value, with no trip
+// through `long`, and a range that cannot exist on FAT32 must be refused instead of wrapped.
+void test_read_range_above_2gib() {
+    // The exact record the device failed on: Maribor z17, 71232/46338, 2493062600 bytes into the pack.
+    const uint32_t want_offset = 2493062600u;
+    const uint32_t want_len    = 26'000u;
+
+    uint8_t rec[om::map::kIdxRecordBytes] = {0};
+    rec[0] = 17;
+    for (int i = 0; i < 4; i++) {
+        rec[4 + i]  = (uint8_t)((71232u >> (8 * i)) & 0xFF);
+        rec[8 + i]  = (uint8_t)((46338u >> (8 * i)) & 0xFF);
+        rec[12 + i] = (uint8_t)((want_offset >> (8 * i)) & 0xFF);
+        rec[16 + i] = 0;   // high half of the u64 offset: this pack is under 4 GiB, so it must be zero
+        rec[20 + i] = (uint8_t)((want_len >> (8 * i)) & 0xFF);
+    }
+
+    om::map::Entry e;
+    CHECK(om::map::decodeEntry(rec, &e));
+    CHECK_EQ(e.offset, 2493062600ull);
+
+    om::map::ReadRange r;
+    CHECK(om::map::readRangeFor(e, &r));
+    CHECK_EQ(r.offset, want_offset);      // the value the read call is given
+    CHECK_EQ(r.length, want_len);
+    // It is an UNSIGNED 32-bit value. The device's `long` is 32 bits, so the old path turned this same number
+    // negative; the host's `long` is wider, so the cast below is to int32_t — the width the P4 really has.
+    CHECK((int32_t)r.offset < 0);   // what the old `(long)e.offset` produced on the P4: 2493062600 -> -1801904696
+    CHECK_EQ((int32_t)r.offset, -1801904696);
+    CHECK_EQ((uint32_t)r.offset, want_offset);
+
+    // A record whose range ends past 4 GiB - 1 cannot be on FAT32: refused, with no wrapped offset left behind.
+    om::map::Entry bad;
+    bad.z      = 17;
+    bad.offset = 0xFFFFFFFFull;
+    bad.length = 2;
+    CHECK(!om::map::readRangeFor(bad, &r));
+    bad.offset = 0xFFFFFFF0ull;
+    bad.length = 0x20;
+    CHECK(!om::map::readRangeFor(bad, &r));
+    bad.offset = 0xFFFFFFF0ull;   // the last byte at 4 GiB - 1 is still one byte too far by the strict +length rule
+    bad.length = 0x10;
+    CHECK(!om::map::readRangeFor(bad, &r));
+    // A legitimate last tile just under the limit is accepted, with its offset intact.
+    bad.offset = 0xFFFF0000ull;
+    bad.length = 0x1000;
+    CHECK(om::map::readRangeFor(bad, &r));
+    CHECK_EQ(r.offset, 4294901760u);
+    // A zero-length record is not a read, and a null out-pointer is refused rather than written.
+    bad.offset = 1;
+    bad.length = 0;
+    CHECK(!om::map::readRangeFor(bad, &r));
+    CHECK(!om::map::readRangeFor(e, nullptr));
+}
+
 }  // namespace
 
 
@@ -374,6 +431,7 @@ int main() {
     test_tile_cache();
     test_cache_pending_is_untouchable();
     test_plan_tiles_order();
+    test_read_range_above_2gib();
 
     printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -57,6 +57,9 @@ void drawChat(Screen& s, const ChatView& v) {
             snprintf(head_right, sizeof(head_right), "%d newer", v.hidden_below);
         else
             snprintf(head_right, sizeof(head_right), "%d message%s", v.msg_count, v.msg_count == 1 ? "" : "s");
+        // S513: a refused send wins the slot for a few seconds — the composer still holds the text, and this is
+        // the one place on the page that already says something short-lived.
+        if (v.notice != nullptr && v.notice[0] != '\0') snprintf(head_right, sizeof(head_right), "%s", v.notice);
     } else {
         snprintf(head_right, sizeof(head_right), "%d channel%s \xc2\xb7 %d unread", v.channel_count,
                  v.channel_count == 1 ? "" : "s", v.unread_total);

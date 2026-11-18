@@ -146,6 +146,159 @@ void test_advert_floor() {
   CHECK_EQ(om::clock::advertFloor(om::clock::kMinPlausible - 1, floor), floor + 1);
 }
 
+// S513/EST-429: a mesh time is a CANDIDATE, not a clock. Every check below is one of the ticket's six
+// cases; together they define "one wrong node cannot move us into the future". Armed against the OLD rule
+// (any plausible timestamp more than 60 s ahead, whatever its origin): cases 1, 2, 4, 5 and 6 turn red.
+void test_mesh_agreement() {
+  namespace clk = om::clock;
+  constexpr uint64_t kNodeA = 0x0A0B0C0D0E0F1011ull;   // two advert public-key prefixes
+  constexpr uint64_t kNodeB = 0x1A1B1C1D1E1F2021ull;
+  const uint32_t     t      = kNow2026;
+  const uint32_t     local0 = 10000;                        // our monotonic seconds when A was heard
+  const uint32_t     far    = t + 5u * 365u * 24u * 3600u;  // five years ahead (still < kMaxPlausible)
+
+  // (1) ONE node five years ahead, on an RTC boot: nothing changes. The disagreement is worth one log line
+  //     per sender (farFromRtc / warnOnce), never an adoption.
+  {
+    clk::Agreement a{};
+    clk::agreementRecord(a, clk::Origin::Advert, kNodeA, far, local0);
+    uint32_t out = 1234;
+    CHECK_EQ(clk::decideAdoption(a, clk::Source::Rtc, t, t, local0, &out), false);
+    CHECK_EQ(out, 0u);
+    CHECK_EQ(clk::farFromRtc(t, far), true);
+    CHECK_EQ(clk::farFromRtc(t, t + clk::kRtcWarnGap), false);      // exactly 10 min off is not "off"
+    CHECK_EQ(clk::farFromRtc(t, t + clk::kRtcWarnGap + 1), true);
+    CHECK_EQ(clk::farFromRtc(t, t - clk::kRtcWarnGap - 1), true);   // behind is a disagreement too
+    // The same node twice is still one sender, even on an RTC boot.
+    clk::agreementRecord(a, clk::Origin::Advert, kNodeA, far + 30, local0 + 30);
+    CHECK_EQ(clk::decideAdoption(a, clk::Source::Rtc, t, t, local0 + 30, &out), false);
+    clk::Warned w{};
+    CHECK_EQ(clk::warnOnce(w, kNodeA), true);
+    CHECK_EQ(clk::warnOnce(w, kNodeA), false);
+    CHECK_EQ(clk::warnOnce(w, kNodeB), true);
+  }
+
+  // (2) ONE node ahead with NO source (or only a stored floor): not adopted either — one witness is not two.
+  {
+    clk::Agreement a{};
+    clk::agreementRecord(a, clk::Origin::Advert, kNodeA, t + 3600, local0);
+    uint32_t out = 1234;
+    CHECK_EQ(clk::decideAdoption(a, clk::Source::None, 0, 0, local0 + 30, &out), false);
+    CHECK_EQ(clk::decideAdoption(a, clk::Source::None, kBoot1970, 0, local0 + 30, &out), false);
+    CHECK_EQ(clk::decideAdoption(a, clk::Source::Stored, t - 3600, 0, local0 + 30, &out), false);
+  }
+
+  // (3) TWO different nodes agreeing: adopted, and the times are compared AFTER projecting each sample by
+  //     how long ago it was heard. The LATER projection wins (never undercut a correct clock).
+  {
+    clk::Agreement a{};
+    const uint32_t near = t + 3600;
+    clk::agreementRecord(a, clk::Origin::Advert, kNodeA, near, local0);
+    clk::agreementRecord(a, clk::Origin::Advert, kNodeB, near + 60, local0 + 10);
+    uint32_t out = 0;
+    CHECK_EQ(clk::agreementTime(a, local0 + 30, &out), true);
+    CHECK_EQ(out, near + 80);   // A projects to near+30, B to near+80
+    out = 0;
+    CHECK_EQ(clk::decideAdoption(a, clk::Source::None, kBoot1970, 0, local0 + 30, &out), true);
+    CHECK_EQ(out, near + 80);
+
+    // The 120 s window is a boundary: exactly 120 agrees, 121 does not.
+    clk::Agreement edge{};
+    clk::agreementRecord(edge, clk::Origin::Advert, kNodeA, near, local0);
+    clk::agreementRecord(edge, clk::Origin::Advert, kNodeB, near + clk::kAgreementWindow, local0);
+    CHECK_EQ(clk::agreementTime(edge, local0, &out), true);
+    clk::Agreement over{};
+    clk::agreementRecord(over, clk::Origin::Advert, kNodeA, near, local0);
+    clk::agreementRecord(over, clk::Origin::Advert, kNodeB, near + clk::kAgreementWindow + 1, local0);
+    CHECK_EQ(clk::agreementTime(over, local0, &out), false);
+
+    // Heard 10 min apart but claiming the SAME instant: the projection, not the raw ts, is what agrees.
+    clk::Agreement proj{};
+    clk::agreementRecord(proj, clk::Origin::Advert, kNodeA, near, local0);
+    clk::agreementRecord(proj, clk::Origin::Advert, kNodeB, near + 600, local0 + 600);
+    CHECK_EQ(clk::agreementTime(proj, local0 + 600, &out), true);
+    CHECK_EQ(out, near + 600);
+  }
+
+  // (4) The SAME node twice: one witness, no adoption — even when its two own timestamps agree perfectly.
+  {
+    clk::Agreement a{};
+    clk::agreementRecord(a, clk::Origin::Advert, kNodeA, t + 3600, local0);
+    clk::agreementRecord(a, clk::Origin::Advert, kNodeA, t + 3605, local0 + 5);
+    uint32_t out = 1234;
+    CHECK_EQ(clk::agreementTime(a, local0 + 10, &out), false);
+    CHECK_EQ(clk::decideAdoption(a, clk::Source::None, kBoot1970, 0, local0 + 10, &out), false);
+  }
+
+  // (5) Two different nodes TEN MINUTES apart: still no agreement (the window is 120 s, not "both say 2026").
+  {
+    clk::Agreement a{};
+    clk::agreementRecord(a, clk::Origin::Advert, kNodeA, t + 3600, local0);
+    clk::agreementRecord(a, clk::Origin::Advert, kNodeB, t + 3600 + 600, local0);
+    uint32_t out = 1234;
+    CHECK_EQ(clk::agreementTime(a, local0, &out), false);
+    CHECK_EQ(clk::decideAdoption(a, clk::Source::None, kBoot1970, 0, local0, &out), false);
+  }
+
+  // (6) A channel text alone: never a witness, however many senders there are; and one advert plus one text
+  //     is still only ONE witness. (A MAC proves the channel key, not the sender and not the time.)
+  {
+    const uint64_t kText = 0xDEADBEEFDEADBEEFull;   // any key argument must be ignored for a text
+    clk::Agreement a{};
+    clk::agreementRecord(a, clk::Origin::Text, kText, t + 3600, local0);
+    clk::agreementRecord(a, clk::Origin::Text, kText + 1, t + 3600, local0);
+    uint32_t out = 1234;
+    CHECK_EQ(clk::agreementTime(a, local0, &out), false);
+    CHECK_EQ(clk::decideAdoption(a, clk::Source::None, kBoot1970, 0, local0, &out), false);
+
+    clk::Agreement b{};
+    clk::agreementRecord(b, clk::Origin::Advert, kNodeA, t + 3600, local0);
+    clk::agreementRecord(b, clk::Origin::Text, kText, t + 3600, local0);
+    CHECK_EQ(clk::decideAdoption(b, clk::Source::None, kBoot1970, 0, local0, &out), false);
+  }
+
+  // (c) The stored floor still wins over two agreeing witnesses, and the clock still never goes backwards.
+  {
+    const uint32_t near = t + 3600;
+    clk::Agreement a{};
+    clk::agreementRecord(a, clk::Origin::Advert, kNodeA, near, local0);
+    clk::agreementRecord(a, clk::Origin::Advert, kNodeB, near + 5, local0);
+    uint32_t out = 1234;
+    CHECK_EQ(clk::decideAdoption(a, clk::Source::Stored, near - 3600, near + 10, local0, &out), false);
+    CHECK_EQ(clk::decideAdoption(a, clk::Source::Stored, near + 7200, 0, local0, &out), false);
+    // With the floor below and our clock behind, the same two witnesses ARE adopted.
+    CHECK_EQ(clk::decideAdoption(a, clk::Source::Stored, near - 3600, near - 7200, local0, &out), true);
+    CHECK_EQ(out, near + 5);
+  }
+
+  // One slot per key: a node that advertises often cannot flush the second witness out of the fixed table.
+  {
+    clk::Agreement a{};
+    for (uint32_t i = 0; i < 20; i++) {
+      clk::agreementRecord(a, clk::Origin::Advert, kNodeA, t + 3600 + i, local0 + i);
+    }
+    clk::agreementRecord(a, clk::Origin::Advert, kNodeB, t + 3630, local0 + 30);
+    uint32_t out = 0;
+    CHECK_EQ(clk::agreementTime(a, local0 + 30, &out), true);
+  }
+
+  // A time that cannot be one, or a sample with no key, never enters the table.
+  {
+    clk::Agreement a{};
+    clk::agreementRecord(a, clk::Origin::Advert, kNodeA, kBoot1970, local0);   // 1970 is not a time
+    clk::agreementRecord(a, clk::Origin::Advert, kNodeB, t + 3600, local0);
+    uint32_t out = 0;
+    CHECK_EQ(clk::agreementTime(a, local0, &out), false);
+    clk::agreementRecord(a, clk::Origin::Advert, 0, t + 3600, local0);        // no key -> no witness
+    CHECK_EQ(clk::agreementTime(a, local0, &out), false);
+  }
+
+  // projectSample: seen + the monotonic age, and 0 when the result cannot be a time.
+  CHECK_EQ(clk::projectSample(t, local0, local0 + 90), t + 90);
+  CHECK_EQ(clk::projectSample(t, local0 + 90, local0), t);            // heard "in the future": ages by 0
+  CHECK_EQ(clk::projectSample(kNow2026, 0, 0xFFFFFFFFu), 0u);         // would land past 2100: not a time
+}
+
 }  // namespace
 
 int main() {
@@ -155,6 +308,7 @@ int main() {
   test_write_back_boundaries();
   test_persist_boundaries();
   test_advert_floor();
+  test_mesh_agreement();
 
   printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

@@ -15,6 +15,366 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-18 · S513 (EST-429) · a mesh time now needs TWO agreeing nodes, so one wrong clock cannot move ours for good
+
+> Written by DeepSeek for ticket EST-429 (fenced Paperclip run: no session start/end, nothing installed, nothing
+> flashed, nothing committed). Code + host tests + build only. **Version for Claude's install: 37** (the same
+> install as EST-428; no version bump). **Status: done — host suite, the old-rule arm and the device build are
+> green; evidence and real exit codes below.**
+
+### What was read (this run)
+- `BRIEF.md` in full, and this file from the top (the S513/EST-427 entry and the S502 clock entry it builds on).
+- `core/clock.h/.cpp`, `main/time_source.h/.cpp`, the clock parts of `main/mc_link.cpp` (`nextAdvertTimestamp`,
+  the advert branch, the group-text branch, `doText`), the `begin()`/`service()` call sites in `main/main.cpp`,
+  `test/host/test_clock.cpp`, `test/host/run.sh`, and `managed_components/badgeteam__badge-bsp/targets/
+  tanmatsu/badge_bsp_rtc.c` + `bsp/rtc.h` for the recovery section.
+
+### The defect (Claude's S513 reading; how often real nodes carry a future clock is NOT measured)
+
+`noteSeen()` ran for every verified advert (`mc_link.cpp` ~291) and every channel text whose MAC opened (~328).
+`shouldAdopt()` accepted any plausible time (up to 2100) more than 60 s ahead of ours, regardless of where our
+clock came from. `service()` then set the system time, wrote it to the CH32 RTC and stored it as the NVS floor.
+Nothing ever moves the clock back: `shouldAdopt` only goes forward, `chooseStart` takes the later of RTC and
+floor, and the advert floor (`mcid/advts`) is monotonic. So **one** node with its clock in, say, 2030 — or anyone
+holding a public channel key, since a valid MAC proves the key, not the time — moved us to 2030 permanently.
+Every message and advert we send is then future-dated, and peers drop our adverts as replays until 2030. A
+verified signature proves WHO signed; never that their clock is right.
+
+### The rule now implemented (Claude's recommendation; reversible — Filip may change it)
+
+- **(a) RTC boot:** when the boot source is the coprocessor RTC (`Source::Rtc`), mesh times are **never**
+  adopted automatically. A peer more than **10 min** off is logged **once per sender** (advert key prefix) and
+  nothing else happens.
+- **(b) Stored / None boot:** a mesh time is adopted only when **at least 2 DIFFERENT advert public keys** report
+  times that agree within **120 s**, after projecting each sample by the monotonic seconds since it was heard.
+  **Channel texts do not count** (self-declared sender, channel keys can be public); adverts only.
+- **(c) The floor still wins:** an agreed time is never adopted below the stored floor (`mcid/epoch`) and still
+  has to beat our clock by the existing 60 s slack (never backwards). Nothing mesh-learned is written to the
+  CH32 RTC or to NVS (`mcid/epoch`) unless rule (b) was met.
+- **(d) Split unchanged:** the rules are pure in `core/clock.*` (a fixed 8-slot agreement table, one sample per
+  key prefix, plus a 16-key "already warned" set); `main/time_source.cpp` is the glue. The **radio task only
+  records samples** (`noteAdvert` / `noteText` under the existing spinlock); the **main task decides**
+  (`service()` snapshots the table and calls one pure `decideAdoption`).
+
+### Recovery of a device that is ALREADY poisoned (described, NOT run in this ticket)
+
+Two places hold the poison and **both** must be dealt with, because `chooseStart` takes the later of the two:
+
+1. **NVS, namespace `mcid`:** `epoch` (the stored boot floor) and `advts` (the advert timestamp floor). While
+   `advts` is in the future, `advertFloor()` keeps stamping our adverts at `floor + 1`, so peers see them as
+   replays even after the clock itself is fixed. Clear both.
+2. **The CH32 coprocessor RTC:** battery-kept, and the app's only down-write is "stored floor later than RTC"
+   (boot) — which cannot happen while the RTC is the later one. So a poisoned RTC needs one deliberate
+   `bsp_rtc_set_time(<correct epoch>)` call (a one-off recovery build; `bsp/rtc.h` on the device), or a CH32
+   whose backup is allowed to drain (then it reads 0 and the floor/agreement takes over).
+
+The BadgeLink commands (device in **BadgeLink** mode: launcher home → F6, USB `16d0:0f9a`; **not run here**):
+
+    badgelink.sh nvs list mcid
+    # clear both floors; the forms exercised in this tree are u8 / str / blob:
+    printf '\0\0\0\0' > /tmp/zero4.bin
+    badgelink.sh nvs write --file mcid epoch blob /tmp/zero4.bin
+    badgelink.sh nvs write --file mcid advts blob /tmp/zero4.bin
+    badgelink.sh nvs list mcid          # confirm they are gone/zero
+
+A 4-byte zero **blob** under a key that was `u32` makes `nvs_get_u32()` fail with a type error, and both readers
+(`loadStoredEpoch`, `nextAdvertTimestamp`) treat that exactly like "absent" → 0. A `u32` writer
+(`nvs write mcid epoch u32 <correct-now>`) may exist in newer BadgeLink tools but is **not exercised in this
+tree**, so do not rely on that spelling without checking `nvs list` afterwards. After the clear, boot is
+`Source::None`: the fixed app stays at 1970 (safe, visible) until two advert keys agree on a time. Then install
+the fixed build (v37+) so the device cannot be pushed forward again.
+
+### Results (real exit codes)
+
+- `sh test/host/run.sh` → **HOST_SUITE_EXIT=0**. Suites: 192 / **91** (clock, was 53) / 99 / 65 / 62 / 115
+  (MeshCore) / 115 (same suite under ASan+UBSan) / 260 (map) / 82 (tx queue) — **0 failures** everywhere.
+  **0** `AddressSanitizer` lines; the **83** `runtime error:` lines are the same vendored-Ed25519 UBSan noise as
+  EST-427 (third-party, not ours). Log: `paperclip-pilot/sweep/est429-host.log`.
+- **Armed against the old rule.** The S502 decision ("any plausible timestamp more than 60 s ahead wins") was
+  restated behind the same API in `paperclip-pilot/sweep/est429-arm/clock_old.cpp` (outside the tree, not built
+  by `run.sh`), and the new tests were made to continue past a failure in a sweep-only copy. Old rule:
+  **91 checks, 12 failures**, covering **every** ticket case — RTC boot (lines 164, 165, 172), no source
+  (184–186), same node twice (228), two nodes 10 min apart (238), channel text alone (249, 250, 255), and the
+  stored floor (265). Case 3 (two agreeing nodes) passes on the old rule too, as expected: the old code adopted
+  it for the wrong reason. The **same instrumented file** against the new `core/clock.cpp`: **91 checks,
+  0 failures**. Log: `paperclip-pilot/sweep/est429-arm.log`.
+- `make build` → **BUILD_EXIT=0**, **0** `warning:` lines. `application.bin` = **0x15C880 = 1,427,584 B**,
+  **669,568 B (32 %) of the 2 MB app partition free**, **+1,296 B** over the EST-427 build (0x15C370).
+  Log: `paperclip-pilot/sweep/est429-build.log`.
+- **Version for Claude's install: 37** — the same AppFS install as EST-428; no version bump on my side.
+
+### Files changed
+- `core/clock.h` — the agreement section: `kAgreementSlots`/`kAgreementWindow` (120 s)/`kRtcWarnGap` (10 min),
+  `Origin`, `Sample`, `Agreement`, `Warned`, and the declarations (`agreementRecord`, `projectSample`,
+  `agreementTime`, `decideAdoption`, `farFromRtc`, `warnOnce`). `shouldAdopt`'s contract comment now says it is
+  the last gate, not a time source.
+- `core/clock.cpp` — the pure implementation: one sample per advert key prefix (a repeat replaces its own
+  slot), texts dropped, projection by monotonic age, pairwise distinct-key agreement within 120 s yielding the
+  LATER projection, `decideAdoption` = (a) no RTC adoption + (b) two witnesses + (c) floor/forward gates.
+- `main/time_source.h` — `noteSeen` → `noteAdvert(ts, pub, len)` / `noteText(ts)`, with the one-owner contract
+  restated.
+- `main/time_source.cpp` — the glue: `g_agree` (radio writes under `g_mux`, main snapshots), `g_warned`,
+  `g_boot_kind`; `begin()` records the boot source; `service()` logs a >10 min peer once per sender on an RTC
+  boot, else adopts only via `decideAdoption` (the only place that writes clock/RTC/NVS).
+- `main/mc_link.cpp` — the advert passes its verified public key to `noteAdvert`; the channel text calls
+  `noteText`; the three comments say what a signature/MAC does and does not prove.
+- `test/host/test_clock.cpp` — `test_mesh_agreement()`: the six ticket cases plus the 120 s boundary, the
+  projection case, the floor/never-backwards case, the one-slot-per-key case and the "no time, no key" cases
+  (53 → 91 checks). `run.sh` needed no change: the clock suite already compiles `core/clock.cpp`.
+- `docs/PROGRESS.md` — this entry.
+
+### What could NOT be checked (honest list)
+- **Nothing installed, flashed or committed** (ticket terms). The device build's size/exit code are real; the
+  adoption path has **no glass evidence** — it needs two real adverts agreeing within 120 s while our RTC is
+  empty or behind.
+- **How often real nodes carry a future clock is not measured** (the ticket says so); the fix is a rule change,
+  not a response to an observed attack.
+- The **recovery commands were not run** (BadgeLink not attached to this machine); the `u32` spelling of the
+  NVS writer is unverified here, which is why the blob route is documented.
+- An RTC-boot device that is ALREADY poisoned stays wrong until the RTC is written by hand (one-off build):
+  rule (a) deliberately refuses mesh corrections, which is the trade the ticket asked for.
+- The L2 suite was not re-run: no shared L2 file was touched (`core/clock.*` is this tree's own).
+
+---
+
+## 2026-11-18 · S513 (EST-427) · advert parser review fixes: a bounded copy, flags-aware name, and one dead function deleted
+
+> Written by DeepSeek for ticket EST-427 (fenced Paperclip run: no session start/end, nothing installed, nothing
+> flashed, nothing committed). Code + host tests + build only. **Status: done — all three items green; evidence
+> and real exit codes below.** Read `BRIEF.md` and this file before touching anything.
+
+### What was read (this run)
+- `BRIEF.md` in full and this file from the top (the S513/EST-428 entry and the S506/S503 entries it builds on).
+- `core/mc_identity.h/.cpp`, `core/mc_store.h`, `core/mc_wire.h`, `test/host/test_mc.cpp`, `test/host/run.sh`,
+  `main/map_link.h/.cpp`.
+- Upstream, as the ticket names: `firmware/lib/meshcore/Mesh.cpp:262-290` (the advert branch) and
+  `firmware/lib/meshcore/helpers/AdvertDataHelpers.cpp` (the `AdvertDataParser` constructor).
+
+### 1. STACK OVERFLOW before the signature check — ARMED FIRST, then fixed
+
+**The defect, as the ticket states it:** `app_len = payload_len - 100` can be 84 (`kMaxPayload` 184), but
+`message[]` is `kPubKeyBytes + 4 + kMaxAdvertData = 68`, and the cap was applied only to the length handed to
+`identityVerify`, not to the `memcpy` before it.
+
+**Armed on the unfixed code.** A 186-byte frame was fed through `decode` + `advertParse` (header
+`advert << 2 | flood`, `path_len 0x40`, 184 payload bytes of `0x41`) in the new ASan stage. First ASan line:
+
+    ==302==ERROR: AddressSanitizer: unknown-crash on address 0x78dbd5ef9c54 ...
+    WRITE of size 84 at 0x78dbd5ef9c54 thread T0
+        #1 ... meshcore::advertParse(...) ../../core/mc_identity.cpp:103
+    ...
+    [48, 116) 'message' (line 101) <== Memory access at offset 84 partially overflows this variable
+    ASAN_RUN_EXIT=1
+
+The ordinary (non-ASan) build fails the same way through glibc's fortify check:
+`*** buffer overflow detected ***: terminated`, `MC_RUN_EXIT=134`. Full logs:
+`paperclip-pilot/sweep/est427-asan-unfixed.log`, `est427-mc-unfixed.log`.
+
+**The fix:** `app_len` is clamped to `kMaxAdvertData` **before** the copy, and the clamped value is used for both
+the copy and the verify — exactly upstream `firmware/lib/meshcore/Mesh.cpp:269`
+(`if (app_data_len > MAX_ADVERT_DATA_SIZE) { app_data_len = MAX_ADVERT_DATA_SIZE; }`), cited in a comment next to
+the code. (Status: fixed; green result below.)
+
+### 2. ADVERT NAME IGNORES THE FLAGS — ARMED FIRST, then fixed
+
+**Armed on the unfixed code** (normal build, unbuffered so nothing is lost to the later abort):
+
+    FAIL test_mc.cpp:354  got "p1\x..\x02..." want "EDCT"     <- 8 bytes of lat/lon binary before the name
+    FAIL test_mc.cpp:355  pos.has_position
+    FAIL test_mc.cpp:356  pos.lat_e6 == 46150000
+    FAIL test_mc.cpp:357  pos.lon_e6 == 14990000
+    FAIL test_mc.cpp:368  got "ED" want ""                    <- truncated lat/lon was read as the name
+
+**The fix:** the app_data is parsed the upstream way (`AdvertDataHelpers.cpp`, `AdvertDataParser`): flags, then
+lat+lon (8 bytes, int32 x1e6) when `ADV_LATLON_MASK 0x10`, then 2 bytes when `ADV_FEAT1_MASK 0x20`, then 2 bytes
+when `ADV_FEAT2_MASK 0x40`, then the name when `ADV_NAME_MASK 0x80`. Unlike upstream, **every field is
+bounds-checked against `app_len`**: a truncated field yields no name and no position, never an over-read.
+`advertParse` gained an optional `AdvertPosition*` output (`lat_e6`, `lon_e6`, `has_position`); existing callers
+are unchanged. `core/mc_store.h`'s `Contact` has no spare location fields, so the position is parsed and returned
+only (the ticket's permitted alternative) — nothing in the UI or the store changed.
+
+### 3. DEAD `forget()` DELETED — subtraction only
+
+`main/map_link.cpp:forget()` and its declaration in `main/map_link.h` are gone. Nothing called it:
+
+    $ rg -n "forget" main/ core/
+    rg_exit=1            # no matches at all, before the deletion it was exactly the definition + declaration
+
+It was not merely unused: it took the cache lock and then called `closePack()`, which `fclose()`s the pack `FILE*`
+while the `om-map` worker may be inside a read of that same file outside the lock — a use-after-close waiting for
+its first caller. No other line of the map read path was touched.
+
+### Results (real exit codes)
+
+- `sh test/host/run.sh` → **HOST_SUITE_EXIT=0**. Suites: 192 / 53 / 99 / 65 / 62 / **115** (MeshCore, was 94) /
+  260 (map) / 82 (tx queue) — 0 failures. The MeshCore suite runs twice: normal (`-O2`) and the new
+  **AddressSanitizer + UBSan** stage (`-O1 -g`, Ed25519 C built with the same flags); both report
+  **115 checks, 0 failure(s)**. No `AddressSanitizer` error line appears after the fix (the arm run above is the
+  "before"). Logs: `paperclip-pilot/sweep/est427-host.log`, and a final re-run on the finished tree
+  `est427-host-final.log` → **HOST_SUITE_FINAL_EXIT=0**, **0** `AddressSanitizer` lines.
+- **UBSan noise, stated honestly:** the ASan stage prints **83 `runtime error:` lines, all from the vendored
+  `core/ed25519/{fe,sc,ge}.c`** (intentional left shifts of negative values in the ref10 constant-time code).
+  Grouped: `fe.c` 47, `sc.c` 35, `ge.c` 1; **none from our code or the parser**. They are non-fatal by design
+  (UBSan's default), so the gate is ASan (which aborts) plus the 0-failure summary; I did not patch third-party
+  code to silence them.
+- `make build` → **BUILD_EXIT=0**, no warnings: `application.bin` = **0x15C370 = 1,426,288 B** (32 % of the 2 MB
+  app partition free), +128 B over v37's 1,426,160 B. Log: `paperclip-pilot/sweep/est427-build.log`.
+- L2 suite, untouched: `cd firmware && sh test/host/run.sh` → **L2_SUITE_EXIT=0**. Log:
+  `paperclip-pilot/sweep/est427-l2.log`.
+
+### Files changed
+- `core/mc_identity.h` — the position output type + the three flag constants, `advertParse`'s optional
+  `AdvertPosition*`; the parsing contract comment.
+- `core/mc_identity.cpp` — clamp before the copy (upstream `Mesh.cpp:269`); flags-aware, bounds-checked app_data
+  parse; position returned.
+- `test/host/test_mc.cpp` — `testAdvertFlags()` (four Python-oracle frames) and `testAdvertOversizeFrame()` (186 B).
+- `test/host/run.sh` — the ASan+UBSan MeshCore stage.
+- `main/map_link.h`, `main/map_link.cpp` — `forget()` deleted.
+- `docs/PROGRESS.md` — this entry.
+
+### What could NOT be checked (honest list)
+- **Nothing was installed, flashed or committed** (the ticket's terms): the device build's size and exit code are
+  real, but no ASan run happened on the P4 (host only, as asked).
+- The position is **parsed and returned, not stored or drawn**: `mc_store.Contact` had no spare location fields,
+  so the ticket's "otherwise only parse them" branch is the one taken. The Map still cannot show a marker.
+- The **feat2 (0x40)** branch is implemented but not in the four oracle vectors (the ticket named feat1); it is
+  the same two-byte skip, covered by code inspection and the shared `fields_ok` path, not by a vector.
+- The ASan stage's **UBSan report list is third-party noise** (above); a future UB in our parser is reported but
+  does not abort. Making it abort would mean changing the Ed25519 flags the ticket asked for.
+
+### Next
+Claude reviews and commits; no device install on my side. The Map can consume `AdvertPosition` later (store the
+fields in `Contact` when the Map slice needs them).
+
+---
+
+## 2026-11-18 · S513 (EST-B) · z17 past 2 GiB reads, and the send queue is four slots instead of one (v37)
+
+> Written by DeepSeek for ticket EST-428 (fenced Paperclip run: no session start/end, nothing installed, nothing
+> flashed, nothing committed). Code + host tests + build only. **Version for Claude's install: 37.**
+
+### What was read (this run)
+- `BRIEF.md` in full, and this file from the top (the S506 entry and the S503/S502 entries it builds on).
+- `Projects/pocket-mesh/measurements/tanmatsu-z17-2gib-diag-2026-11-18-S513.log` (the device log behind item 1).
+- `core/map_pack.*`, `core/map_view.h`, `main/map_link.*`, `main/mc_link.*`, `main/chat_page.*`, `main/main.cpp`,
+  `test/host/run.sh`, `test/host/test_map.cpp`, `core/CMakeLists.txt`, `main/CMakeLists.txt`.
+- The drive-prefix evidence: `managed_components/badgeteam__badge-bsp/targets/tanmatsu/badge_bsp_storage.c:248`
+  and the IDF it calls, `/home/slofi/dev/esp-idf-v6.0.2/components/fatfs/vfs/vfs_fat_sdmmc.c:116,147-152`,
+  plus `ffconf.h:282` (`FF_FS_EXFAT 0` → `fsize` is a 32-bit unsigned DWORD, `ff.h:82`) and `ffconf.h:326`
+  (`FF_FS_REENTRANT 1`).
+
+**One thing the ticket expected that was not in the tree:** `docs/PROGRESS.md` had **no S513 entry and no EST-A
+entry** — its newest entry was S506 (2026-11-15), and `git log`'s newest commit is `57e9f2a` (S506). So the EST-A
+ticket's PROGRESS entry was not on disk when this run started, and item 1's evidence was taken from the ticket text
+plus the measurement log above (which **is** on disk). Nothing of EST-A was present to conflict with.
+
+### 1. Z17 PAST 2 GiB: the pack is read through FatFs, and a hole is never silent again
+
+**The defect, as measured** (the log above): `sizeof(off_t) = 4` on the P4 (picolibc, riscv32 → a signed 32-bit
+`long`), `slo17/tiles.pack` is 3,590,722,268 B, Ljubljana z17 70817/46603 (offset 1,181,885,988) read fine, Maribor
+z17 71232/46338 (offset **2,493,062,600**) failed, and a raw `fseek(f, (long)2493062600, SEEK_SET)` returned -1.
+The index is sorted by column, so every z17 record east of roughly 15.35 E was unreadable (~38.6 % of them, the
+first past 2 GiB being record 552,148 at x 71125) and they fell into the failed ring, which is why the map showed
+void at Maribor, Ptuj, Murska Sobota and Krsko.
+
+**The fix (code):**
+- `core/map_pack.*` — new rule `readRangeFor(Entry, ReadRange*)`: an `Entry` (uint64 offset) becomes the two
+  **uint32** values a read call takes, and a record whose `offset + length > 0xFFFFFFFF` is **refused** (it cannot
+  exist on FAT32) instead of being wrapped. This is where the offset stops being allowed to be signed.
+- `main/map_link.cpp` — `tiles.pack` is opened with `f_open(..., FA_READ)` and read with `f_lseek`/`f_read`; the
+  `FIL` lives in the same `OpenPack` as the index and is closed in `closePack()`, so the om-map worker stays the
+  single owner (still two open files at most). `tiles.idx` stays on stdio: ≤ 21.6 MB and read by record number.
+- **No guessed drive letter.** The drive is `'0' + the volume index FatFs handed out at mount` — the BSP's
+  `esp_vfs_fat_sdmmc_mount` call is `badge_bsp_storage.c:248`, and that call makes the drive in
+  `vfs_fat_sdmmc.c:147-152` from `ff_diskio_get_drive()` (the first free `FF_VOLUMES` slot, `:116`). It is `0:`
+  today, but another FAT volume mounted first would move it, so `probeDrive()` **probes** `0:`-`9:` for
+  `/maps/<pack>/tiles.pack`, keeps the one that exists, and logs it: `fat: the slo17 pack is on drive 0: (...)`
+  and then `z17: pack slo17 open on drive 0:, N tiles, 3590722268 B`.
+- **A failure says its offset, once per fill.** `g_read_fail_logged` is reset when a fill starts (and by `probe`),
+  and the first bad read logs
+  `z17 71232/46338: READ FAILED at offset 2493062600 (26000 B, seek 0 read 0 got 0) on drive 0: - logged once per
+  fill`; a refused range logs `offset ... + ... B is past 4 GiB - 1, not a FAT32 tile`. Silence is what hid the
+  holes for a whole session, so the log line is the acceptance evidence, not the picture.
+- **Second probe point at boot** — `probe()` is now `probeOne(z, lat, lon)` per point, and the second point is
+  z17 at **46.5547, 15.6459** (east, past 2 GiB of slo17, per the ticket). Its log line is the same shape as the
+  existing ones, so the boot log proves the fix without opening the Map page.
+
+**Test (host):** `test_map.cpp` gains `test_read_range_above_2gib()` — the exact failed record (z17 71232/46338,
+offset 2,493,062,600) is built as 24 index bytes, decoded, and must come out of `readRangeFor()` as
+`2493062600u` with `(int32_t)` negative (what the old `(long)e.offset` produced on the P4: -1801904696); the four
+out-of-range edges (offset 0xFFFFFFF0 + 0x20, 0xFFFFFFFF + 2, 0xFFFFFFF0 + 0x10, length 0) are refused, the
+legit last tile just under the limit is accepted intact, and a null output pointer is refused.
+
+### 2. SEND REQUESTS: one unlocked slot → a queue of four copies
+
+**The defect:** `queueText` ran on the main task and wrote `g_pending_text` while the radio task could be inside
+`doText` reading the same buffer (≈0.5 s of airtime for 50 B at SF8 / 62.5 kHz), so a second Enter could transmit a
+TORN text; and a second request REPLACED the first, so a message could vanish after the composer had cleared, with
+only a serial warning.
+
+**The fix (code):**
+- `core/tx_queue.*` (**new**) — the rules, free of FreeRTOS so the host tests run the same code: 4 slots,
+  FIFO, push **copies by value** (kind, channel, sender, text), `pushText`/`pushAdvert` return **false when full**
+  and never replace anything, `pushAdvert` cannot displace a text, `hasText()` lets the schedule stay out of the
+  way. Created once in `begin()`.
+- `main/mc_link.cpp` — `g_pending*` globals **deleted**; `g_txq` (the ring) plus `g_tx_lock`, a mutex created once
+  in `begin()`. `queueText`/`queueAdvert` push under the lock (microseconds — never across a transmission) and
+  return false when full; `serviceRequests()` pops **one** request per loop (so a burst cannot starve receive) and
+  logs `tx: N more request(s) queued`. The scheduled advert is pushed only when `!hasText()` and only to the back,
+  so it can never displace or delay a message. `main/mc_link.h`'s contract comment is updated to match.
+  *Deviation, stated on purpose:* the ticket said "a FreeRTOS queue"; this is the same semantics (4, by value,
+  non-blocking, refuse-when-full) as a pure ring guarded by a mutex, because an `xQueueCreate` version could not be
+  host-tested. If Claude prefers the literal `xQueueCreate`, it is a ~10-line swap and the rules file stays.
+- `main/main.cpp` — on `queueText` false the composer is **kept** (it always was) and a 3 s notice says
+  **"radio busy, not sent"**; a later successful queue clears it.
+- `main/chat_page.*` — `ChatView::notice`, drawn in the page head's existing right-hand status slot (that page has
+  no separate toast widget; this is the one place a short-lived line already lives, so the message list and the
+  composer keep their geometry).
+
+**Test (host):** `test/host/test_txqueue.cpp` (**new**, 82 checks): four accepted + the fifth refused with the four
+first ones intact, FIFO across a ring wrap, a request is a copy (rewriting the caller's buffer after the push
+changes nothing), an advert queued behind a text and refused when the queue is full of texts, and the edges (empty
+text refused, over-long text cut and terminated).
+
+### Results (real exit codes)
+- `sh test/host/run.sh` → **exit 0**: 192 / 53 / 99 / 65 / 62 / 94 / **260** (map, was 245) / **82** (tx queue)
+  checks, 0 failures. Log: `paperclip-pilot/sweep/est428-host.log`.
+- `make build` → **exit 0**, application.bin **0x15C2F0 = 1,426,160 B** (32 % of the 2 MB app partition free).
+  Log: `paperclip-pilot/sweep/est428-build2.log`.
+
+### Files changed
+- new: `core/tx_queue.h`, `core/tx_queue.cpp`, `test/host/test_txqueue.cpp`
+- changed: `core/map_pack.h`, `core/map_pack.cpp`, `core/CMakeLists.txt`, `main/map_link.cpp`, `main/mc_link.h`,
+  `main/mc_link.cpp`, `main/main.cpp`, `main/chat_page.h`, `main/chat_page.cpp`, `test/host/test_map.cpp`,
+  `test/host/run.sh`
+
+### What could NOT be checked (honest list)
+- **Nothing was built onto the device, flashed, installed or committed.** So the two device claims are unproven by
+  me: that `f_lseek(2,493,062,600)` returns FR_OK on the real card, and that the boot log prints the z17 Maribor
+  line with real pixels. The second probe point exists exactly so Claude/Filip can read that off the boot log.
+- **The drive letter is `0:` on this build only by measurement of the BSP/IDF code paths, not on the device** — the
+  probe makes the code right either way, but the line `fat: the slo17 pack is on drive ?:` has never been printed.
+- **`FF_FS_EXFAT 0` is a build fact read from `ffconf.h:282`, not a runtime check.** If a future sdkconfig enables
+  exFAT, `FSIZE_t` becomes a QWORD and `readRangeFor()`'s 4 GiB refusal becomes stricter than necessary (safe, but
+  worth re-reading then). The 32 GB FAT32 card is the intended configuration.
+- **The notice is a host-render/intent, not seen on the glass**: the page-head slot is 1 line and "radio busy, not
+  sent" fits at the head's hint size, but that is a sizes argument, not a screenshot.
+- **No L2 build was run**: nothing under `firmware/` was touched, so the L2 cannot have been affected (the shared
+  `theme.h` include is read-only and unchanged).
+- **Rule 9 note:** the ticket asked for the Maribor coordinate as a probe point and the tree already carried a real
+  coordinate in `main.cpp`'s first Map view; this entry and the code therefore name both, as instructed, and nothing
+  else geographic was added.
+
+### Next
+1. Claude installs **v37** and reads the boot log for the two lines: `fat: the slo17 pack is on drive ?:` /
+   `z17: pack slo17 open ... 3590722268 B`, then `z17 tile 71232/46338 -> 256x256 ... px0 0x....`
+2. On the glass: pan east at z17 (Maribor, Ptuj, Murska Sobota, Krsko) and confirm terrain instead of void; then
+   type two messages quickly and confirm both leave in order, and that a third shows "radio busy, not sent" with
+   the text still in the composer.
+3. Then the rest of step 6: RPTR, Settings, the clean card unmount.
+
+---
+
 ## 2026-11-15 · S506 · the zoom no longer freezes, and the hardware codec is used only when it proves itself (v34 → v36)
 
 > Written by DeepSeek, S506, with Filip at the device. Two asks in one session: *"also fix the zoom lag problem,

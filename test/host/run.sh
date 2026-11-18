@@ -15,8 +15,11 @@ STORE="$(mktemp /tmp/tm-store.XXXXXX)"
 HIST="$(mktemp /tmp/tm-history.XXXXXX)"
 LAYOUT="$(mktemp /tmp/tm-layout.XXXXXX)"
 MAP="$(mktemp /tmp/tm-map.XXXXXX)"
+TXQ="$(mktemp /tmp/tm-txq.XXXXXX)"
+MCASAN="$(mktemp /tmp/tm-mc-asan.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP"; rm -rf "$ED"' EXIT
+EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$MCASAN"; rm -rf "$ED" "$EDASAN"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -68,6 +71,23 @@ done
     -o "$MC"
 "$MC"
 
+# The SAME MeshCore suite under AddressSanitizer + UBSan (S513/EST-427). The advert parser copies lengths taken
+# straight off the air, so a bounds mistake there is a stack overflow reachable by any transmitter — this stage
+# turns that class into a red test instead of a field report. -O1 -g keeps the report's line numbers useful; the
+# vendored Ed25519 C is built with the same flags so the two objects agree on the instrumented ABI.
+for f in ../../core/ed25519/*.c; do
+    "$CC" -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -c "$f" -o "$EDASAN/$(basename "$f" .c).o"
+done
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I ../../core -I ../../core/ed25519 \
+    test_mc.cpp \
+    ../../core/mc_wire.cpp ../../core/mc_channels.cpp ../../core/mc_crypto_psa.cpp \
+    ../../core/mc_identity.cpp \
+    "$EDASAN"/*.o \
+    -lmbedcrypto \
+    -o "$MCASAN"
+ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$MCASAN"
+
 # The map pack rules (S503, step 6): record parse, binary search over the index, zoom -> pack, slippy maths.
 g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
     test_map.cpp \
@@ -75,3 +95,11 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
     -lm \
     -o "$MAP"
 "$MAP"
+
+# The send queue's rules (S513): four accepted, the fifth refused, FIFO, a copy not a pointer, and an advert that
+# never displaces a text. The device wraps this same ring in a mutex, so this is the code that runs there.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_txqueue.cpp \
+    ../../core/tx_queue.cpp \
+    -o "$TXQ"
+"$TXQ"

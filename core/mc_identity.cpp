@@ -83,7 +83,7 @@ size_t advertBuild(const Identity& id, uint32_t timestamp, const char* name, uin
 }
 
 bool advertParse(const View& pkt, uint8_t pub_out[kPubKeyBytes], uint32_t* timestamp, char* name,
-                 size_t name_size, uint8_t* type_out) {
+                 size_t name_size, uint8_t* type_out, AdvertPosition* position_out) {
     if (pkt.type() != kTypeAdvert) return false;
     if (pkt.payload_len < kPubKeyBytes + 4 + kSignatureBytes + 1) return false;
     if (name == nullptr || name_size < 2) return false;
@@ -92,7 +92,14 @@ bool advertParse(const View& pkt, uint8_t pub_out[kPubKeyBytes], uint32_t* times
     const uint8_t* ts  = pub + kPubKeyBytes;
     const uint8_t* sig = ts + 4;
     const uint8_t* app = sig + kSignatureBytes;
-    const size_t   app_len = (size_t)pkt.payload_len - (kPubKeyBytes + 4 + kSignatureBytes);
+    const size_t   raw_app_len = (size_t)pkt.payload_len - (kPubKeyBytes + 4 + kSignatureBytes);
+
+    // CLAMP BEFORE THE COPY, exactly as upstream MeshCore does it (firmware/lib/meshcore/Mesh.cpp:269:
+    //   if (app_data_len > MAX_ADVERT_DATA_SIZE) { app_data_len = MAX_ADVERT_DATA_SIZE; }
+    // The payload length comes straight off the air (up to kMaxPayload 184 -> app_len 84), while `message` is
+    // kPubKeyBytes + 4 + kMaxAdvertData = 68 bytes. Without this clamp any LoRa transmitter can overflow the
+    // stack before the signature is even checked (proven under ASan, S513/EST-427).
+    const size_t app_len = raw_app_len > kMaxAdvertData ? kMaxAdvertData : raw_app_len;
 
     const uint32_t stamp = (uint32_t)ts[0] | ((uint32_t)ts[1] << 8) | ((uint32_t)ts[2] << 16) |
                            ((uint32_t)ts[3] << 24);
@@ -100,19 +107,45 @@ bool advertParse(const View& pkt, uint8_t pub_out[kPubKeyBytes], uint32_t* times
     uint8_t message[kPubKeyBytes + 4 + kMaxAdvertData];
     memcpy(message, pub, kPubKeyBytes + 4);
     memcpy(message + kPubKeyBytes + 4, app, app_len);
-    if (!identityVerify(pub, message, kPubKeyBytes + 4 + (app_len > kMaxAdvertData ? kMaxAdvertData : app_len),
-                        sig))
-        return false;
+    // The clamped length is used for the verify too, so the signature is checked over exactly the bytes copied.
+    if (!identityVerify(pub, message, kPubKeyBytes + 4 + app_len, sig)) return false;
 
-    // app_data: flags byte, then (when the name mask is set) the name, no NUL.
+    // app_data, parsed the upstream way (firmware/lib/meshcore/helpers/AdvertDataHelpers.cpp, the
+    // AdvertDataParser constructor): flags, then lat+lon (8 bytes) if ADV_LATLON_MASK, then 2 bytes if
+    // ADV_FEAT1_MASK, then 2 bytes if ADV_FEAT2_MASK, then the name if ADV_NAME_MASK. Unlike upstream, every
+    // field is bounds-checked against app_len: a truncated field means no name and no position, never an over-read.
     name[0] = '\0';
-    if ((app[0] & kAdvNameMask) != 0 && app_len > 1) {
-        size_t n = app_len - 1;
+    const uint8_t flags = app[0];
+    size_t        off   = 1;
+    bool          fields_ok = true;
+    int32_t       lat_e6 = 0;
+    int32_t       lon_e6 = 0;
+    bool          has_position = false;
+
+    if ((flags & kAdvLatLonMask) != 0) {
+        if (off + 8 <= app_len) {
+            memcpy(&lat_e6, &app[off], 4);   // MeshCore stores these with memcpy: little-endian on our targets
+            off += 4;
+            memcpy(&lon_e6, &app[off], 4);
+            off += 4;
+            has_position = true;
+        } else {
+            fields_ok = false;               // truncated lat/lon: give up on the rest of app_data
+        }
+    }
+    if (fields_ok && (flags & kAdvFeat1Mask) != 0) {
+        if (off + 2 <= app_len) off += 2; else fields_ok = false;
+    }
+    if (fields_ok && (flags & kAdvFeat2Mask) != 0) {
+        if (off + 2 <= app_len) off += 2; else fields_ok = false;
+    }
+    if (fields_ok && (flags & kAdvNameMask) != 0 && app_len > off) {
+        size_t n = app_len - off;
         if (n > name_size - 1) n = name_size - 1;
-        memcpy(name, &app[1], n);
+        memcpy(name, &app[off], n);
         name[n] = '\0';
     }
-    const uint8_t type = (uint8_t)(app[0] & 0x0F);
+    const uint8_t type = (uint8_t)(flags & 0x0F);
     // The caller decides: a chat app gets chat nodes only, the Nodes list gets every verified type.
     if (type_out == nullptr && type != kAdvTypeChat) return false;   // verified, but not our kind
     if (type == 0) return false;                                     // no type at all: not a node advert
@@ -120,6 +153,11 @@ bool advertParse(const View& pkt, uint8_t pub_out[kPubKeyBytes], uint32_t* times
 
     if (pub_out != nullptr) memcpy(pub_out, pub, kPubKeyBytes);
     if (timestamp != nullptr) *timestamp = stamp;
+    if (position_out != nullptr) {
+        position_out->lat_e6       = lat_e6;
+        position_out->lon_e6       = lon_e6;
+        position_out->has_position = has_position;
+    }
     return true;
 }
 
