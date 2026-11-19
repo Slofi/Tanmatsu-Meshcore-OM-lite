@@ -81,6 +81,17 @@ void drawFoundRows(Screen& s, const RptrView& v, int x0, int x1, int top) {
             drawText(s, Face::Hint, row_right - 44, y0 + 20, "saved", kAcc);
         }
     }
+    // S514 (Claude; Filip: "add a slider (indicator) to the RPTR list, which is longer than the screen"): the
+    // Nodes list's own scroll bar, same place, width and colours (nodes_page.cpp), so the two lists read alike.
+    if (count > visible) {
+        const int track_top = top, track_bot = kTmH - kTmHintH - 8;
+        const int track_h   = track_bot - track_top;
+        const int thumb_h   = track_h * visible / count;
+        const int max_first = count - visible;
+        const int thumb_y   = track_top + (max_first > 0 ? (track_h - thumb_h) * s_rptr_first / max_first : 0);
+        s.fillRect(x1 - 6, track_top, 3, track_h, kPanel);
+        s.fillRect(x1 - 6, thumb_y, 3, thumb_h < kTmScrollMin ? kTmScrollMin : thumb_h, kAcc);
+    }
 }
 
 void drawListDetail(Screen& s, const RptrView& v, int x, int rw, int top) {
