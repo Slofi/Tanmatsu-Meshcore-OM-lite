@@ -174,7 +174,9 @@ void test_advert_schedule_and_manual_path() {
   CHECK(!tm::advertScheduleDue(0, 0, false));
   CHECK(!tm::advertScheduleDue(0, 999999, true));
   // 3 h: due on the first pass, then only once the interval has elapsed.
-  CHECK(tm::advertScheduleDue(10800, 0, false));
+  CHECK(!tm::advertScheduleDue(10800, 0, false));      // S514: no advert at boot any more
+  CHECK(!tm::advertScheduleDue(10800, 10799, false));  // ... nor before one interval since boot
+  CHECK(tm::advertScheduleDue(10800, 10800, false));   // the first one: one interval after start
   CHECK(!tm::advertScheduleDue(10800, 10799, true));
   CHECK(tm::advertScheduleDue(10800, 10800, true));
   CHECK(tm::advertScheduleDue(10800, 99999, true));

@@ -1528,17 +1528,21 @@ void serviceRequests() {
     // nothing the user typed is waiting — a scheduled advert must never displace, or delay, a message.
     // S513/EST-435: it asks the SAME 5 s rule as the key, so a manual advert two seconds ago also defers the
     // schedule. A refusal here is silent on purpose: nothing was pressed, so there is nothing to tell.
+    // S514 (Claude, Filip: "disable the auto-advert on start-up"): esp_timer counts from boot, so 0 here means
+    // "measure from boot": the first scheduled advert goes out one interval after start, never at boot. The
+    // decision is the host-tested core rule (core/settings.h advertScheduleDue), not a second copy of it.
     static int64_t s_last_advert_us = 0;
-    // Off (0) means NO scheduled advert at all; the manual paths still work. `s_last_advert_us == 0` is the
-    // first pass after a boot, so a non-Off interval announces immediately, as before.
-    if (g_has_id && g_advint_s > 0) {
-        const int64_t interval_us = (int64_t)g_advint_s * 1000000LL;
-        if (s_last_advert_us == 0 || esp_timer_get_time() - s_last_advert_us >= interval_us) {
+    static bool    s_ever_sched     = false;
+    if (g_has_id) {
+        const int64_t  since_us = esp_timer_get_time() - s_last_advert_us;
+        const uint32_t since_s  = since_us > 0 ? (uint32_t)(since_us / 1000000LL) : 0u;
+        if (tm::advertScheduleDue(g_advint_s, since_s, s_ever_sched)) {
             xSemaphoreTake(g_tx_lock, portMAX_DELAY);
             if (advertRequest(g_advert_gate, monotonicMs()).verdict == AdvertVerdict::Send && !g_txq.hasText() &&
                 g_txq.pushAdvert(g_node_name)) {
                 advertQueued(g_advert_gate);
                 s_last_advert_us = esp_timer_get_time();
+                s_ever_sched     = true;
             }
             xSemaphoreGive(g_tx_lock);
         }

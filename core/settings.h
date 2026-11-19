@@ -665,16 +665,18 @@ constexpr AdvertInterval advertIntervalCycle(AdvertInterval v) {
   return (AdvertInterval)((n + 1) % kAdvertIntervalCount);
 }
 
-// May the SCHEDULE queue an advert now? Off (interval 0) is never due. The first scheduled advert after a
-// boot is due immediately (`ever` false); after that one interval must have passed. This is only the
-// schedule: the 5 s gate is core/advert_rule.h and still applies to both paths.
+// May the SCHEDULE queue an advert now? Off (interval 0) is never due. S514 (Filip: "disable the auto-advert on
+// start-up"): there is NO advert at boot any more; `elapsed_s` is counted from the last scheduled advert, or from
+// boot when there has been none, so the first one goes out one full interval after the app starts. `ever` is kept
+// for the callers' readability and no longer changes the answer. The 'a' key and Settings > Advert now are not
+// the schedule and still send at once. The 5 s gate is core/advert_rule.h and still applies to both paths.
 constexpr bool advertScheduleDue(uint32_t interval_s, uint32_t elapsed_s, bool ever) {
+  (void)ever;
   if (interval_s == 0) return false;
-  if (!ever) return true;
   return elapsed_s >= interval_s;
 }
 
 // The image's version, shown in General > DEVICE. One constant: the next ticket bumps this line.
-constexpr const char* kAppVersion = "44";
+constexpr const char* kAppVersion = "45";
 
 }  // namespace tm
