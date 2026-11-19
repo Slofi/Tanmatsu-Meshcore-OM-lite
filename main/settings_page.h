@@ -74,6 +74,8 @@ struct SettingsView {
   const char* confirm_text = "";
   const char* confirm_apply = "Apply";
   bool confirm_danger = false;
+  // S515/EST-467: the sheet opens with Cancel focused; Left/Right move it. The drawer shows where the focus is.
+  bool confirm_cancel = true;
 };
 
 // Draws a whole Settings frame into `s` (does not present it).

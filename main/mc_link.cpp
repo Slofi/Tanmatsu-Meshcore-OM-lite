@@ -1647,6 +1647,13 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
         // S514/EST-450: a DM to us, after the seen-ring check above dropped our own echo and a
         // duplicate flood copy. Played before the ACK reply is queued so the sound never delays it.
         om::audioout::playEvent(tm::soundcfg::Event::Dm);
+        // S515/EST-467: the same message as a chrome pop-up. The READER (main task) applies "not while this
+        // same chat is open" and "not while the screen is off"; our own echo never got here (seen ring).
+        {
+            char head[64];
+            snprintf(head, sizeof(head), "DM \xc2\xb7 %s", peer_name);
+            om::ui::msgPopupOffer(head, dm.text, om::ui::PopupChat::Dm, 0, peer_pub);
+        }
 
         if (!dm.ack_valid) {
             // CLI_DATA / CLI_COMMAND are shown but never acknowledged (BaseChatMesh.cpp:244): there is no ACK
@@ -1816,6 +1823,13 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
     // S514/EST-450: a live channel text from someone else. Our own echo and a duplicate flood copy
     // were dropped by the seen ring before this point, so they can never reach the speaker.
     om::audioout::playEvent(tm::soundcfg::Event::Message);
+    // S515/EST-467: the pop-up's first line is the channel and the sender, then the text. The main task
+    // decides whether this same chat is already on screen; the radio task knows nothing of pages.
+    {
+        char head[64];
+        snprintf(head, sizeof(head), "#%.20s \xc2\xb7 %.20s", g_set.ch[idx].name, sender);
+        om::ui::msgPopupOffer(head, text, om::ui::PopupChat::Channel, (uint8_t)idx, nullptr);
+    }
 }
 
 // Performed by the radio task only.

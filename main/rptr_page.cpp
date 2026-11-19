@@ -298,11 +298,11 @@ void drawRptr(Screen& s, const RptrView& v) {
     int n = 0;
     hints[n++] = {"up/dn", "move"};
     if (v.mode == RptrMode::List) {
-        hints[n++] = {"ret", "log in"};
+        hints[n++] = {"Enter", "log in"};
         hints[n++] = {"s", "scan"};
         hints[n++] = {"esc", "back"};
     } else if (v.mode == RptrMode::Login) {
-        hints[n++] = {"ret", "send"};
+        hints[n++] = {"Enter", "send"};
         hints[n++] = {"esc", "back"};
     } else {
         hints[n++] = {"r", "refresh"};

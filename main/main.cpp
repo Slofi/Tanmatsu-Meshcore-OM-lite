@@ -559,7 +559,7 @@ const tm::SettingsSection* generalSettings(int* count) {
 // removed or a pack pulled out shows up on the next frame without a restart.
 
 // ---- S514/EST-447: the NODES section ------------------------------------------------------------------
-// "Remove a contact" is a LIST sub-page (a SubPage row, built from the live table) and "Clear all contacts"
+// "Remove from radio" is a LIST sub-page (a SubPage row, built from the live table) and "Clear all contacts"
 // raises the same confirm sheet; both destructive paths are performed in the Settings key branch, where the
 // frame that owns the sheet lives. The notice row is a plain toggle through its handler.
 enum : uint16_t {
@@ -604,8 +604,8 @@ static const tm::SettingRow kOmNodesRows[] = {
     {tm::SettingKind::Cycle, kNodesRowHeard, "Add heard nodes to the radio", "", nodesHeardValue,
      nodesCycleHeard},
     {tm::SettingKind::Info, kNodesRowStores, "Stored nodes", "", nodesStoresValue, nullptr},
-    {tm::SettingKind::Action, kNodesRowClearRadio, "Clear radio (archive kept)"},
-    {tm::SettingKind::SubPage, kNodesRowRemove, "Remove a contact"},
+    {tm::SettingKind::Action, kNodesRowClearRadio, "Clear radio (SD keeps them)"},
+    {tm::SettingKind::SubPage, kNodesRowRemove, "Remove from radio"},
     {tm::SettingKind::Action, kNodesRowClear, "Clear all contacts"},
     {tm::SettingKind::Toggle, kNodesRowNotice, "New-node notice", "", nodesNoticeValue, nodesToggleNotice},
 };
@@ -728,7 +728,7 @@ enum : uint16_t {
 enum class ChatSub : uint8_t { None = 0, Channel, Scope, AddKey, KeyShown };
 enum class ChatField : uint8_t { None = 0, Tag, KeyName, KeyB64, ScopeRegion, Rename };
 enum class ConfirmTarget : uint8_t { Name = 0, RemoveChannel, ShowKey, RemoveContact, ClearContacts, ForgetRptr,
-                                     DeleteEverywhere, ClearRadio };
+                                     DeleteEverywhere, ClearRadio, RemoveFromRadio };
 
 // S514/EST-453: the RPTR page's UI state. The link owns the found list, the login machine and the status;
 // these are only where the cursor and the typed password are.
@@ -909,7 +909,7 @@ int buildNodesSubRows() {
     for (int i = 0; i < count && n < (int)kNodesSettingsRows; ++i) {
         const int idx = order[i];
         const om::mc::Contact& c = cs.c[idx];
-        // S515/EST-465: this list is the RADIO list (what "Remove a contact" can act on), not the whole table.
+        // S515/EST-465: this list is the RADIO list (what "Remove from radio" can act on), not the whole table.
         // Before the two-store split the table WAS the radio, so it listed the same nodes; since EST-463 the
         // table also holds the archive, and listing those here would have made this page a second Nodes page.
         if (!c.in_radio) continue;
@@ -1561,7 +1561,7 @@ extern "C" void app_main(void) {
             int sn = 0;
             sv.sections      = nodesSubSections(&sn);
             sv.section_count = sn;
-            sv.sub_title     = "Remove a contact";
+            sv.sub_title     = "Remove from radio";
             sv.focus         = g_nodes_sub_focus;
             sv.scroll        = g_nodes_sub_scroll;
         } else if (settings_frame.subPage() && g_chat_sub != ChatSub::None) {
@@ -1577,6 +1577,7 @@ extern "C" void app_main(void) {
         sv.confirm_text  = g_confirm_text;
         sv.confirm_apply = g_confirm_apply;
         sv.confirm_danger = g_confirm_danger;
+        sv.confirm_cancel = settings_frame.confirm_cancel;
         om::ui::drawSettings(g_screen, sv);
         if (sv.confirm) om::ui::drawConfirmSheet(g_screen, sv);
     };
@@ -1780,18 +1781,25 @@ extern "C" void app_main(void) {
     // question is up; the APPLY path removes by the store index captured here, and contactRemoveAt() refuses
     // an index that no longer exists rather than removing a different row.
     auto nodesSubAction = [&](uint16_t id) {
-        char name[om::mc::kNameBytes] = {0};
+        char    name[om::mc::kNameBytes] = {0};
+        uint8_t pub[32]                  = {0};
         {
             om::mc::StoreLock l;
             om::mc::ContactStore& cs = om::mc::contacts();
-            if ((size_t)id < cs.count) snprintf(name, sizeof(name), "%s", cs.c[id].name);
+            if ((size_t)id < cs.count) {
+                snprintf(name, sizeof(name), "%s", cs.c[id].name);
+                memcpy(pub, cs.c[id].pub, sizeof(pub));
+            }
         }
         if (name[0] == '\0') snprintf(name, sizeof(name), "this contact");
-        g_confirm_target  = ConfirmTarget::RemoveContact;
-        g_confirm_contact = (int)id;
-        snprintf(g_confirm_title, sizeof(g_confirm_title), "Remove contact");
+        // S515/EST-467 (Filip: "'Remov a contact' should specify it is removed from the radio"):
+        // this is the RADIO list, so the row takes the node OUT OF THE RADIO and leaves it on the SD card.
+        // Before this it called contactsRemove(), which deleted the whole row — the node did not stay.
+        g_confirm_target = ConfirmTarget::RemoveFromRadio;
+        memcpy(g_confirm_pub, pub, sizeof(g_confirm_pub));
+        snprintf(g_confirm_title, sizeof(g_confirm_title), "Remove from radio");
         snprintf(g_confirm_text, sizeof(g_confirm_text),
-                 "Remove %s? A DM from it cannot be opened until it advertises again.", name);
+                 "Remove %s from the radio? It stays on the SD card.", name);
         snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Remove");
         g_confirm_danger = true;
         settings_frame.beginConfirm(g_nodes_sub_focus);
@@ -1819,7 +1827,7 @@ extern "C" void app_main(void) {
         settings_frame.beginConfirm(focus_row);
     };
 
-    // S515/EST-465: "Clear radio (archive kept)". The APPLY path moves the marks, never the rows, so the
+    // S515/EST-465: "Clear radio (SD keeps them)". The APPLY path moves the marks, never the rows, so the
     // archive keeps every node and every DM/route still works.
     auto raiseClearRadio = [&](int focus_row) {
         size_t radio = 0;
@@ -1831,7 +1839,7 @@ extern "C" void app_main(void) {
         g_confirm_target = ConfirmTarget::ClearRadio;
         snprintf(g_confirm_title, sizeof(g_confirm_title), "Clear radio");
         snprintf(g_confirm_text, sizeof(g_confirm_text),
-                 "Move all %u radio nodes to the archive? The archive keeps them all.", (unsigned)radio);
+                 "Move all %u radio nodes to the SD card? The SD card keeps them all.", (unsigned)radio);
         snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Clear radio");
         g_confirm_danger = true;
         settings_frame.beginConfirm(focus_row);
@@ -1946,6 +1954,7 @@ extern "C" void app_main(void) {
             sv.confirm_text   = g_confirm_text;
             sv.confirm_apply  = g_confirm_apply;
             sv.confirm_danger = g_confirm_danger;
+        sv.confirm_cancel = settings_frame.confirm_cancel;
             om::ui::drawConfirmSheet(g_screen, sv);
         }
     };
@@ -2572,6 +2581,10 @@ extern "C" void app_main(void) {
                         ev.args_action.state ? om::ui::ScreenEv::PowerPress : om::ui::ScreenEv::PowerRelease);
                     if (act == om::ui::ScreenAct::Off) {
                         screenLightsOff();
+                        // S515/EST-467: a pop-up is not shown while the screen is off, and it is not kept
+                        // for later. Polling with screen_off discards the live one (and any pending one).
+                        (void)om::ui::msgPopupPoll((uint32_t)(esp_timer_get_time() / 1000), true, false,
+                                                   om::ui::PopupChat::None, 0, nullptr);
                         ESP_LOGI(TAG, "[screen] off");
                     } else if (act == om::ui::ScreenAct::OnByPower) {
                         screenLightsOn();
@@ -2588,7 +2601,17 @@ extern "C" void app_main(void) {
                 continue;   // a key while locked does NOTHING
             }
             const tm::Page page_now = core.router().current();
-            const tm::Key  k        = mapKey(ev);
+            tm::Key        k        = mapKey(ev);
+            // S515/EST-467: the new-message pop-up owns the FIRST key after it appears. It dismisses the
+            // pop-up and the key is SWALLOWED — `k = None` means no page branch below can see it, so "any
+            // button dismisses it and doesnt do anything else on that page", symbol keys included.
+            if ((ev.type == INPUT_EVENT_TYPE_NAVIGATION || ev.type == INPUT_EVENT_TYPE_KEYBOARD ||
+                 ev.type == INPUT_EVENT_TYPE_SCANCODE) &&
+                om::ui::msgPopupKey()) {
+                ESP_LOGI(TAG, "[popup] dismissed by a key (swallowed)");
+                dirty = true;
+                k     = tm::Key::None;
+            }
             if (k != tm::Key::None) {
                 bool handled = false;
 
@@ -2869,10 +2892,13 @@ extern "C" void app_main(void) {
                         if (volume_key) {
                             // Handled above: the focused row did not move.
                         } else if (settings_frame.confirmOpen()) {
-                            // The shared sheet owns every key: Enter = Apply, Esc = Cancel, everything else is
-                            // swallowed so a held arrow cannot move the page behind the question.
+                            // The shared sheet owns every key: it opens on Cancel (S515/EST-467), Left/Right
+                            // move its focus, Enter chooses the focused button and Esc always cancels. Every
+                            // other key is swallowed so a held arrow cannot move the page behind the question.
                             const tm::SetKey sk = (k == tm::Key::Enter) ? tm::SetKey::Enter
                                                    : (k == tm::Key::Esc) ? tm::SetKey::Esc
+                                                   : (k == tm::Key::Left) ? tm::SetKey::Left
+                                                   : (k == tm::Key::Right) ? tm::SetKey::Right
                                                                          : tm::SetKey::None;
                             const tm::SettingsKeyResult r =
                                 tm::settingsKey(settings_frame, sk, nullptr, 0);
@@ -2911,6 +2937,17 @@ extern "C" void app_main(void) {
                                         om::ui::noticeSet("Contact not removed", 3000);
                                     }
                                     closeNodesPage();
+                                } else if (g_confirm_target == ConfirmTarget::RemoveFromRadio) {
+                                    // S515/EST-467: the Settings › NODES list is the RADIO list. Take the node
+                                    // out of the radio only; the row (and its SD copy) stays.
+                                    uint8_t pub[32];
+                                    memcpy(pub, g_confirm_pub, sizeof(pub));
+                                    if (om::mc::nodeRemoveFromRadio(pub) == om::mc::RadioResult::Ok) {
+                                        om::ui::noticeSet(om::ui::nodeRemovedFromRadioNotice(), 3000);
+                                    } else {
+                                        om::ui::noticeSet("Not in the radio; nothing changed", 3000);
+                                    }
+                                    closeNodesPage();
                                 } else if (g_confirm_target == ConfirmTarget::ForgetRptr) {
                                     om::rptrlink::forgetAllPasswords();
                                     om::ui::noticeSet("Remembered passwords forgotten", 3000);
@@ -2926,7 +2963,7 @@ extern "C" void app_main(void) {
                                 } else if (g_confirm_target == ConfirmTarget::ClearRadio) {
                                     const size_t moved = om::mc::nodeClearRadio();
                                     if (moved > 0)
-                                        om::ui::noticeSet("Radio cleared; the archive keeps every node", 3000);
+                                        om::ui::noticeSet("Radio cleared; the SD card keeps every node", 3000);
                                     else
                                         om::ui::noticeSet("The radio is already empty", 3000);
                                 } else if (om::mc::setNodeName(settings_pending_name)) {
@@ -3267,6 +3304,8 @@ extern "C" void app_main(void) {
                         dirty   = true;
                         const tm::SetKey sk = (k == tm::Key::Enter) ? tm::SetKey::Enter
                                                : (k == tm::Key::Esc) ? tm::SetKey::Esc
+                                               : (k == tm::Key::Left) ? tm::SetKey::Left
+                                               : (k == tm::Key::Right) ? tm::SetKey::Right
                                                                      : tm::SetKey::None;
                         const tm::SettingsKeyResult r = tm::settingsKey(settings_frame, sk, nullptr, 0);
                         if (r.event == tm::SettingsEvent::ConfirmApplied) {
@@ -3284,7 +3323,7 @@ extern "C" void app_main(void) {
                                 memcpy(pub, g_confirm_pub, sizeof(pub));
                                 const int old_focus = nodes_focus;
                                 if (om::mc::nodeDeleteEverywhere(pub)) {
-                                    om::ui::noticeSet("Deleted from the radio and the archive; its DM history stays",
+                                    om::ui::noticeSet("Deleted from the radio and the SD card; its DM history stays",
                                                       3000);
                                 } else {
                                     om::ui::noticeSet("Node not deleted", 3000);
@@ -3389,7 +3428,7 @@ extern "C" void app_main(void) {
                                 }
                                 case om::ui::NodeAction::AddToRadio: {
                                     // Filip's rule 2: a FULL radio refuses and NOTHING changes. The sheet stays
-                                    // up so the row flips to "Move to archive" on the next frame.
+                                    // up so the row flips to "Move to SD" on the next frame.
                                     uint8_t pub[32];
                                     if (nodeMenuPub(pub)) {
                                         const om::mc::RadioResult r = om::mc::nodeAddToRadio(pub);
@@ -3412,7 +3451,7 @@ extern "C" void app_main(void) {
                                         if (r == om::mc::RadioResult::Ok)
                                             om::ui::noticeSet(om::ui::nodeMovedToArchiveNotice(), 3000);
                                         else if (r == om::mc::RadioResult::AlreadyIn)
-                                            om::ui::noticeSet("Already in the archive", 2500);
+                                            om::ui::noticeSet("Already on the SD card", 2500);
                                     }
                                     break;
                                 }
@@ -3637,6 +3676,29 @@ extern "C" void app_main(void) {
         // A tile the worker finished: repaint, so the map fills in from the centre out while the keys stay live.
         if (om::maplink::takeLanded() && core.router().current() == tm::Page::Map) dirty = true;
         if (om::ui::noticeNeedsRepaint()) dirty = true;   // S513 (Claude): a notice set by the radio task, or one that ran out
+
+        // ---- S515/EST-467: the new-message pop-up's rules, on the MAIN task (core/msg_popup.h decides).
+        // The open chat's identity is passed in so "not while that same chat is on screen" is a comparison,
+        // not a page lookup; screen-off drops a message instead of queueing it for later.
+        {
+            const tm::Page pnow      = core.router().current();
+            const bool     chat_now  = (pnow == tm::Page::Chat && chat_open);
+            om::ui::PopupChat pchat  = om::ui::PopupChat::None;
+            uint8_t           pchan  = 0;
+            const uint8_t*    ppeer  = nullptr;
+            if (chat_now) {
+                if (chat_dm_open) {
+                    pchat = om::ui::PopupChat::Dm;
+                    ppeer = chat_dm_pub;
+                } else {
+                    pchat = om::ui::PopupChat::Channel;
+                    pchan = (uint8_t)chat_focus;
+                }
+            }
+            const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            if (om::ui::msgPopupPoll(now_ms, g_screen_power.off, chat_now, pchat, pchan, ppeer)) dirty = true;
+            if (om::ui::msgPopupNeedsRepaint()) dirty = true;
+        }
 
         if (xTaskGetTickCount() - lastPoll > pdMS_TO_TICKS(2000)) {
             lastPoll = xTaskGetTickCount();

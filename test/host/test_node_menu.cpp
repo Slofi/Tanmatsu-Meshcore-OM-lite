@@ -113,11 +113,11 @@ void test_rows_per_type() {
   CHECK_STR(rows[6].value, "on");
   CHECK(rows[6].valueAccent);
 
-  // S515/EST-465: in the radio the store row flips to "Move to archive", and never both.
+  // S515/EST-465: in the radio the store row flips to "Move to SD", and never both.
   c.in_radio = true;
   CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 8);
   CHECK(rows[5].action == om::ui::NodeAction::MoveToArchive);
-  CHECK_STR(rows[5].label, "Move to archive");
+  CHECK_STR(rows[5].label, "Move to SD");
   for (int i = 0; i < 8; ++i) CHECK(rows[i].action != om::ui::NodeAction::AddToRadio);
   c.in_radio = false;
 

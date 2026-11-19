@@ -308,8 +308,9 @@ enum class SettingsEvent : uint8_t {
   NeedsRunning,     // the row's owner is stopped and this action needs it: say so, change nothing
   CloseSubPage,     // Esc or Settings inside a sub-page: back to the root, focus/scroll restored
   LeaveSettings,    // Esc at the root: the shell routes to the page Settings was opened from
-  ConfirmCancelled, // Esc on the shared sheet: nothing changes
-  ConfirmApplied,   // Enter on the shared sheet: `row` is the row the shell must now apply
+  ConfirmCancelled, // Esc or Enter-on-Cancel on the shared sheet: nothing changes
+  ConfirmApplied,   // Enter on the focused Apply: `row` is the row the shell must now apply
+  ConfirmFocusMoved,// S515/EST-467: Left/Right moved the sheet's focus between Cancel and Apply
 };
 
 struct SettingsFrame {
@@ -319,6 +320,10 @@ struct SettingsFrame {
   int  scroll = 0;      // px
   int  depth = 0;       // 0 = a tab root; 1 = a sub-page (Name today)
   int  confirm_row = -1;   // >= 0 while the ONE shared sheet is open
+  // S515/EST-467 (Filip: "make a default selection 'Cancel' as an extra safety"): which of the sheet's two
+  // buttons has the focus. It ALWAYS opens on Cancel, so a key pressed out of habit cancels and changes
+  // nothing; Left/Right move it to Apply.
+  bool confirm_cancel = true;
   bool tab_running = true; // false = the tab's module is stopped; action rows with needs_running refuse
 
   bool confirmOpen() const { return confirm_row >= 0; }
@@ -374,14 +379,19 @@ struct SettingsFrame {
   bool beginConfirm(int row) {
     if (row < 0) return false;
     confirm_row = row;
+    confirm_cancel = true;   // S515/EST-467: every destructive sheet opens with Cancel focused
     return true;
   }
 
-  void cancelConfirm() { confirm_row = -1; }
+  void cancelConfirm() {
+    confirm_row = -1;
+    confirm_cancel = true;
+  }
 
   int applyConfirm() {
     const int row = confirm_row;
-    confirm_row = -1;
+    confirm_row    = -1;
+    confirm_cancel = true;
     return row;
   }
 
@@ -404,12 +414,21 @@ inline SettingsKeyResult settingsKey(SettingsFrame& f, SetKey k, const SettingsS
                                      int count) {
   SettingsKeyResult r;
 
-  // The sheet owns every key while it is up. Enter = Apply, Esc = Cancel; the arrows do nothing, so a
-  // held arrow cannot move the page behind the question.
+  // The sheet owns every key while it is up. S515/EST-467: it OPENS ON CANCEL, so a plain Enter cancels and
+  // changes nothing; Left/Right move the focus to Apply, where Enter applies. Esc always cancels. The
+  // question's page never sees any of these keys, so a held arrow cannot move the list behind it.
   if (f.confirmOpen()) {
-    if (k == SetKey::Enter) {
-      r.row = f.applyConfirm();
-      r.event = SettingsEvent::ConfirmApplied;
+    if (k == SetKey::Left || k == SetKey::Right) {
+      f.confirm_cancel = !f.confirm_cancel;
+      r.event = SettingsEvent::ConfirmFocusMoved;
+    } else if (k == SetKey::Enter) {
+      if (f.confirm_cancel) {
+        f.cancelConfirm();
+        r.event = SettingsEvent::ConfirmCancelled;
+      } else {
+        r.row = f.applyConfirm();
+        r.event = SettingsEvent::ConfirmApplied;
+      }
     } else if (k == SetKey::Esc) {
       f.cancelConfirm();
       r.event = SettingsEvent::ConfirmCancelled;
@@ -690,6 +709,6 @@ constexpr bool advertScheduleDue(uint32_t interval_s, uint32_t elapsed_s, bool e
 }
 
 // The image's version, shown in General > DEVICE. One constant: the next ticket bumps this line.
-constexpr const char* kAppVersion = "61";
+constexpr const char* kAppVersion = "62";
 
 }  // namespace tm

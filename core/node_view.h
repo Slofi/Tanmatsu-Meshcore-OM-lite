@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// S515/EST-465: the Nodes page's STORE VIEW — All / Radio / Archive — and the two texts that report the stores
+// S515/EST-465: the Nodes page's STORE VIEW — All / Radio / SD — and the two texts that report the stores
 // (the page head's live counts and Settings › OM Lite › NODES' info row and setting value).
 //
 // The view is a FILTER over the page's own order, never a second list: the frozen order of S515/EST-461 is the
@@ -28,7 +28,7 @@ constexpr NodeView kNodeViewDefault = NodeView::All;
 inline const char* nodeViewText(NodeView v) {
     switch (v) {
         case NodeView::Radio: return "Radio";
-        case NodeView::Archive: return "Archive";
+        case NodeView::Archive: return "SD";
         case NodeView::All:
         default: return "All";
     }
@@ -66,10 +66,10 @@ inline int nodeViewFilter(const om::mc::ContactStore& s, const int* order, int o
     return n;
 }
 
-// The page head's right-hand text: "Radio 10 / 300 · Archive 412". Live numbers, read on every draw.
+// The page head's right-hand text: "Radio 10 / 300 · SD 412". Live numbers, read on every draw.
 inline void nodeStoreCountsText(char* out, size_t cap, size_t radio, size_t archive) {
     if (out == nullptr || cap == 0) return;
-    snprintf(out, cap, "Radio %u / %u \xc2\xb7 Archive %u", (unsigned)radio, (unsigned)om::mc::kMaxRadio,
+    snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD %u", (unsigned)radio, (unsigned)om::mc::kMaxRadio,
              (unsigned)archive);
 }
 
@@ -77,7 +77,7 @@ inline void nodeStoreCountsText(char* out, size_t cap, size_t radio, size_t arch
 // (the radio list still works), but the archive does not survive a restart without it, so it says so.
 inline void nodeStoreInfoText(char* out, size_t cap, size_t radio, size_t archive, bool sd_mounted) {
     if (out == nullptr || cap == 0) return;
-    snprintf(out, cap, "Radio %u / %u \xc2\xb7 Archive %u \xc2\xb7 %s", (unsigned)radio,
+    snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD %u \xc2\xb7 %s", (unsigned)radio,
              (unsigned)om::mc::kMaxRadio, (unsigned)archive, sd_mounted ? "SD ok" : "no SD card");
 }
 

@@ -559,7 +559,7 @@ void test_frame_keys() {
 }
 
 void test_confirm_sheet() {
-  printf("test  the shared sheet: Cancel changes nothing, Apply answers the row\n");
+  printf("test  the shared sheet opens on Cancel (Enter cancels); Right + Enter applies\n");
   tm::SettingsFrame f;
   f.setBodyHeight(100);
   f.reset(0, 4);
@@ -570,7 +570,9 @@ void test_confirm_sheet() {
 
   CHECK(f.beginConfirm(1));
   CHECK(f.confirmOpen());
-  // arrows are swallowed while the sheet is up: no tab or focus movement
+  CHECK(f.confirm_cancel);   // S515/EST-467: CANCEL focused on open
+  // Down/Up are swallowed while the sheet is up: no tab or focus movement. Left/Right move the SHEET's
+  // focus only, never the page's.
   const int tabBefore   = f.tab;
   const int focusBefore = f.focus;
   tm::SettingsKeyResult r = tm::settingsKey(f, tm::SetKey::Down, kGeneral, kGeneralCount);
@@ -578,19 +580,40 @@ void test_confirm_sheet() {
   CHECK_EQ(f.tab, tabBefore);
   CHECK_EQ(f.focus, focusBefore);
 
+  // THE SAFETY RULE: Enter on open cancels, and nothing behind the sheet changed.
+  r = tm::settingsKey(f, tm::SetKey::Enter, kGeneral, kGeneralCount);
+  CHECK(r.event == tm::SettingsEvent::ConfirmCancelled);
+  CHECK(!f.confirmOpen());
+  CHECK(f.confirm_cancel);
+  CHECK_STR(row_value, "TNMT (SI)");
+  CHECK_STR(kNodeRows[0].value, "TNMT (SI)");
+
+  // Esc always cancels, and it re-opens on Cancel next time.
+  CHECK(f.beginConfirm(1));
   r = tm::settingsKey(f, tm::SetKey::Esc, kGeneral, kGeneralCount);
   CHECK(r.event == tm::SettingsEvent::ConfirmCancelled);
   CHECK(!f.confirmOpen());
-  CHECK_STR(row_value, "TNMT (SI)");   // nothing touched the row
-  CHECK_STR(kNodeRows[0].value, "TNMT (SI)");
 
+  // To apply, the user moves the focus to Apply; Enter there answers the row.
   CHECK(f.beginConfirm(1));
+  r = tm::settingsKey(f, tm::SetKey::Right, kGeneral, kGeneralCount);
+  CHECK(r.event == tm::SettingsEvent::ConfirmFocusMoved);
+  CHECK(!f.confirm_cancel);
+  CHECK(f.confirmOpen());
   r = tm::settingsKey(f, tm::SetKey::Enter, kGeneral, kGeneralCount);
   CHECK(r.event == tm::SettingsEvent::ConfirmApplied);
   CHECK_EQ(r.row, 1);
   CHECK(!f.confirmOpen());
+  CHECK(f.confirm_cancel);   // the next sheet starts safe again
   // even Apply only TELLS the shell which row to change; the frame itself never rewrites the row
   CHECK_STR(kNodeRows[0].value, "TNMT (SI)");
+
+  // Left goes back to Cancel.
+  CHECK(f.beginConfirm(1));
+  (void)tm::settingsKey(f, tm::SetKey::Left, kGeneral, kGeneralCount);
+  CHECK(!f.confirm_cancel);
+  (void)tm::settingsKey(f, tm::SetKey::Left, kGeneral, kGeneralCount);
+  CHECK(f.confirm_cancel);
 }
 
 // ------------------------------------------------------------------------------------------ 5. menu bar

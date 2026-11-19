@@ -253,8 +253,8 @@ void drawChat(Screen& s, const ChatView& v) {
         drawEnterKeyCap(s, bx, by, bw, bh, empty ? (uint16_t)kDimmer : (uint16_t)kInk);
     }
 
-    static const HintItem hints_list[] = {{",", "settings"}, {"up/dn", "move"}, {"l/r", "column"}, {"ret", "open"}, {"esc", "back"}};
-    static const HintItem hints_open[] = {{",", "settings"}, {"type", "write"}, {"up/dn", "scroll"}, {"ret", "send"}, {"esc", "back"}};
+    static const HintItem hints_list[] = {{"Enter", "open"}, {"esc", "back"}, {"up/dn", "move"}, {"l/r", "column"}, {",", "settings"}};
+    static const HintItem hints_open[] = {{"Enter", "send"}, {"esc", "back"}, {"type", "write"}, {"up/dn", "scroll"}, {",", "settings"}};
     // A DM thread types and sends exactly like a channel (EST-439), so the two open states share one hint bar.
     drawHintBar(s, tm::Page::Chat, v.open ? hints_open : hints_list, 5);
 }

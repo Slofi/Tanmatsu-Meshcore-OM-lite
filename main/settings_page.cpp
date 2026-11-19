@@ -184,18 +184,18 @@ void drawSettings(Screen& s, const SettingsView& v) {
 
     // ---- the hint bar: the ticket's five keys plus the global Settings key.
     if (v.sub_page) {
-        static const HintItem hints[] = {{",", "settings"}, {"type", "write"}, {"ret", "apply"}, {"esc", "back"}};
+        static const HintItem hints[] = {{",", "settings"}, {"type", "write"}, {"Enter", "apply"}, {"esc", "back"}};
         drawHintBar(s, tm::Page::Settings, hints, 4);
     } else if (v.volume_row) {
         // S514/EST-451: the Volume row adds '+' / '-'. Six chips do not fit before the symbol cluster
         // (measured: the five standard chips already end at 460 px, the cluster starts at 397), so on this
         // row the bar carries the four keys that matter here — including the ticket's "+/- volume".
         static const HintItem hints[] = {{",", "settings"}, {"+/-", "volume"},
-                                         {"ret", "change"}, {"esc", "back"}};
+                                         {"Enter", "change"}, {"esc", "back"}};
         drawHintBar(s, tm::Page::Settings, hints, 4);
     } else {
-        static const HintItem hints[] = {{",", "settings"}, {"l/r", "tab"}, {"up/dn", "row"},
-                                         {"ret", "open/change"}, {"esc", "back"}};
+        static const HintItem hints[] = {{"Enter", "open/change"}, {"esc", "back"}, {"l/r", "tab"},
+                                         {"up/dn", "row"}, {",", "settings"}};
         drawHintBar(s, tm::Page::Settings, hints, 5);
     }
 }
@@ -249,22 +249,25 @@ void drawConfirmSheet(Screen& s, const SettingsView& v) {
         while (*p == ' ') ++p;
     }
 
-    // Cancel on the LEFT (the default side), Apply on the right: the L2's EST-422 rule, and the only
-    // filled plate on the screen is the applying key.
+    // Cancel on the LEFT, Apply on the right: the L2's EST-422 rule, and the only filled plate on the
+    // screen is the applying key. S515/EST-467: the sheet OPENS on Cancel — the gold 2 px ring shows where
+    // Enter will land, so a key pressed out of habit cannot delete anything.
     const int bw = 148, bh = 42;
     const int by = y1 - bh - 16;
     const int cx = x1 - 22 - 2 * bw - 12;
     s.fillRect(cx, by, bw, bh, kPanel2);
     s.frame(cx, by, bw, bh, 1, kLine);
+    if (v.confirm_cancel) s.frame(cx - 2, by - 2, bw + 4, bh + 4, 2, kAcc);
     drawText(s, Face::Body, cx + 16, textBaseline(s, Face::Body, by, bh), "Cancel", kInk);
     drawKeyCap(s, cx + bw - 46, by + 12, 34, 18, "esc", kDim);
 
     const int ax = x1 - 22 - bw;
     s.fillRect(ax, by, bw, bh, v.confirm_danger ? (uint16_t)0x5a1a1a : (uint16_t)kSelBg2);
     s.frame(ax, by, bw, bh, 1, v.confirm_danger ? (uint16_t)0xF800 : (uint16_t)kAcc);
+    if (!v.confirm_cancel) s.frame(ax - 2, by - 2, bw + 4, bh + 4, 2, kAcc);
     drawText(s, Face::Body, ax + 16, textBaseline(s, Face::Body, by, bh),
              v.confirm_apply != nullptr ? v.confirm_apply : "Apply", kAccInk);
-    drawKeyCap(s, ax + bw - 46, by + 12, 34, 18, "ret", v.confirm_danger ? (uint16_t)0xF800 : kAcc);
+    drawKeyCap(s, ax + bw - 56, by + 12, 44, 18, "Enter", v.confirm_danger ? (uint16_t)0xF800 : kAcc);
 }
 
 }  // namespace ui

@@ -31,6 +31,100 @@ NoticeSlot g_notice;
 uint32_t   g_notice_gen = 0;   // bumped by every set/clear, under the same lock (S513, Claude)
 char       g_notice_copy[64] = {0};   // the reader's own copy: drawn text never changes under the drawer
 
+// ---- the new-message pop-up (S515/EST-467) --------------------------------------------------------------------
+// The radio task publishes the newest message here (text + its chat key); the main task consumes it once per
+// loop pass, applies core/msg_popup.h's rules and draws it. Same critical-section discipline as the notice.
+portMUX_TYPE g_popup_mux = portMUX_INITIALIZER_UNLOCKED;
+
+struct PendingPopup {
+    char      head[64]  = {0};
+    char      text[192] = {0};
+    PopupChat chat      = PopupChat::None;
+    uint8_t   channel   = 0;
+    uint8_t   peer[32]  = {0};
+    uint32_t  count     = 0;   // messages published since the main task last polled
+};
+
+PendingPopup g_pending_popup;
+MsgPopup     g_popup;              // main task's state (see core/msg_popup.h)
+uint32_t     g_popup_gen   = 0;    // bumped by every show/replace/dismiss
+char         g_popup_live_head[64]  = {0};   // the text of the popup on the glass, committed with the state
+char         g_popup_live_text[192] = {0};
+char         g_popup_head_copy[64]  = {0};
+char         g_popup_text_copy[192] = {0};
+
+// Greedy word wrap for the pop-up's body, at most three lines. The font is the device's own face; "..." is
+// ASCII on purpose (the generated font carries Latin-1 + Latin Extended-A, not U+2026).
+int wrapPopupLines(const Font* f, const char* text, int maxw, char out[3][96]) {
+    int         n = 0;
+    const char* p = text != nullptr ? text : "";
+    while (*p != '\0' && n < 3) {
+        char line[96] = {0};
+        int  len = 0, last_space = -1;
+        while (p[len] != '\0' && len < (int)sizeof(line) - 1) {
+            line[len]     = p[len];
+            line[len + 1] = '\0';
+            if (f != nullptr && f->ready() && f->textWidth(line) > maxw && len > 0) {
+                if (last_space > 0) {
+                    line[last_space] = '\0';
+                    len              = last_space;
+                } else {
+                    line[len] = '\0';
+                }
+                break;
+            }
+            if (p[len] == ' ') last_space = len;
+            ++len;
+        }
+        snprintf(out[n], 96, "%s", line);
+        p += len;
+        while (*p == ' ') ++p;
+        ++n;
+    }
+    const bool clipped = (*p != '\0');
+    if (clipped && n > 0) {
+        // Make room for "..." on the last line so the ellipsis cannot leave the plate.
+        char* last = out[n - 1];
+        while (last[0] != '\0' && f != nullptr && f->ready() &&
+               f->textWidth(last) + f->textWidth("...") > maxw) {
+            size_t l = strlen(last);
+            while (l > 0 && ((unsigned char)last[l - 1] & 0xC0) == 0x80) --l;   // never split a UTF-8 sequence
+            if (l == 0) break;
+            last[l - 1] = '\0';
+        }
+        const size_t l = strlen(last);
+        if (l + 4 < 96) snprintf(last + l, 96 - l, "...");
+    }
+    return n;
+}
+
+void drawMessagePopup(Screen& s, const MsgPopupView& v) {
+    const int W = kTmW, H = kTmH;
+
+    static char lines[3][96];
+    const Font* bf = fontFor(Face::Body);
+    const int   pw = 560;
+    int         n  = wrapPopupLines(bf, v.text, pw - 48, lines);
+
+    const int ph = 20 + 26 + n * 22 + (v.extra > 0 ? 22 : 0) + 16;
+    const int px = (W - pw) / 2;
+    const int py = (H - ph) / 2;
+
+    drawRoundedRect(s, px, py, pw, ph, 8, kPanel2);
+    s.frame(px, py, pw, ph, 2, kAcc);
+    drawText(s, Face::Title, px + 24, textBaseline(s, Face::Title, py + 10, 26), v.head, kAccInk);
+    int ly = py + 40;
+    for (int i = 0; i < n; ++i) {
+        drawText(s, Face::Body, px + 24, textBaseline(s, Face::Body, ly, 22), lines[i], kInk);
+        ly += 22;
+    }
+    if (v.extra > 0) {
+        char more[40];
+        snprintf(more, sizeof(more), "+%u more", (unsigned)v.extra);
+        drawText(s, Face::Body, px + 24, textBaseline(s, Face::Body, ly, 22), more, kDim);
+    }
+}
+
 }  // namespace
 
 void noticeSet(const char* text, uint32_t ttl_ms) {
@@ -74,6 +168,85 @@ bool noticeNeedsRepaint() {
     seen_gen = gen;
     was_live = live;
     return changed || expired;
+}
+
+// ---- the new-message pop-up (S515/EST-467): the task-safe slot around core/msg_popup.h --------------------------
+void msgPopupOffer(const char* head, const char* text, PopupChat chat, uint8_t channel,
+                   const uint8_t peer[32]) {
+    if (head == nullptr || text == nullptr || text[0] == '\0') return;
+    taskENTER_CRITICAL(&g_popup_mux);
+    snprintf(g_pending_popup.head, sizeof(g_pending_popup.head), "%s", head);
+    snprintf(g_pending_popup.text, sizeof(g_pending_popup.text), "%s", text);
+    g_pending_popup.chat    = chat;
+    g_pending_popup.channel = channel;
+    if (peer != nullptr)
+        memcpy(g_pending_popup.peer, peer, sizeof(g_pending_popup.peer));
+    else
+        memset(g_pending_popup.peer, 0, sizeof(g_pending_popup.peer));
+    if (g_pending_popup.count < kMsgPopupMaxExtra) ++g_pending_popup.count;
+    taskEXIT_CRITICAL(&g_popup_mux);
+}
+
+bool msgPopupPoll(uint32_t now_ms, bool screen_off, bool chat_open, PopupChat chat, uint8_t channel,
+                  const uint8_t peer[32]) {
+    bool changed = false;
+    taskENTER_CRITICAL(&g_popup_mux);
+    if (g_pending_popup.count > 0) {
+        const uint32_t arrived = g_pending_popup.count;
+        g_pending_popup.count  = 0;
+        bool same_chat_open = false;
+        if (chat_open && chat != PopupChat::None && g_pending_popup.chat == chat) {
+            same_chat_open = (chat == PopupChat::Channel)
+                                 ? (g_pending_popup.channel == channel)
+                                 : (peer != nullptr && memcmp(g_pending_popup.peer, peer, 32) == 0);
+        }
+        if (g_popup.offer(now_ms, screen_off, false, same_chat_open, g_pending_popup.chat,
+                          g_pending_popup.channel, g_pending_popup.peer, arrived)) {
+            snprintf(g_popup_live_head, sizeof(g_popup_live_head), "%s", g_pending_popup.head);
+            snprintf(g_popup_live_text, sizeof(g_popup_live_text), "%s", g_pending_popup.text);
+            changed = true;
+        }
+    }
+    if (g_popup.tick(now_ms)) changed = true;
+    if (changed) ++g_popup_gen;
+    taskEXIT_CRITICAL(&g_popup_mux);
+    return changed;
+}
+
+bool msgPopupKey() {
+    taskENTER_CRITICAL(&g_popup_mux);
+    const bool done = g_popup.key();
+    if (done) ++g_popup_gen;
+    taskEXIT_CRITICAL(&g_popup_mux);
+    return done;
+}
+
+bool msgPopupView(MsgPopupView* out) {
+    bool live = false;
+    taskENTER_CRITICAL(&g_popup_mux);
+    if (g_popup.visible) {
+        snprintf(g_popup_head_copy, sizeof(g_popup_head_copy), "%s", g_popup_live_head);
+        snprintf(g_popup_text_copy, sizeof(g_popup_text_copy), "%s", g_popup_live_text);
+        live = true;
+    }
+    taskEXIT_CRITICAL(&g_popup_mux);
+    if (!live || out == nullptr) return false;
+    out->head  = g_popup_head_copy;
+    out->text  = g_popup_text_copy;
+    taskENTER_CRITICAL(&g_popup_mux);
+    out->extra = g_popup.extra;
+    taskEXIT_CRITICAL(&g_popup_mux);
+    return true;
+}
+
+bool msgPopupNeedsRepaint() {
+    static uint32_t seen_gen = 0;
+    taskENTER_CRITICAL(&g_popup_mux);
+    const uint32_t gen = g_popup_gen;
+    taskEXIT_CRITICAL(&g_popup_mux);
+    if (gen == seen_gen) return false;
+    seen_gen = gen;
+    return true;
 }
 
 #include "nodes_fresh.h"   // S515/EST-461: the dot mask's bits, pinned against the constants below
@@ -269,10 +442,12 @@ void drawEnterKeyCap(Screen& s, int x, int y, int w, int h, uint16_t ink) {
 void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_count) {
     const int W = kTmW, H = kTmH;
 
-    // S513/EST-435: the app's one notice, as a plate just above the bar, right-aligned so it sits clear of the
-    // key hints. It is drawn LAST in the frame's order but it is part of the chrome, so every page gets it without
-    // knowing it exists. A page that fills this strip with content loses only the 22 px behind the plate.
-    if (const char* notice = noticeText()) {
+    // S515/EST-467: the new-message pop-up comes first and WINS over the one notice while it is up. Both are
+    // chrome, so every page gets them from this one call without knowing they exist.
+    MsgPopupView pv;
+    if (msgPopupView(&pv)) {
+        drawMessagePopup(s, pv);
+    } else if (const char* notice = noticeText()) {
         // S514 (Claude, Filip: "those pop-ups are too small, make them bigger and centered"): a panel in the middle
         // of the screen in the Title face, gold outline, sized to the text (at least 360 px, never wider than the
         // screen). It is drawn last, over the page, and goes with the next repaint after its 3 s.
@@ -314,11 +489,16 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
     int hx = kTmPad;
     for (int i = 0; i < hint_count && hints && i < 6; i++) {
         if (hints[i].key == nullptr || hints[i].key[0] == '\0') continue;
-        const int kw = 30;
+        // S515/EST-467: the cap grows with its key text, because "Enter" is five glyphs and a 30 px cap
+        // clipped it. A short key still gets the old 30 px, so no bar quietly changes width for nothing.
+        const int kw = (hf && hf->ready()) ? (hf->textWidth(hints[i].key) + 10 > 30
+                                                  ? hf->textWidth(hints[i].key) + 10
+                                                  : 30)
+                                          : 30;
         const int lw = (hf && hf->ready()) ? hf->textWidth(hints[i].label) : 30;
         // Tighter than the old 6/14/16 spacing: EST-445 puts FIVE hints on a page (`, settings` plus
         // four actions), and the ticket's Settings bar must show all of them without running under the
-        // symbol cluster. The chip is still 30 px (key names like "up/dn" are five glyphs).
+        // symbol cluster.
         const int item_w = kw + 4 + 8 + lw + 10;
         if (hx + item_w > right_start - 8) break;   // no room: stop rather than overlap the page keys
         drawKeyCap(s, hx, cy - 9, kw, 18, hints[i].key, kDim);

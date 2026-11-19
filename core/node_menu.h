@@ -73,7 +73,7 @@ struct NodeMenuContext {
     uint8_t advType   = 0;
     bool    hasKey    = false;   // a real contact, so its public key is known
     bool    favourite = false;
-    // S515/EST-465: which store the row is in. The menu says "Add to radio" or "Move to archive", never both.
+    // S515/EST-465: which store the row is in. The menu says "Add to radio" or "Move to SD", never both.
     bool    in_radio  = false;
     // S514/EST-456: ContactInfo::out_path_len != OUT_PATH_UNKNOWN (core/mc_store.h contactHasOutPath).
     bool    pathKnown = false;
@@ -110,7 +110,7 @@ inline int nodeMenuRows(const NodeMenuContext& c, NodeMenuRow* out, int max) {
     add(NodeAction::Map, "Map", c.hasPosition ? "" : "no position", false, !c.hasPosition);
     if (c.hasKey) {
         // S515/EST-465: one store row, worded by where the node is now. The action is never both.
-        if (c.in_radio) add(NodeAction::MoveToArchive, "Move to archive");
+        if (c.in_radio) add(NodeAction::MoveToArchive, "Move to SD");
         else add(NodeAction::AddToRadio, "Add to radio");
         add(NodeAction::Favourite, "Favourite", c.favourite ? "on" : "off", c.favourite);
         // One table, two files: "Delete everywhere" is what removing the row really does now (EST-463). The
@@ -160,16 +160,19 @@ inline int nodeMenuFocusFollow(const int* shown, int shown_count, int store_inde
 }
 
 // ---------------------------------------------------------------- S515/EST-465: the store actions' words
-// "Radio full (300 / 300): move a node to the archive first" — Filip's rule 2, in the sheet's exact words.
+// "Radio full (300 / 300): move a node to the SD card first" — Filip's rule 2, in the sheet's exact words.
 // The numbers come from kMaxRadio, so the sentence cannot drift from the cap.
 inline void nodeRadioFullNotice(char* out, size_t cap) {
     if (out == nullptr || cap == 0) return;
-    snprintf(out, cap, "Radio full (%u / %u): move a node to the archive first",
+    snprintf(out, cap, "Radio full (%u / %u): move a node to the SD card first",
              (unsigned)om::mc::kMaxRadio, (unsigned)om::mc::kMaxRadio);
 }
 
 inline const char* nodeAddedToRadioNotice() { return "Added to the radio"; }
-inline const char* nodeMovedToArchiveNotice() { return "Moved to the archive"; }
+inline const char* nodeMovedToArchiveNotice() { return "Moved to the SD card"; }
+// S515/EST-467: Settings › NODES' per-contact action. It takes the node OUT OF the radio and leaves the row
+// on the SD card — the sentence and the action must not drift apart.
+inline const char* nodeRemovedFromRadioNotice() { return "Removed from the radio, kept on the SD card"; }
 
 // Delete everywhere's question. The row is removed from BOTH files; its DM thread and dm-*.log are never
 // touched (main/mc_link.cpp contactsRemove/contactsClear and core/node_table.cpp deleteEverywhere only remove
@@ -177,7 +180,7 @@ inline const char* nodeMovedToArchiveNotice() { return "Moved to the archive"; }
 inline void nodeDeleteConfirmText(char* out, size_t cap, const char* name) {
     if (out == nullptr || cap == 0) return;
     const char* who = (name != nullptr && name[0] != '\0') ? name : "this node";
-    snprintf(out, cap, "Delete %s from the radio and the archive? Its DM history stays on the card.", who);
+    snprintf(out, cap, "Delete %s from the radio and the SD card? Its DM history stays on the card.", who);
 }
 
 // After a delete the rows shift down. The caller re-finds the node BY KEY (contactsFind on the new table) and

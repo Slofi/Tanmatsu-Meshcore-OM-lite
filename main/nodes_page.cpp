@@ -304,10 +304,10 @@ void drawNodes(Screen& s, const NodesView& v) {
     // S515/EST-465: "<> view" first — the filter key must be visible. Left/Right are free on this page (Up/Down
     // move the list and every other arrow/letter already has a job), so no new letter steals a typed character
     // from the search or an existing shortcut.
-    static const HintItem hints_list[] = {{"<>", "view"}, {"ret", "menu"}, {"f", "fav"},
-                                          {"/", "search"}, {"a", "advert"}, {"esc", "back"}};
+    static const HintItem hints_list[] = {{"<>", "view"}, {"Enter", "menu"}, {"/", "search"},
+                                          {"esc", "back"}, {"f", "fav"}, {"a", "advert"}};
     static const HintItem hints_search[] = {{"type", "search"}, {"dn", "list"}, {"esc", "clear/back"}};
-    static const HintItem hints_menu[]   = {{"up/dn", "move"}, {"ret", "choose"}, {"esc", "close"}};
+    static const HintItem hints_menu[]   = {{"up/dn", "move"}, {"Enter", "choose"}, {"esc", "close"}};
     if (v.menu_open)
         drawHintBar(s, tm::Page::Nodes, hints_menu, 3);
     else if (v.search_focused)

@@ -9,6 +9,7 @@
 
 #include <stdint.h>
 
+#include "msg_popup.h"   // S515/EST-467: the pop-up's decisions (pure, host-tested)
 #include "pages.h"
 #include "screen.h"
 
@@ -17,7 +18,7 @@ namespace ui {
 
 // One chip in the hint bar: the key as printed on it, and what it does here.
 struct HintItem {
-    const char* key;     // "up/dn", "ret", "esc"
+    const char* key;     // "up/dn", "Enter", "esc"
     const char* label;   // "move", "open", "back"
 };
 
@@ -51,6 +52,37 @@ void drawEnterKeyCap(Screen& s, int x, int y, int w, int h, uint16_t ink);
 // Set from the task that decides; drawn only by the main task.
 void noticeSet(const char* text, uint32_t ttl_ms);
 void noticeClear();
+
+// ------------------------------------------------------------------------ the new-message pop-up (S515/EST-467)
+// The SAME one-slot pattern as the notice, and the SAME reader/writer split: the RADIO task publishes a
+// message it just stored (msgPopupOffer), the MAIN task applies the rules (msgPopupPoll: screen off, the same
+// chat already open, the 10 s timeout) and draws it. The decision logic is core/msg_popup.h, host-tested.
+//
+// The pop-up is drawn by drawHintBar(), so every page gets it without a line of its own, and while it is up
+// it WINS over the one notice. `head` is already the finished first line ("#Test Channel · ERA-3", or
+// "DM · ERA-3"); `text` is the message.
+struct MsgPopupView {
+    const char* head  = "";
+    const char* text  = "";
+    uint32_t    extra = 0;   // messages replaced while it was up ("+N more")
+};
+
+void msgPopupOffer(const char* head, const char* text, PopupChat chat, uint8_t channel,
+                   const uint8_t peer[32]);
+
+// Main task, once per loop pass. `chat_open` plus the OPEN chat's identity let the rule "not while that same
+// chat is on screen" be a comparison here, not a page lookup. Returns true when the glass must be repainted.
+bool msgPopupPoll(uint32_t now_ms, bool screen_off, bool chat_open, PopupChat chat, uint8_t channel,
+                  const uint8_t peer[32]);
+
+// Main task: a key was pressed. If a pop-up is up, dismiss it and return true — the caller SWALLOWS the key.
+bool msgPopupKey();
+
+// A copy of the live pop-up, taken under the lock; false when there is none.
+bool msgPopupView(MsgPopupView* out);
+
+// True once after the pop-up appeared, changed or went, so the page repaints with no key behind it.
+bool msgPopupNeedsRepaint();
 
 // The live text, or nullptr. Returns a copy taken under the lock, so the string cannot change while it is drawn.
 const char* noticeText();

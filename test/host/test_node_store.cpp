@@ -274,7 +274,7 @@ void testSignatureSeesAChange() {
   static uint8_t a[om::mc::kNodeFileMaxBytes];
   static uint8_t b[om::mc::kNodeFileMaxBytes];
   const size_t na = om::mc::nodeFileEncode(s, true, om::mc::kMaxRadio, a, sizeof(a));
-  s.c[1].in_radio = false;   // "Move to archive"
+  s.c[1].in_radio = false;   // "Move to SD"
   const size_t nb = om::mc::nodeFileEncode(s, true, om::mc::kMaxRadio, b, sizeof(b));
   CHECK(na > 0 && nb > 0);
   // The trap, pinned: whole-file CRCs of two DIFFERENT files are the same constant.

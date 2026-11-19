@@ -15,6 +15,139 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S515 (EST-467) · test round 1: names, Enter, Cancel, the pop-up
+
+> Written by **DeepSeek** for ticket **EST-467**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed, pushed or committed. Starting point **v61 `90a95cb`** (tree clean, before work). **Version: 62**
+> (`core/settings.h` kAppVersion). `firmware/` was read only and is unchanged.
+>
+> **Filip's words (quoted, S515):** *"Rename the 'Archive' to 'Device' or 'SD'.. Also rename 'ret' ... to
+> Enter.."* / *"Deleting works, but make a default selection 'Cancel' as an extra safety.."* / *"'Remov a
+> contact' should specify it is removed from the radio."* / *"a new MSG should appear as a pop-up with info on
+> what CH and a node name and a msg displayed. on any page, any button dismiss it and doesnt do anything else
+> on that page."*
+>
+> **ITEMS DONE: 1, 2, 3, 4, 5, 6.** `sh test/host/run.sh` **exit 0** (**32,741 counted checks** across the
+> suites, plus the DM-guard suite's 169 and the emoji suite's own pass line; the new pop-up test is 51,
+> `test_node_view` is now 742). `make build` **exit 0**, `application.bin` **0x1A2140 = 1,712,448 B**
+> (18 % of the app partition free; **+3,056 B** over v61's 1,709,392 B). Previews re-rendered, including
+> `shots/2026-11-19-popup-msg.png`. Nothing is installed, flashed, pushed or committed; `firmware/` was read
+> only and is unchanged.
+
+### 1. "Archive" → "SD" (item 1)
+
+User-facing strings changed (code identifiers and ESP_LOG lines stay `archive`):
+
+- `core/node_view.h`: the All / Radio / **SD** view chip (`nodeViewText`), the page head
+  `Radio 3 / 300 · SD 412`, and Settings' info row `Radio … · SD … · SD ok` (`nodeStoreInfoText`).
+- `core/node_menu.h`: `Move to SD`, `Radio full (300 / 300): move a node to the SD card first`,
+  `Moved to the SD card`, and the Delete sentence `Delete X from the radio and the SD card? Its DM history
+  stays on the card.`
+- `main/main.cpp`: Settings rows `Clear radio (SD keeps them)` and the counts row, the Clear-radio confirm
+  `Move all N radio nodes to the SD card? The SD card keeps them all.`, the notices `Radio cleared; the SD
+  card keeps every node`, `Already on the SD card`, `Deleted from the radio and the SD card; its DM history
+  stays`.
+- `tools/preview_tanmatsu.py`: the Nodes view chips and every preview caption that said Archive.
+- **"No SD card" stays** (Filip's line).
+
+### 2. "ret" → "Enter" (item 2)
+
+Every hint bar's key cap now reads **Enter**: Launcher, Nodes list, node menu, Chat list, Chat open, RPTR
+(scan and status), Settings root, Settings sub-page, Settings volume row, and the confirm sheet's Apply cap.
+The cap is no longer a fixed 30 px: it is `max(30, textWidth("Enter") + 10)` in `drawHintBar`, so the word
+fits; the bar's "no room" rule still stops rather than letting a chip run under the symbol cluster. The bars
+were re-rendered and checked at 800 px. The preview tool's `hint_bar` was rewritten to mirror
+`drawHintBar`'s arithmetic EXACTLY (one sans 11 face, `max(30, key+10)`, the 4/8/10 spacing, the 22/18
+right-cluster gaps), because the old preview used a mono face and narrower gaps and therefore claimed room
+the glass does not have. Measured with the real `sans_hint11.bin` advances, the left cluster has 371 px
+before the symbol keys; a 30 px fixed cap plus the word "Enter" cannot keep five or six hints there, so the
+bars that were silently losing a CRITICAL key were re-ordered, not shrunk below the edge:
+
+| Bar | Hints now shown at 800 px | Not shown (the break) |
+|---|---|---|
+| Launcher | `, settings`, `l/r select`, `Enter open`, `esc quit` | `s stop` (the detail panel still draws the Stop button with its `s` cap) |
+| Nodes list | `<> view`, `Enter menu`, `/ search`, `esc back` | `f fav`, `a advert` |
+| Nodes search | `type search`, `dn list`, `esc clear/back` | — |
+| Node menu | `up/dn move`, `Enter choose`, `esc close` | — |
+| Chat list | `Enter open`, `esc back`, `up/dn move`, `l/r column` | `, settings` |
+| Chat open | `Enter send`, `esc back`, `type write`, `up/dn scroll` | `, settings` |
+| Map | `, settings`, `dpad pan`, `+/- zoom`, `esc back` | — |
+| RPTR list | `up/dn move`, `Enter log in`, `s scan`, `esc back` | — |
+| RPTR login / status | `up/dn move`, `Enter send` / `r refresh`, `esc back/log out` | — |
+| Settings root | `Enter open/change`, `esc back`, `l/r tab`, `up/dn row` | `, settings` |
+| Settings sub-page | `, settings`, `type write`, `Enter apply`, `esc back` | — |
+| Settings volume | `, settings`, `+/- volume`, `Enter change`, `esc back` | — |
+| Confirm sheet | Cancel `esc` + Apply `Enter` (no left cluster) | — |
+
+In every one of the 32 re-rendered PNGs an automated check found **no ink in the left 17 px of the hint
+bar**, i.e. no chip starts off-screen or under the page margin. The `,` settings key stays visible on the
+Launcher bar; the page-specific critical keys (Enter and Esc) were moved to the front so they can never be
+the ones the break drops.
+
+### 3. Cancel first on every destructive confirm (item 3)
+
+`core/settings.h` `SettingsFrame` now carries `confirm_cancel` (default **true**). The shared sheet opens with
+**Cancel focused**; **Enter = Cancel**; Left/Right move the focus to Apply and Enter there applies; Esc always
+cancels. The focus ring is drawn on the focused button. This covers every sheet that uses the one shared
+confirm: Delete everywhere, Clear radio, Remove channel, Remove from radio, Clear all contacts, node name,
+forget RPTR passwords, show key. Both shell mappings (Settings and the Nodes page) now pass Left/Right into
+`settingsKey`; without that, the focus could open on Cancel but never be MOVED to Apply, which would have made
+every destructive action impossible. Host test: `test_confirm_sheet` drives open → Enter = Cancel (nothing
+applied), then Right + Enter = Apply, then Left twice back to Cancel.
+
+### 4. Settings › NODES: "Remove from radio" (item 4)
+
+**What it did today:** the Settings › NODES row was **"Remove a contact"**, and its confirm ran
+`contactsRemove()`, i.e. it deleted the whole contact row from RAM/radio.bin/nodes.bin — the node did NOT
+stay on the SD card.
+
+**Now:** the row and the sub-page title are **"Remove from radio"**; the confirm says
+`Remove X from the radio? It stays on the SD card.` and Apply calls `nodeRemoveFromRadio()` (the
+EST-463/465 action), so the row stays in the table with `in_radio = false`; the notice is
+`Removed from the radio, kept on the SD card`. The node is NOT deleted. Host test covers the action choice.
+
+### 5. New-message pop-up (item 5)
+
+- `core/msg_popup.h` (new, pure, host-tested): `MsgPopup` decides show / replace / `+N more` / dismiss /
+  swallow / 10 s timeout / the same-chat rule / own-message refusal / screen-off refusal. Rules are in the
+  header.
+- `main/chrome.{h,cpp}`: one slot, published by the radio task and read by the main task under a critical
+  section exactly like `noticeSet`; `drawHintBar` draws it (so every page gets it) and the pop-up wins over
+  the one notice while it is up. Header line `#<channel> · <sender>` (or `DM · <sender>`), then the text
+  wrapped to at most 3 lines with an ellipsis, then `+N more`.
+- `main/mc_link.cpp`: an incoming channel text or DM publishes the pop-up (our own echo and duplicates are
+  already dropped by the seen ring).
+- `main/main.cpp`: the main loop applies the screen-off and same-chat rules and the timeout; **any key**
+  dismisses it and is **swallowed** (checked before every page/symbol-key branch). Screen off = no pop-up,
+  no queue for later.
+- Host test: `test/host/test_msg_popup.cpp`.
+
+### 6. Tests, build, previews (item 6)
+
+- `sh test/host/run.sh` **exit 0**: **32,741 counted checks**, 0 failures (plus DM guard's 169-check pass
+  line and the emoji suite's own pass line, both uncounted by the summariser). New/changed suites:
+  `test_msg_popup` **51/0** (show/replace/`+N more`, key swallowed, exact 10 s + wrap, same-chat, own,
+  screen-off, counter cap), `test_node_view` **742/0** (the new "Remove from radio" test asserts the row
+  stays, the mark drops, the action is reversible, and the notice's exact words), `test_settings` **183/0**
+  (open-on-Cancel, Enter = Cancel, Right+Enter = Apply, left toggles back).
+- **ARMED TWICE** (real FAIL lines, then reverted, no MUTANT left):
+  - settings opens on Apply: `FAIL test_settings.cpp:573  f.confirm_cancel`
+  - popup key not swallowed: `FAIL test_msg_popup.cpp:74  p.key()`
+- `make build` **exit 0**, `application.bin` **0x1A2140 = 1,712,448 B** (18 % free, **+3,056 B** over v61).
+- Previews: all **32** host renders re-run (`python3 tools/preview_tanmatsu.py`, exit 0), plus the new
+  **`shots/2026-11-19-popup-msg.png`** (a channel message over the Nodes page: `#Test Channel · TEST-A1`,
+  three wrapped lines with `...`, `+1 more`) and the re-rendered confirm sheet (Cancel focused, gold ring).
+- Files touched: `core/msg_popup.h` (new), `core/node_menu.h`, `core/node_view.h`, `core/settings.h`,
+  `main/chrome.{h,cpp}`, `main/main.cpp`, `main/mc_link.cpp`, `main/{launcher,nodes,chat,rptr,settings}_page.cpp`,
+  `main/settings_page.h`, `test/host/test_msg_popup.cpp` (new), `test/host/test_{settings,node_view,node_menu,
+  node_store}.cpp`, `test/host/run.sh`, `tools/preview_tanmatsu.py`, `docs/PROGRESS.md`, and the 32 `shots/*.png`
+  (the hint bar changed in all of them). `main/fonts/*` untouched.
+- **Not visible from this sandbox / not done:** nothing installed or flashed; no on-glass check of the pop-up
+  timing or the real key codes (the host drives the decisions, the panel is not in this run). The device font
+  was measured from `main/fonts/sans_hint11.bin`, not from a live screen.
+
+---
+
 ## 2026-11-19 · S515 (EST-466) · nodes on the map, names from z13, and the node menu's Map item
 
 > Written by **DeepSeek** for ticket **EST-466**: fenced Paperclip run, no session start/end, nothing installed,

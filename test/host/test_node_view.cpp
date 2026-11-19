@@ -123,7 +123,7 @@ void testViewCountsAndOrder() {
   CHECK(om::ui::nodeViewCycle(om::ui::NodeView::Archive, -1) == om::ui::NodeView::Radio);
   CHECK(strcmp(om::ui::nodeViewText(om::ui::NodeView::All), "All") == 0);
   CHECK(strcmp(om::ui::nodeViewText(om::ui::NodeView::Radio), "Radio") == 0);
-  CHECK(strcmp(om::ui::nodeViewText(om::ui::NodeView::Archive), "Archive") == 0);
+  CHECK(strcmp(om::ui::nodeViewText(om::ui::NodeView::Archive), "SD") == 0);
   CHECK(om::ui::kNodeViewDefault == om::ui::NodeView::All);
 }
 
@@ -156,7 +156,7 @@ void testMenuRowsPerState() {
   n = om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows);
   CHECK_EQ(n, 8);
   CHECK(rows[5].action == om::ui::NodeAction::MoveToArchive);
-  CHECK(strcmp(rows[5].label, "Move to archive") == 0);
+  CHECK(strcmp(rows[5].label, "Move to SD") == 0);
   for (int i = 0; i < n; i++) CHECK(rows[i].action != om::ui::NodeAction::AddToRadio);
 
   // A repeater without a route: no DM, no Trace, but the store row, favourite and delete are there.
@@ -215,18 +215,18 @@ void testRadioFullPath() {
 
   char text[80];
   om::ui::nodeRadioFullNotice(text, sizeof(text));
-  CHECK(strcmp(text, "Radio full (300 / 300): move a node to the archive first") == 0);
+  CHECK(strcmp(text, "Radio full (300 / 300): move a node to the SD card first") == 0);
   CHECK(strcmp(om::ui::nodeAddedToRadioNotice(), "Added to the radio") == 0);
-  CHECK(strcmp(om::ui::nodeMovedToArchiveNotice(), "Moved to the archive") == 0);
+  CHECK(strcmp(om::ui::nodeMovedToArchiveNotice(), "Moved to the SD card") == 0);
 }
 
 // ---- 4. the confirm sentence, and the focus re-find after a delete --------------------------------
 void testDeleteConfirmAndFocus() {
   char text[200];
   om::ui::nodeDeleteConfirmText(text, sizeof(text), "TEST-B2");
-  CHECK(strcmp(text, "Delete TEST-B2 from the radio and the archive? Its DM history stays on the card.") == 0);
+  CHECK(strcmp(text, "Delete TEST-B2 from the radio and the SD card? Its DM history stays on the card.") == 0);
   om::ui::nodeDeleteConfirmText(text, sizeof(text), "");
-  CHECK(strcmp(text, "Delete this node from the radio and the archive? Its DM history stays on the card.") == 0);
+  CHECK(strcmp(text, "Delete this node from the radio and the SD card? Its DM history stays on the card.") == 0);
 
   // The sentence is TRUE: deleteEverywhere removes the row and nothing else. The DM ring is a separate store
   // (mc_store's DmRing), which this test does not touch; here we prove the row removal + the shift.
@@ -274,15 +274,15 @@ void testSettingsValues() {
 
   char info[96];
   om::ui::nodeStoreInfoText(info, sizeof(info), 10, 412, true);
-  CHECK(strcmp(info, "Radio 10 / 300 \xc2\xb7 Archive 412 \xc2\xb7 SD ok") == 0);
+  CHECK(strcmp(info, "Radio 10 / 300 \xc2\xb7 SD 412 \xc2\xb7 SD ok") == 0);
   om::ui::nodeStoreInfoText(info, sizeof(info), 0, 0, false);
-  CHECK(strcmp(info, "Radio 0 / 300 \xc2\xb7 Archive 0 \xc2\xb7 no SD card") == 0);
+  CHECK(strcmp(info, "Radio 0 / 300 \xc2\xb7 SD 0 \xc2\xb7 no SD card") == 0);
 
   char head[64];
   om::ui::nodeStoreCountsText(head, sizeof(head), 10, 412);
-  CHECK(strcmp(head, "Radio 10 / 300 \xc2\xb7 Archive 412") == 0);
+  CHECK(strcmp(head, "Radio 10 / 300 \xc2\xb7 SD 412") == 0);
   om::ui::nodeStoreCountsText(head, sizeof(head), om::mc::kMaxRadio, 2000);
-  CHECK(strcmp(head, "Radio 300 / 300 \xc2\xb7 Archive 2000") == 0);
+  CHECK(strcmp(head, "Radio 300 / 300 \xc2\xb7 SD 2000") == 0);
 
   // The Settings list is the RADIO list: of the five fixture rows only the three in the radio are offered.
   Fixture f;
@@ -296,6 +296,37 @@ void testSettingsValues() {
   CHECK_EQ(radio_rows, 3);
 }
 
+// ---- 6. Settings › NODES' "Remove from radio": the row STAYS on the SD card (S515/EST-467) -----------
+void testRemoveFromRadioKeepsRow() {
+  printf("test  Settings › NODES: 'Remove from radio' takes the mark off, never the row\n");
+  Fixture f;
+  buildFixture(f);
+  CHECK_EQ(f.s.count, 5);
+  CHECK_EQ(om::mc::radioCount(f.s), 3);
+
+  uint8_t pub[32];
+  memcpy(pub, f.s.c[0].pub, sizeof(pub));
+  CHECK(om::mc::removeFromRadio(f.s, pub) == om::mc::RadioResult::Ok);
+  // The node is still in the table (on the SD card), its name and key are intact, and only the mark moved.
+  CHECK_EQ(f.s.count, 5);
+  CHECK_EQ(om::mc::radioCount(f.s), 2);
+  CHECK(om::mc::contactsFind(f.s, pub) >= 0);
+  CHECK(!f.s.c[0].in_radio);
+  CHECK(strcmp(f.s.c[0].name, "RADIO-A") == 0);
+  CHECK(strcmp(om::ui::nodeRemovedFromRadioNotice(),
+               "Removed from the radio, kept on the SD card") == 0);
+
+  // Removing a node that is not in the radio refuses and changes nothing (no accidental delete).
+  const size_t before = f.s.count;
+  CHECK(om::mc::removeFromRadio(f.s, pub) == om::mc::RadioResult::AlreadyIn);
+  CHECK_EQ(f.s.count, before);
+  CHECK(om::mc::contactsFind(f.s, pub) >= 0);
+
+  // And it can be put back: the action is reversible, which is the whole point of "kept on the SD card".
+  CHECK(om::mc::addToRadio(f.s, pub) == om::mc::RadioResult::Ok);
+  CHECK_EQ(om::mc::radioCount(f.s), 3);
+}
+
 }  // namespace
 
 int main() {
@@ -304,6 +335,7 @@ int main() {
   testRadioFullPath();
   testDeleteConfirmAndFocus();
   testSettingsValues();
+  testRemoveFromRadioKeepsRow();
   printf("test_node_view: %d checks, %d failures\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }
