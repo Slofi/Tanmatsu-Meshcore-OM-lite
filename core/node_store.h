@@ -48,6 +48,12 @@ const char* nodeFileResultText(NodeFileResult r);
 // The standard reflected CRC-32 (poly 0xEDB88320), the same bytes on the host and the device.
 uint32_t nodeFileCrc32(const uint8_t* data, size_t len);
 
+// S515 (Claude, found on the device): "did this encoded file change?" A CRC-32 over a WHOLE node file is useless
+// for that: the file ends with its own CRC-32, and CRC-32 over (data || CRC-32(data)) is the constant residue
+// 0x2144DF1C for ANY data, so every file looked unchanged and radio.bin was never rewritten after the migration.
+// The signature is the CRC over the file WITHOUT its trailing CRC field (0 for a buffer too short to hold one).
+uint32_t nodeFileSignature(const uint8_t* file, size_t len);
+
 // Encode `s` into `out`. `radio_only` selects the radio file (rows with in_radio) or the archive (all rows).
 // `max_rows` caps the selection (0 = kMaxNodes). Returns the byte count, or 0 when `out` is null / cap is small.
 size_t nodeFileEncode(const ContactStore& s, bool radio_only, size_t max_rows, uint8_t* out, size_t cap);

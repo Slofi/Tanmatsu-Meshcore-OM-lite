@@ -45,6 +45,11 @@ const char* nodeFileResultText(NodeFileResult r) {
     return "unknown";
 }
 
+uint32_t nodeFileSignature(const uint8_t* file, size_t len) {
+    if (file == nullptr || len < kNodeFileCrcBytes) return 0;
+    return nodeFileCrc32(file, len - kNodeFileCrcBytes);
+}
+
 uint32_t nodeFileCrc32(const uint8_t* data, size_t len) {
     uint32_t crc = 0xFFFFFFFFu;
     if (data != nullptr) {

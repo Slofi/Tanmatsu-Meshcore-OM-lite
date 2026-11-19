@@ -724,7 +724,7 @@ size_t nodeStorageBegin(bool sd_mounted) {
                 const size_t marked = markAllInRadio(g_contacts);
                 // The bytes we just read are the bytes the writer would produce, so the first archive-only advert
                 // does not cause a needless rewrite of internal flash.
-                g_radio_signature      = nodeFileCrc32(g_node_file_buf, len);
+                g_radio_signature      = nodeFileSignature(g_node_file_buf, len);
                 g_radio_have_signature = true;
                 ESP_LOGI(TAG, "radio: %u nodes from %s", (unsigned)marked, kRadioFilePath);
                 radio_loaded = true;
@@ -744,7 +744,7 @@ size_t nodeStorageBegin(bool sd_mounted) {
             // is REPLACED instead of being retried and rejected on every boot. The NVS blob is not touched.
             const size_t bytes = nodeFileEncode(g_contacts, true, kMaxRadio, g_node_file_buf, kNodeFileMaxBytes);
             if (bytes > 0 && writeFileAtomic(kRadioFilePath, kRadioTempPath, g_node_file_buf, bytes)) {
-                g_radio_signature      = nodeFileCrc32(g_node_file_buf, bytes);
+                g_radio_signature      = nodeFileSignature(g_node_file_buf, bytes);
                 g_radio_have_signature = true;
                 if (n > 0) ESP_LOGI(TAG, "migrated %u nodes from NVS", (unsigned)n);
                 else       ESP_LOGI(TAG, "radio: 0 nodes from %s (empty file written)", kRadioFilePath);
@@ -817,7 +817,7 @@ void contactsPersistTick() {
                 radio_rows = radioCount(g_contacts);
                 if (g_int_mounted) {
                     radio_bytes = nodeFileEncode(g_contacts, true, kMaxRadio, g_node_file_buf, kNodeFileMaxBytes);
-                    if (radio_bytes > 0) radio_sig = nodeFileCrc32(g_node_file_buf, radio_bytes);
+                    if (radio_bytes > 0) radio_sig = nodeFileSignature(g_node_file_buf, radio_bytes);   // not the whole-file CRC (S515)
                 } else {
                     radio_bytes = contactsEncodeRadio(g_contacts, g_contact_blob, kContactBlobMaxBytes,
                                                       kNodeNvsRadioCap);

@@ -264,7 +264,33 @@ void testMarkAllInRadioCaps() {
 
 }  // namespace
 
+// S515 (Claude, found on the device): the "did the radio file change?" signature. The device skipped every
+// radio.bin write after the migration because it compared CRC-32s of WHOLE files, and a file that ends with its
+// own CRC-32 always hashes to the residue 0x2144DF1C. Moving a node out of the radio must change the signature.
+void testSignatureSeesAChange() {
+  om::mc::ContactStore s;
+  addContact(s, makeNode(1, true, 100));
+  addContact(s, makeNode(2, true, 200));
+  static uint8_t a[om::mc::kNodeFileMaxBytes];
+  static uint8_t b[om::mc::kNodeFileMaxBytes];
+  const size_t na = om::mc::nodeFileEncode(s, true, om::mc::kMaxRadio, a, sizeof(a));
+  s.c[1].in_radio = false;   // "Move to archive"
+  const size_t nb = om::mc::nodeFileEncode(s, true, om::mc::kMaxRadio, b, sizeof(b));
+  CHECK(na > 0 && nb > 0);
+  // The trap, pinned: whole-file CRCs of two DIFFERENT files are the same constant.
+  CHECK_EQ(om::mc::nodeFileCrc32(a, na), 0x2144DF1Cu);
+  CHECK_EQ(om::mc::nodeFileCrc32(b, nb), 0x2144DF1Cu);
+  CHECK(om::mc::nodeFileSignature(a, na) != om::mc::nodeFileSignature(b, nb));
+  // The same content gives the same signature (so an unchanged list still skips the write).
+  static uint8_t c[om::mc::kNodeFileMaxBytes];
+  s.c[1].in_radio = true;
+  const size_t nc = om::mc::nodeFileEncode(s, true, om::mc::kMaxRadio, c, sizeof(c));
+  CHECK_EQ(om::mc::nodeFileSignature(a, na), om::mc::nodeFileSignature(c, nc));
+  CHECK_EQ(om::mc::nodeFileSignature(a, 3), 0u);
+}
+
 int main() {
+  testSignatureSeesAChange();
   testRadioFileRoundTrip();
   testArchiveFileRoundTrip();
   testCodecRefusals();
