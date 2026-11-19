@@ -182,16 +182,36 @@ void drawChat(Screen& s, const ChatView& v) {
                 snprintf(stamp, sizeof(stamp), "%s %s", m.hhmm, m.state);
             else
                 snprintf(stamp, sizeof(stamp), "%s", m.hhmm);
-            drawText(s, Face::Hint, kTmPad + 4, textBaseline(s, Face::Hint, y, 20), stamp, kDimmer);
+            const int   base    = textBaseline(s, Face::Hint, y, 20);
+            drawText(s, Face::Hint, kTmPad + 4, base, stamp, kDimmer);
+            // S515/EST-462: the dim time row, in the SAME ink family as the clock, drawn where it cannot collide:
+            // after the sender's own width on an incoming line, and right-aligned just left of "you" on ours. The
+            // widths and the gap are core/chat_meta.h's constants, so a host test pins both edges.
+            const Font* meta_f = fontFor(Face::Meta);
+            const Font* hint_f = fontFor(Face::Hint);
             if (m.outgoing) {
-                drawTextRightClipped(s, Face::Meta, right_x, textBaseline(s, Face::Meta, y, 20), right_x - left_x,
-                                     who, kDim);
+                drawTextRightClipped(s, Face::Meta, right_x, base, right_x - left_x, who, kDim);
+                const int you_w = (meta_f != nullptr && meta_f->ready()) ? meta_f->textWidth(who) : 0;
+                const int meta_w = om::mc::metaOutgoingMaxW(left_x, right_x, you_w);
+                if (m.meta[0] != '\0' && meta_w > 0) {
+                    drawTextRightClipped(s, Face::Hint, om::mc::metaOutgoingRight(right_x, you_w), base, meta_w,
+                                         m.meta, kDimmer);
+                }
             } else {
-                drawTextClipped(s, Face::Meta, left_x, textBaseline(s, Face::Meta, y, 20), right_x - left_x, who,
-                                kAcc);
+                drawTextClipped(s, Face::Meta, left_x, base, right_x - left_x, who, kAcc);
+                const int who_w = (meta_f != nullptr && meta_f->ready()) ? meta_f->textWidth(who) : 0;
+                const int age_w = (hint_f != nullptr && hint_f->ready() && m.age[0] != '\0')
+                                      ? hint_f->textWidth(m.age)
+                                      : 0;
+                const int age_x  = W - kTmPad - age_w;
+                const int meta_w = om::mc::metaIncomingMaxW(left_x, who_w, age_x);
+                if (m.meta[0] != '\0' && meta_w > 0) {
+                    drawTextClipped(s, Face::Hint, om::mc::metaIncomingX(left_x, who_w), base, meta_w, m.meta,
+                                    kDimmer);
+                }
             }
             if (m.age[0])
-                drawTextRight(s, Face::Hint, W - kTmPad, textBaseline(s, Face::Hint, y, 20), m.age, kDimmer);
+                drawTextRight(s, Face::Hint, W - kTmPad, base, m.age, kDimmer);
             for (int l = 0; l < lines; l++) {
                 const int  by      = y + kTmChatHeadH + l * kTmChatLineH;
                 const bool lastCut = m.clipped && (l == lines - 1);

@@ -15,6 +15,90 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S515 (EST-462) · the time row
+
+> Written by **DeepSeek** for ticket **EST-462**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed, pushed or committed. Starting point **v57 `dff0c02`**. **Version: 58** (`core/settings.h` kAppVersion).
+> Items 1-5 are in: the real path on RX/TX, the L2 record carries it, the dim head line, host tests and the preview.
+> `firmware/` was read only and is unchanged.
+
+### 1. THE REAL PATH, KEPT (done)
+
+- `core/mc_store.h`: `Message` and `DmMessage` gain `hops_known`, `hops`, `hash_size`, `path_bytes`,
+  `path[meshcore::kMaxPath]`, `frame_len`, `RouteType route` (Flood / ScopedFlood / Direct / Unknown), `copies` and
+  `frame_fp`. `snr_x10` and `direct` stay.
+- `main/mc_link.cpp`: one `takeWirePath(view, len, message)` for the group-text and DM RX branches copies the
+  path, the hop count, the hash size, the frame length **the RX log prints** and the route from `View::route()`
+  (0x00 TRANSPORT_FLOOD = scoped, 0x01 flood, 0x02 direct). Our own channel text stores the frame length we queued
+  and the route the scope plan chose; our own DM stores the composed frame's length and its flood/direct route.
+  A retry moves those facts (length, route, fingerprint) to the frame the air now carries.
+- **Copies** are counted, not just dropped: the seen-ring hit calls `noteDroppedCopy(fp, ours)` before returning.
+  `ours` = our own echo (the 0x42 rule) → `copies++` on the outgoing line; otherwise a duplicate of a peer's frame
+  → `copies++` on the stored incoming line. The match is the message's own `frame_fp`, so no second table exists.
+
+### 2. WHAT IS TRUE AFTER A RESTART (done)
+
+- `core/mc_history.cpp` writes the real path in the L2's OWN fields — `hops`, `pathHashSize = hash_size`,
+  `pathCount = hops`, `path[]`, length derived by `msgSetPath` — and adds nothing to the format. An own flood
+  (hops not knowable) keeps the old flood shape (hops 1, pathCount 0), which reads back as UNKNOWN.
+- The loader compares the shape: `hops == 0` is **direct** (true in both encoders); `hops > 0` with
+  `pathCount == 0` (the v57 fake) or `pathCount != hops` is **UNKNOWN** and shows no hop count; only
+  `pathCount == hops` with 1..3-byte hashes is a real path. `frame_len`, `route` and `copies` stay absent for a
+  restored line: they are not in the record, and the formatter shows bytes only when they are real.
+
+### 3. THE HEAD LINE (done)
+
+- New pure core `core/chat_meta.h/.cpp`:
+  - `pathHopLabel(contactStore, hash, len)` — the name only when **exactly one** full-key contact starts with those
+    bytes, else the lowercase hex ("86a8"). Prefix-only rows are ignored. EST-463 can add the SD archive beside the
+    contact table; the rule stays one function.
+  - `chatMetaText(MsgMeta)` — incoming `"direct"` / `"3 hops via X"` [+ ` · 87 B`] [+ ` · heard 2×`]; own
+    `"87 B"` [+ ` · repeated 2×`]. `heard`/`repeated` appear only from two copies up. Unknown fields contribute
+    nothing.
+  - `metaIncomingX/MaxW`, `metaOutgoingRight/MaxW` — the pixel box shared with the page.
+- `main/chat_page.cpp`: the dim tail (`Face::Hint`, `kDimmer`) is drawn after the sender's own width on an
+  incoming line and right-aligned just left of "you" on ours, clipped with the ellipsis by `drawTextClipped` so it
+  never reaches the age column. `main/main.cpp` builds each row's meta from the message and the contact table.
+  RSSI and SNR are not shown (DEVICE.md § 5b).
+
+### 4. HOST TESTS (done)
+
+- New `test/host/test_chat_meta.cpp`: 30 checks — the resolver with 1/2/3-byte hashes, unique → name, two → hex,
+  none → hex, a prefix-only row ignored; the formatter for direct, N hops with/without via, one hop singular, a
+  restored old record (empty), a restored new record (hops but no bytes), one copy not shown, own bytes/repeats,
+  own restored empty; the clip never reaching the age column or "you".
+- `test/host/test_history.cpp` +3 functions (38 checks): the real path round trip through the L2 decoder
+  (`h.hops 3 / pathHashSize 2 / pathCount 3 / pathLen 6 / bytes equal`), a v57-style fake record (hops 1,
+  pathCount 0) reading as `hops_known=false` while hops 0 reads as direct, and the DM record's real path.
+- **Armed, both against the old behaviour, with the FAIL lines:**
+  - old encoder restored (fake `hops 0/1`, pathCount 0):
+    `FAIL test_history.cpp:320  h.hops == 3 (got 1, want 3)`
+  - old loader restored (trust `hops`, `direct = hops <= 0`):
+    `FAIL test_history.cpp:331  out[0].hash_size == 2 (got 0, want 2)`
+    `FAIL test_history.cpp:362  out[0].hops_known == false (got 1, want 0)`
+    `FAIL test_history.cpp:411  out[0].hash_size == 1 (got 0, want 1)`
+- `sh test/host/run.sh`: exit **0**. Before: 28 suites / 17,140 checks. After: 29 suites / **17,208 checks**
+  (+68: 30 new suite, +38 history). The UBSan lines from the vendored Ed25519 are pre-existing.
+- `make build`: exit **0**; `application.bin` 0x19d570 = **1,693,040 B**, 0x62a90 (19 %) free of the 2 MiB app slot.
+
+### 5. PREVIEW (done)
+
+- `shots/2026-11-19-chat-meta.png` (`tools/preview_tanmatsu.py chat_meta`): one channel with a direct message, a
+  3-hop line with a named via, a 3-hop line with a hex via, a restored old line (nothing), and two of our own —
+  the second `87 B · repeated 2×`.
+
+### FILES CHANGED
+
+`core/chat_meta.h` (new), `core/chat_meta.cpp` (new), `core/CMakeLists.txt`, `core/mc_store.h`,
+`core/mc_history.cpp`, `core/settings.h` (version 58), `main/mc_link.cpp`, `main/chat_page.h`, `main/chat_page.cpp`,
+`main/main.cpp`, `test/host/test_chat_meta.cpp` (new), `test/host/test_history.cpp`, `test/host/run.sh`,
+`tools/preview_tanmatsu.py`, `shots/2026-11-19-chat-meta.png` (new), `docs/PROGRESS.md`.
+
+### NEXT
+
+EST-463 (node storage, radio + SD archive) extends `pathHopLabel` to the archive; nothing in this ticket blocks it.
+Nothing installed, flashed, pushed or committed — Claude reviews and commits.
+
 ## 2026-11-19 · S515 (EST-461) · dots, new contacts, screen off
 
 > Written by **DeepSeek** for ticket **EST-461**: fenced Paperclip run, no session start/end, nothing installed,

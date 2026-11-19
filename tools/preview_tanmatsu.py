@@ -2251,6 +2251,89 @@ def dm_enter():
     return save(img, '2026-11-19-dm-enter.png')
 
 
+# ------------------------------------------------------------- the chat time row (S515/EST-462)
+# stamp, the delivery state drawn after OUR time (None for an incoming line), who, body, mine, and the dim meta
+# tail core/chat_meta builds: hops/via · bytes · copies (incoming) or bytes · repeats (ours). One row is a restored
+# old record: its hops byte was fake in v57, so it honestly shows nothing.
+META_THREAD = [
+    ('09:12', None, 'Alpha', 'Was at the coast today, the direct path is clear.', False,
+     'direct · 87 B'),
+    ('09:14', None, 'Beta', 'The third repeater works from the hill.', False,
+     '3 hops via TEST-RPT-A · 101 B'),
+    ('09:16', None, 'Gamma', 'This one only resolves as a hash.', False,
+     '3 hops via 86a8 · 94 B'),
+    ('09:18', None, 'Delta', 'A line read back from before the update.', False, ''),
+    ('09:20', 'delivered', 'you', 'Testing the new time row.', True, '87 B'),
+    ('09:22', 'delivered', 'you', 'Second one was heard back twice.', True, '87 B · repeated 2×'),
+]
+
+
+def chat_meta():
+    """OM Lite > Chat > # Public, with the S515/EST-462 time row above every message.
+
+    After the sender name (incoming) or right-aligned just left of "you" (ours), in the dimmer ink: the real path
+    as "3 hops via <last repeater>" (a contact name only when exactly one matches, else the hash), the frame's byte
+    count, and the copies heard — "heard 2×" / "repeated 2×", only from two up. A restored v57 line shows only what
+    its record carried: no hop count, no bytes. RSSI and SNR are deliberately absent (DEVICE.md § 5b).
+    """
+    img, d = new_screen()
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    status_bar(d)
+
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Chat', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    text(d, (W - pad, y + TM['head_h'] // 2), '6 messages', font(FONT_MONO, TM['f_meta']), P['Dimmer'],
+         anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+
+    work_top = y + TM['head_h']
+    text(d, (pad, work_top + 18), '# Public', font(FONT_SANS, 20), P['Ink'])
+
+    left_x = pad + 58                      # kTmChatBodyX0: incoming under the time column
+    right_x = W - pad - 46                 # kTmChatBodyX1: outgoing keeps the age column clear
+    fstamp = font(FONT_MONO, TM['f_meta'])
+    fname = font(FONT_SANS, TM['f_body'])
+    fmeta = font(FONT_MONO, TM['f_meta'])
+    fbody = font(FONT_SANS, TM['f_body'])
+
+    ages = ['12m', '10m', '9m', '8m', '2m', '1m']
+    # Six one-line messages must all fit above the composer (all six are the point of this preview).
+    yy = work_top + 40
+    for (stamp, state, who, body, mine, meta), age in zip(META_THREAD, ages):
+        txt = stamp + (' ' + state if state else '')
+        text(d, (pad + 4, yy), txt, fstamp, P['Dimmer'])
+        if mine:
+            text(d, (right_x, yy), 'you', fmeta, P['Dim'], anchor='ra')
+            if meta:
+                tx = right_x - tw(fmeta, 'you') - 10      # metaOutgoingRight: left of "you"
+                text(d, (tx, yy), meta, fmeta, P['Dimmer'], anchor='ra')
+        else:
+            text(d, (left_x, yy), who, fname, P['Acc'])
+            if meta:
+                tx = left_x + tw(fname, who) + 10         # metaIncomingX: after the sender
+                text(d, (tx, yy), meta, fmeta, P['Dimmer'])
+        text(d, (W - pad, yy), age, fstamp, P['Dimmer'], anchor='ra')
+        yy += 19
+        lines = wrap(d, body, fbody, right_x - left_x)
+        for line in lines:
+            if mine:
+                text(d, (right_x, yy), line, fbody, P['Ink'], anchor='ra')
+            else:
+                text(d, (left_x, yy), line, fbody, P['Ink'])
+            yy += 19
+        yy += 7
+
+    ch = H - TM['hint_h'] - 56
+    plate(d, [pad, ch, W - pad, ch + 44], P['FieldBg'], P['Line'], r=4)
+    text(d, (pad + 12, ch + 22), 'message the channel, Enter sends', font(FONT_MONO, TM['f_meta']),
+         P['Dimmer'], anchor='lm')
+    key_cap(d, [W - pad - 84, ch + 8, W - pad - 8, ch + 36], '↵ Enter', P['Dimmer'],
+            font(FONT_SANS, TM['f_hint']))
+
+    hint_bar(d, 'chat', [('type', 'write'), ('↑↓', 'scroll'), ('↵', 'send'), ('esc', 'back')])
+    return save(img, '2026-11-19-chat-meta.png')
+
+
 
 # ------------------------------------------------------------------ RPTR part 1 (S514/EST-453)
 # Same two-pane shape as the device's main/rptr_page.cpp. Every name and key is an INVENTED fixture
@@ -2465,7 +2548,7 @@ def hint_dots():
 RENDERERS = dict(launcher=launcher, nodes_fresh=nodes_fresh, hint_dots=hint_dots, menu=menu, nodes=nodes, nodes_search=nodes_search,
                  nodes_favourites=nodes_favourites, node_trace=node_trace, chat=chat, chat2=chat_cards,
                  chat_emoji=chat_emoji,
-                 chat_dm=chat_dm_column, dm_enter=dm_enter, map=map_page, rptr=rptr, rptr_list=rptr_list, rptr_status=rptr_status, settings=settings,
+                 chat_dm=chat_dm_column, chat_meta=chat_meta, dm_enter=dm_enter, map=map_page, rptr=rptr, rptr_list=rptr_list, rptr_status=rptr_status, settings=settings,
                  settings_general=settings_general, settings_omlite=settings_omlite,
                  settings_opstoc=settings_opstoc, settings_chat=settings_chat,
                  settings_nodes=settings_nodes, settings_map=settings_map,

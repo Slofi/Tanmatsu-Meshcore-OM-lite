@@ -113,6 +113,10 @@ int contactsFindUniquePrefix(const ContactStore& s, const uint8_t prefix[4]);
 // bytes, and a prefix-only key would produce a secret the peer cannot derive. Fills `name` (may be empty).
 bool dmPeerKey(const ContactStore& s, const uint8_t pub[32], char* name, size_t name_cap);
 
+// S515/EST-462: how a frame travelled — MeshCore's own route field (Packet.h:14-17). TRANSPORT_FLOOD is a
+// scoped flood (channel_scope.h builds one for a region). Unknown is honest: a restored record never carries it.
+enum class RouteType : uint8_t { Unknown = 0, Flood = 1, ScopedFlood = 2, Direct = 3 };
+
 struct Message {
     uint32_t seq = 0;           // assigned by messagesPush: monotonic, the thing unread is counted against
     uint8_t  channel = 0;
@@ -123,6 +127,22 @@ struct Message {
     uint32_t local_ts = 0;      // our clock when it arrived (ordering, and ages when ts is unusable)
     int16_t  snr_x10 = 0;
     bool     direct = false;    // path_len 0 in the received frame
+    // S515/EST-462: the REAL path, not the fake direct/flood pair the history record used to carry. `path` holds
+    // hash_size * hops bytes (a copy, because the frame buffer is reused); its LAST hash is the hop nearest us.
+    // hops_known is false when there is no honest count: our own flood, or a pre-v58 record's fake value.
+    bool     hops_known = false;
+    uint8_t  hops       = 0;     // repeaters crossed; 0 = direct
+    uint8_t  hash_size  = 0;     // path hash size in bytes (1..3); 0 = unknown
+    uint8_t  path_bytes = 0;     // hash_size * hops actually kept in `path`
+    uint8_t  path[meshcore::kMaxPath] = {0};
+    // Bytes and route are live-radio facts; the L2 record keeps neither, so they stay 0/Unknown after a restart.
+    uint16_t  frame_len = 0;     // the number the RX/TX log prints
+    RouteType route     = RouteType::Unknown;
+    // Copies heard: incoming = duplicate frames of this message; outgoing = our own frame heard back (the 0x42
+    // self-echo). Counted by the seen ring, never invented for a restored line.
+    uint16_t copies = 0;
+    // The payload fingerprint the seen ring matches, so a dropped copy can find the line it belongs to.
+    uint32_t frame_fp = 0;
     // The id this message has IN ITS LOG FILE (S503), 0 when it was never written to the card. It is what the
     // Meta record's seen point refers to, so unread can be restored after a restart — `seq` cannot do that
     // because messagesPush restarts it at 1 on every boot.
@@ -155,6 +175,17 @@ struct DmMessage {
     uint32_t local_ts = 0;      // our clock when it arrived (ordering and local HH:MM)
     int16_t  snr_x10 = 0;
     bool     direct = false;    // path_len 0 in the received frame
+    // S515/EST-462: the same real-path facts a channel message carries (see Message above). A DM has one thread
+    // per peer, but the route is the message's own: one line can arrive direct and the next through repeaters.
+    bool     hops_known = false;
+    uint8_t  hops       = 0;
+    uint8_t  hash_size  = 0;
+    uint8_t  path_bytes = 0;
+    uint8_t  path[meshcore::kMaxPath] = {0};
+    uint16_t  frame_len = 0;
+    RouteType route     = RouteType::Unknown;
+    uint16_t  copies    = 0;
+    uint32_t  frame_fp  = 0;
     uint32_t log_id = 0;        // id in that contact's log file (item 4), 0 = not written
     // S513/EST-439: for OUR outgoing DMs, the delivery state the ACK proves (the L2's DmState). An incoming
     // message leaves this at Sending; only an outgoing one is ever advanced, and the log's Update record keeps it

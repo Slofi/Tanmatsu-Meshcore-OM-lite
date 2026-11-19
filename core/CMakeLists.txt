@@ -17,6 +17,9 @@ idf_component_register(
          # Chat layout (S503): wrapping a message into lines, and which messages fit the screen. Pure arithmetic,
          # so the host tests pin the break points instead of the glass teaching us.
          "chat_layout.cpp"
+         # S515/EST-462: the chat time row — the last-repeater resolver and the dim head-line formatter. Pure, so
+         # the host tests pin "never guess between two contacts" and "unknown stays unknown after a restart".
+         "chat_meta.cpp"
          # S513/EST-430: the Chat list's two-column card grid — the rects, the focus moves and the scroll that keeps
          # the focused card visible. Pure arithmetic on the page's box, so the host tests pin the panel's numbers.
          "chat_cards.cpp"

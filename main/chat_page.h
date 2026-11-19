@@ -13,6 +13,7 @@
 
 #include "chat_cards.h"    // mc::CardGrid: the two-column card geometry and focus rules (S513)
 #include "chat_layout.h"   // mc::Line / kMaxLines: the wrap the view carries (S503)
+#include "chat_meta.h"     // S515/EST-462: kChatMetaCap + the head-line pixel arithmetic
 #include "mc_store.h"
 #include "screen.h"
 #include "tm_theme.h"
@@ -97,6 +98,9 @@ struct ChatView {
         // "no confirmation" (the L2's DmState words, dm_delivery.h; the font has no check glyph, so the word is
         // what is drawn). Empty for an incoming message.
         char        state[20];
+        // S515/EST-462: the dim time-row tail after the sender — hops/via, bytes, copies ("3 hops via X · 87 B ·
+        // heard 2×"). Built by core/chat_meta.* so the text is pinned by a host test; the page only clips it.
+        char        meta[mc::kChatMetaCap];
         bool        outgoing;
         // The wrap, as byte ranges into `text` (S503). The wrap itself is decided by core/chat_layout.*, so the
         // page only draws what it is given.

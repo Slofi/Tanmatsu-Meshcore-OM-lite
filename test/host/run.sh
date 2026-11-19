@@ -17,6 +17,7 @@ LAYOUT="$(mktemp /tmp/tm-layout.XXXXXX)"
 MAP="$(mktemp /tmp/tm-map.XXXXXX)"
 TXQ="$(mktemp /tmp/tm-txq.XXXXXX)"
 CARDS="$(mktemp /tmp/tm-cards.XXXXXX)"
+META="$(mktemp /tmp/tm-chat-meta.XXXXXX)"
 MENU="$(mktemp /tmp/tm-menu.XXXXXX)"
 DM="$(mktemp /tmp/tm-dm.XXXXXX)"
 ADV="$(mktemp /tmp/tm-advert.XXXXXX)"
@@ -44,7 +45,7 @@ RPTRED="$(mktemp -d /tmp/tm-rptr-ed.XXXXXX)"
 CHANORACLE="$(mktemp -d /tmp/tm-chan-oracle.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -183,6 +184,15 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
     ../../core/chat_cards.cpp \
     -o "$CARDS"
 "$CARDS"
+
+# The chat time row (S515/EST-462): the last-repeater resolver (a name only for an EXACTLY ONE match, else the
+# hash), the dim head-line formatter for every honest case, and the pixel box that keeps the text off the age
+# column and off "you". Pure, so "never guess between two contacts" is a test, not a hope.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_chat_meta.cpp \
+    ../../core/chat_meta.cpp ../../core/mc_store.cpp \
+    -o "$META"
+"$META"
 
 # The start menu's rules (S513/EST-432): three app cards, focus clamped at both ends, Enter on an available
 # card vs a LATER one, and s only on a running card. The panel has no second area any more (the S499 two-area

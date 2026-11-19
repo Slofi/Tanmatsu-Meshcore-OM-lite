@@ -690,6 +690,6 @@ constexpr bool advertScheduleDue(uint32_t interval_s, uint32_t elapsed_s, bool e
 }
 
 // The image's version, shown in General > DEVICE. One constant: the next ticket bumps this line.
-constexpr const char* kAppVersion = "57";
+constexpr const char* kAppVersion = "58";
 
 }  // namespace tm

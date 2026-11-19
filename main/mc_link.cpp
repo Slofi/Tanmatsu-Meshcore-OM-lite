@@ -920,6 +920,64 @@ bool traceHopName(const uint8_t* hash, uint8_t len, void* ctx, char* out, size_t
     return false;
 }
 
+// ---- S515/EST-462: the REAL path of a message ----------------------------------------------------------------
+// One place turns a decoded frame into the facts the time row shows. The path is COPIED: the RX buffer is reused
+// by the next packet. A live frame's hop count is always known (0 = heard directly); only a restored record can
+// be unknown, and that is mc_history's rule, not this one.
+RouteType routeOfView(const meshcore::View& v) {
+    switch (v.route()) {
+        case meshcore::kRouteFlood: return RouteType::Flood;
+        case meshcore::kRouteTransportFlood: return RouteType::ScopedFlood;
+        case meshcore::kRouteDirect: return RouteType::Direct;
+        default: return RouteType::Unknown;
+    }
+}
+
+template <typename M>
+void takeWirePath(const meshcore::View& v, size_t frame_len, M& m) {
+    m.direct     = (v.path_bytes == 0);
+    m.hops_known = true;
+    m.hops       = v.hash_count;
+    m.hash_size  = (v.hash_count > 0) ? v.hash_size : 0;
+    m.path_bytes = 0;
+    const size_t bytes = (size_t)v.hash_count * (size_t)v.hash_size;
+    if (v.hash_count > 0 && v.path != nullptr && v.hash_size >= 1 && v.hash_size <= 3 &&
+        bytes <= meshcore::kMaxPath) {
+        memcpy(m.path, v.path, bytes);
+        m.path_bytes = (uint8_t)bytes;
+    }
+    m.frame_len = frame_len > 0 && frame_len <= 0xFFFF ? (uint16_t)frame_len : 0;
+    m.route     = routeOfView(v);
+    m.frame_fp  = meshcore::frameFingerprint(v);   // the seen ring's key, so a dropped copy can find its line
+}
+
+// The frame we are about to send: its fingerprint, taken the same way the RX path takes it.
+uint32_t outgoingFingerprint(const uint8_t* frame, size_t len) {
+    meshcore::View ov;
+    if (frame == nullptr || len == 0 || !meshcore::decode(frame, len, &ov)) return 0;
+    return meshcore::frameFingerprint(ov);
+}
+
+// The seen ring has just dropped a frame (the 0x42 rule). If it was OURS it is an echo of a frame we queued, so
+// it counts on the outgoing line it came from; otherwise it is a duplicate copy of a peer's line. A count that
+// finds no line (evicted, or an ACK/path return rather than a message) changes nothing.
+void noteDroppedCopy(uint32_t fp, bool ours) {
+    if (fp == 0) return;
+    StoreLock l;
+    for (size_t i = 0; i < g_messages.count; ++i) {
+        Message& m = g_messages.m[(g_messages.head + i) % kMaxMessages];
+        if (m.frame_fp != fp || m.outgoing != ours) continue;
+        ++m.copies;
+        return;
+    }
+    for (size_t i = 0; i < g_dms.count; ++i) {
+        DmMessage& m = g_dms.m[(g_dms.head + i) % kMaxDms];
+        if (m.frame_fp != fp || m.outgoing != ours) continue;
+        ++m.copies;
+        return;
+    }
+}
+
 void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
     meshcore::View v;
     if (!meshcore::decode(buf, len, &v)) {
@@ -934,11 +992,15 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
         bool ours = false;
         bool seen = false;
         // Same lock as markOwnFrame(): the ring is written by both tasks (see the comment there).
-        const bool locked = g_tx_lock != nullptr;
+        const bool     locked = g_tx_lock != nullptr;
+        const uint32_t fp     = meshcore::frameFingerprint(v);
         if (locked) xSemaphoreTake(g_tx_lock, portMAX_DELAY);
-        seen = g_seen.seen(meshcore::frameFingerprint(v), &ours);
+        seen = g_seen.seen(fp, &ours);
         if (locked) xSemaphoreGive(g_tx_lock);
         if (seen) {
+            // S515/EST-462: the drop is still a fact worth counting — a duplicate copy of a peer's line, or our
+            // own frame heard back. It lands on the message in the store, never on the log.
+            noteDroppedCopy(fp, ours);
             ESP_LOGI(TAG, "rx %u B type %u: %s, dropped", (unsigned)len, (unsigned)v.type(),
                      ours ? "our own echo" : "duplicate, already shown");
             return;
@@ -1106,7 +1168,8 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
             m.ts       = dm.timestamp;
             m.local_ts = (uint32_t)om::time_source::epochNow();   // OUR clock, for ordering and the list's HH:MM
             m.snr_x10  = (int16_t)(snr_db * 10);
-            m.direct   = (v.path_bytes == 0);
+            // S515/EST-462: the DM's own real path and frame length, exactly as the RX log line prints it.
+            takeWirePath(v, len, m);
             snprintf(m.text, sizeof(m.text), "%.*s", (int)(sizeof(m.text) - 1), dm.text);
             // Item 4: the thread's log is dm-<pubkey[0..3] 8 hex>. Its id is per file, kept on the contact row so
             // evicting the ring cannot reset the numbering; a message that could not be written keeps log_id 0
@@ -1278,7 +1341,8 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
         m.ts        = ts;
         m.local_ts  = (uint32_t)om::time_source::epochNow();
         m.snr_x10   = (int16_t)(snr_db * 10);
-        m.direct    = (v.path_bytes == 0);
+        // S515/EST-462: the REAL path, the route type and the frame length (the same number the RX log prints).
+        takeWirePath(v, len, m);
         // A message longer than the field is CUT, not dropped: the field widths are the UI's, not MeshCore's.
         snprintf(m.sender, sizeof(m.sender), "%.*s", (int)(sizeof(m.sender) - 1), sender);
         snprintf(m.text, sizeof(m.text), "%.*s", (int)(sizeof(m.text) - 1), text);
@@ -1336,15 +1400,24 @@ static int doText(size_t i, const char* sender, const char* text) {
              (unsigned)ts, scope_log, sent > 0 ? "ok" : "FAILED");
     if (sent > 0) {
         // Keep the outgoing line in the store ourselves, so the chat has it the instant Enter is pressed. The echo
-        // is already accounted for: the frame was registered above, and RX drops it as our own.
+        // is already accounted for: the frame was registered above, and RX drops it as our own — and since
+        // S515/EST-462 that drop also COUNTS on this line ("repeated 2×").
         StoreLock l;
         Message   m;
         m.channel  = (uint8_t)i;
         m.outgoing = true;
         m.ts       = ts;
         m.local_ts = ts;
-        m.direct   = true;
+        m.direct   = false;
         m.snr_x10  = 0;
+        // The route we actually sent on, and the frame length we queued. A flood's hop count is not known: it
+        // depends on who repeats it, so `hops_known` stays false rather than inventing one.
+        m.hops_known = false;
+        m.hops       = 0;
+        m.hash_size  = 0;
+        m.frame_len  = (uint16_t)n;
+        m.route      = plan.region[0] != '\0' ? RouteType::ScopedFlood : RouteType::Flood;
+        m.frame_fp   = outgoingFingerprint(frame, n);
         snprintf(m.sender, sizeof(m.sender), "%.*s", (int)(sizeof(m.sender) - 1), sender);
         snprintf(m.text, sizeof(m.text), "%.*s", (int)(sizeof(m.text) - 1), text);
         const uint32_t seq = pushAndLog(i, m);
@@ -1514,6 +1587,14 @@ bool queueDm(const uint8_t pub[32], const char* text) {
         m.ts       = ts;
         m.local_ts = ts;
         m.direct   = !c.flood;
+        // S515/EST-462: the route we sent on and the frame length we queued. A DIRECT DM is a known 0 hops; a
+        // flood's hop count is not knowable here, so it stays unknown.
+        m.hops_known = !c.flood;
+        m.hops       = 0;
+        m.hash_size  = 0;
+        m.frame_len  = c.frame_len <= 0xFFFF ? (uint16_t)c.frame_len : 0;
+        m.route      = c.flood ? RouteType::Flood : RouteType::Direct;
+        m.frame_fp   = outgoingFingerprint(c.frame, c.frame_len);
         snprintf(m.text, sizeof(m.text), "%.*s", (int)(sizeof(m.text) - 1), text);
         const int ci   = contactsFind(g_contacts, pub);
         uint32_t  next = (ci >= 0) ? g_contacts.c[ci].dm_log_next : dmNewestLogId(g_dms, pub) + 1;
@@ -1656,6 +1737,20 @@ bool dmTick() {
         xSemaphoreGive(g_dm_lock);
         ESP_LOGW(TAG, "DM: retry %u could not be queued; trying again shortly", (unsigned)attempt);
         return false;
+    }
+    // S515/EST-462: the retry is the frame the air now carries, so it is also the one whose echo counts. The
+    // message's own facts move with it (length, route) rather than keeping the first attempt's.
+    {
+        StoreLock l;
+        if (DmMessage* m = findDmBySeq(due.msg_id)) {
+            m->direct     = !c.flood;
+            m->hops_known = !c.flood;
+            m->hops       = 0;
+            m->hash_size  = 0;
+            m->frame_len  = c.frame_len <= 0xFFFF ? (uint16_t)c.frame_len : 0;
+            m->route      = c.flood ? RouteType::Flood : RouteType::Direct;
+            m->frame_fp   = outgoingFingerprint(c.frame, c.frame_len);
+        }
     }
     ESP_LOGI(TAG, "DM: retry %u queued for message %u (%u B, %s)", (unsigned)attempt, (unsigned)due.msg_id,
              (unsigned)c.frame_len, c.flood ? "flood" : "direct");

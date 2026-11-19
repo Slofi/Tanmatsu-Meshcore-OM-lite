@@ -9,6 +9,45 @@
 
 namespace om {
 namespace mc {
+namespace {
+
+// S515/EST-462: what a restored record can honestly say about the path.
+//   · hops == 0 is "direct" in BOTH encoders (v57 wrote 0 for a direct frame, and this build writes the real 0 too);
+//   · hops > 0 with pathCount == 0 is a v57-style FAKE record (the old encoder wrote hops 1, pathCount 0, no
+//     bytes): the hop count is UNKNOWN and must not be shown;
+//   · this build always writes pathCount == hops with pathHashSize bytes each, so only that shape is a real path.
+// What the record never carries stays absent: bytes, route type and copy counts.
+struct RestoredPath {
+    bool     hops_known = false;
+    bool     direct     = false;
+    uint8_t  hops       = 0;
+    uint8_t  hash_size  = 0;
+    uint8_t  path_bytes = 0;
+    uint8_t  path[meshcore::kMaxPath] = {0};
+};
+
+RestoredPath pathFromRecord(const om::history::Msg& h) {
+    RestoredPath p;
+    if (h.hops < 0) return p;                       // no count at all
+    if (h.hops == 0) {                              // direct, true in both encoders
+        p.hops_known = true;
+        p.direct     = true;
+        return p;
+    }
+    const int hs = h.pathHashSize;
+    const int hc = h.pathCount;
+    if (hc == 0 || hc != (int)h.hops || hs < 1 || hs > 3) return p;   // the v57 fake shape: unknown
+    const int bytes = hs * hc;
+    if (bytes > (int)meshcore::kMaxPath || bytes != (int)h.pathLen) return p;
+    p.hops_known = true;
+    p.hops       = (uint8_t)hc;
+    p.hash_size  = (uint8_t)hs;
+    p.path_bytes = (uint8_t)bytes;
+    memcpy(p.path, h.path, (size_t)bytes);
+    return p;
+}
+
+}  // namespace
 
 int historyEncode(const Message& m, uint32_t log_id, uint8_t* out, int cap) {
     if (out == nullptr || cap <= 0) return 0;
@@ -22,12 +61,13 @@ int historyEncode(const Message& m, uint32_t log_id, uint8_t* out, int cap) {
     h.setWallReal(h.wall != 0);
     h.setMine(m.outgoing);
     h.setDm(false);                       // channels only in this build; DMs are a later slice
-    h.hops    = (int8_t)(m.direct ? 0 : 1);
+    // S515/EST-462: the REAL path, in the format's own fields (nothing new is added to the L2's layout). A message
+    // whose hop count is not honestly known (our own flood) keeps the old flood shape — hops 1 with pathCount 0 —
+    // which this build's loader reads back as UNKNOWN rather than inventing a count.
+    h.hops    = (int8_t)(m.hops_known ? (int)m.hops : (m.direct ? 0 : 1));
     h.snr4    = (int8_t)(m.snr_x10 / 25);   // the L2 stores SNR in 0.25 dB steps
-    h.repeats = 0;
-    h.pathHashSize = 1;
-    h.pathCount    = 0;
-    h.pathLen      = 0;
+    h.repeats = 0;                        // copies/echoes are live facts, never restored (item 2)
+    om::history::msgSetPath(h, m.path, m.hash_size, m.hops_known ? m.hops : 0);
     om::history::msgSetText(h, m.sender, m.text);
 
     uint8_t payload[om::history::kMaxPayload];
@@ -49,15 +89,13 @@ int historyEncodeDm(const DmMessage& m, uint32_t log_id, uint8_t* out, int cap) 
     h.setWallReal(h.wall != 0);
     h.setMine(m.outgoing);
     h.setDm(true);
-    h.hops    = (int8_t)(m.direct ? 0 : 1);
+    h.hops    = (int8_t)(m.hops_known ? (int)m.hops : (m.direct ? 0 : 1));
     h.snr4    = (int8_t)(m.snr_x10 / 25);
-    h.repeats = 0;
+    h.repeats = 0;                        // live fact, not restored (item 2)
     // The delivery byte is the L2's own DmState value (dm_delivery.h -> history_log.h Msg::delivery). An outgoing
     // message is written as Sending; the ACK later appends an Update that raises it to Delivered.
     h.delivery = (uint8_t)m.delivery;
-    h.pathHashSize = 1;
-    h.pathCount    = 0;
-    h.pathLen      = 0;
+    om::history::msgSetPath(h, m.path, m.hash_size, m.hops_known ? m.hops : 0);
     om::history::msgSetText(h, m.peer_name, m.text);
 
     uint8_t payload[om::history::kMaxPayload];
@@ -124,7 +162,19 @@ size_t historyLoadDm(const uint8_t* data, size_t len, const uint8_t peer_pub[32]
         m.ts       = h.wall;
         m.local_ts = h.wall;
         m.snr_x10  = (int16_t)((int)h.snr4 * 25);
-        m.direct   = h.hops <= 0;
+        {
+            const RestoredPath p = pathFromRecord(h);
+            m.direct     = p.direct;
+            m.hops_known = p.hops_known;
+            m.hops       = p.hops;
+            m.hash_size  = p.hash_size;
+            m.path_bytes = p.path_bytes;
+            if (p.path_bytes > 0) memcpy(m.path, p.path, p.path_bytes);
+            // Bytes, route and copy counts are not in the record; leave them absent (item 2).
+            m.frame_len = 0;
+            m.route     = p.direct ? RouteType::Direct : RouteType::Unknown;
+            m.copies    = 0;
+        }
         m.delivery = h.delivery <= (uint8_t)om::ui::DmState::Failed
                          ? (om::ui::DmState)h.delivery
                          : om::ui::DmState::NotConfirmed;   // a byte from a future format is never shown as "ok"
@@ -227,7 +277,18 @@ size_t historyLoad(const uint8_t* data, size_t len, uint8_t channel, Message* ou
         m.ts       = h.wall;
         m.local_ts = h.wall;
         m.snr_x10  = (int16_t)((int)h.snr4 * 25);
-        m.direct   = h.hops <= 0;
+        {
+            const RestoredPath p = pathFromRecord(h);
+            m.direct     = p.direct;
+            m.hops_known = p.hops_known;
+            m.hops       = p.hops;
+            m.hash_size  = p.hash_size;
+            m.path_bytes = p.path_bytes;
+            if (p.path_bytes > 0) memcpy(m.path, p.path, p.path_bytes);
+            m.frame_len = 0;   // not in the record: bytes are shown for THIS boot only
+            m.route     = p.direct ? RouteType::Direct : RouteType::Unknown;
+            m.copies    = 0;
+        }
         // The L2's name field is 32 bytes and ours is 24, so a long name is CUT here, not refused.
         snprintf(m.sender, sizeof(m.sender), "%.*s", (int)(sizeof(m.sender) - 1), h.name);
         snprintf(m.text, sizeof(m.text), "%.*s", (int)(sizeof(m.text) - 1), h.text);

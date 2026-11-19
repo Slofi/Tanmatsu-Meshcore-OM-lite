@@ -1065,6 +1065,26 @@ void batteryStrings(char* out, size_t n, bool* charging) {
     snprintf(out, n, "%d%%", (int)(g_batt.remaining_percentage + 0.5f));
 }
 
+// S515/EST-462: one message's time-row facts, from whichever ring it lives in. The last path hash is the hop
+// nearest us (a repeater appends itself on the way here), and core/chat_meta resolves it to a name only when
+// exactly one contact matches — otherwise the hash itself. A message restored from the L2 record has no bytes,
+// route or copy count, and core/mc_history already left `hops_known` false for a pre-v58 fake record.
+template <typename M>
+om::mc::MsgMeta chatMetaFor(const M& m) {
+    om::mc::MsgMeta mm;
+    mm.outgoing   = m.outgoing;
+    mm.hops_known = m.hops_known;
+    mm.hops       = m.hops;
+    mm.bytes      = m.frame_len;
+    mm.copies     = m.copies;
+    if (!m.outgoing && m.hops_known && m.hops > 0 && m.hash_size >= 1 && m.hash_size <= 3 &&
+        m.path_bytes >= m.hash_size) {
+        const uint8_t* last = m.path + (m.path_bytes - m.hash_size);
+        om::mc::pathHopLabel(om::mc::contacts(), last, m.hash_size, mm.via, sizeof(mm.via));
+    }
+    return mm;
+}
+
 }  // namespace
 
 // --- step 3b slice 1: prove the MeshCore codec ON THE CHIP ------------------------------------------
@@ -2030,12 +2050,13 @@ extern "C" void app_main(void) {
                 // The open view is one of two things: a channel's messages, or a DM thread's. Both go through the
                 // SAME window/wrap code below, so a thread and a channel cannot drift in how they scroll.
                 struct Src {
-                    const char* text;
-                    const char* sender;
-                    uint32_t    local_ts;
-                    uint32_t    ts;
-                    bool        outgoing;
-                    uint8_t     delivery;   // S513/EST-439: an outgoing DM's DmState (dm_delivery.h)
+                    const char*       text;
+                    const char*       sender;
+                    uint32_t          local_ts;
+                    uint32_t          ts;
+                    bool              outgoing;
+                    uint8_t           delivery;   // S513/EST-439: an outgoing DM's DmState (dm_delivery.h)
+                    om::mc::MsgMeta   meta;       // S515/EST-462: hops/via, bytes, copies — built from the message
                 };
                 static Src srcs[om::mc::kMaxDms];
                 int        idx[om::mc::kMaxDms];
@@ -2048,7 +2069,7 @@ extern "C" void app_main(void) {
                         const om::mc::DmMessage* m = om::mc::dmAt(dmr, (size_t)idx[i]);
                         if (m == nullptr) continue;
                         srcs[i] = {m->text, m->peer_name, m->local_ts, m->ts, m->outgoing,
-                                   (uint8_t)m->delivery};
+                                   (uint8_t)m->delivery, chatMetaFor(*m)};
                     }
                 } else {
                     snprintf(cv.channel_name, sizeof(cv.channel_name), "%s",
@@ -2061,7 +2082,7 @@ extern "C" void app_main(void) {
                     for (size_t i = 0; i < n; i++) {
                         const om::mc::Message* m = om::mc::messagesAt(msgs, (size_t)idx[i]);
                         if (m == nullptr) continue;
-                        srcs[i] = {m->text, m->sender, m->local_ts, m->ts, m->outgoing, 0};
+                        srcs[i] = {m->text, m->sender, m->local_ts, m->ts, m->outgoing, 0, chatMetaFor(*m)};
                     }
                 }
 
@@ -2116,6 +2137,10 @@ extern "C" void app_main(void) {
                             case om::ui::DmState::Failed: snprintf(mv.state, sizeof(mv.state), "not sent"); break;
                         }
                     }
+                    // S515/EST-462: the dim tail — "3 hops via X · 87 B · heard 2×" (incoming) or "87 B ·
+                    // repeated 2×" (ours). Unknown fields contribute nothing, so a restored line shows only
+                    // what the record really carried.
+                    om::mc::chatMetaText(s.meta, mv.meta, sizeof(mv.meta));
                     mv.line_count = wraps[i].count ? wraps[i].count : 1;
                     mv.clipped    = wraps[i].clipped;
                     for (int l = 0; l < om::mc::kMaxLines; l++) mv.line[l] = wraps[i].line[l];
