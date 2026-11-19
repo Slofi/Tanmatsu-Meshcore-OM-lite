@@ -143,6 +143,23 @@ OTA server" is related). Until then: update over USB (§ 4) or from a network th
 > here are IPv4-only, so users cannot update at all. I installed v0.3.1 by writing `launcher.bin` to the
 > running OTA slot over USB (`make quickflash`), which worked fine. Cheers!
 
+## 5b. RSSI and SNR from the C6 radio are unusable (2026-11-18, S513; written by Claude) — report to Nicolai
+
+**What we see** (OM Lite, `tanmatsu-lora` 0.6.0 over the C6, `Projects/pocket-mesh/measurements/tanmatsu-v40-first-dm-2026-11-18-S513.log`):
+every received packet's stats arrive as **raw RSSI 0** and **raw signal-RSSI 0**; the SNR byte is non-zero but cannot
+be decoded consistently (raw -54 and -105 read as -13 / -26 dB by the component's own header, and -26 dB is below the
+floor SF8 can decode). Examples: `rx 114 B raw rssi 0 snr -54 signal 0`, `rx 120 B raw rssi 0 snr -105 signal 0`.
+
+**What the component source shows** (`managed_components/nicolaielectronics__tanmatsu-lora/lora.c`): the header
+documents `rssi_dbm = -rssi_pkt_raw/2`, `snr_db = snr_pkt_raw/4`, `signal_rssi_dbm = -signal_rssi_pkt_raw/2`, but the
+radio-side path (`lora_radio_read_data`, ~line 442) writes `rssi_pkt_raw = rssi_pkt_dbm * 4.0f` (a NEGATIVE float into
+a `uint8_t`, which comes out 0 on RISC-V), `snr_pkt_raw = -snr_pkt_db * 2.0f` and `signal_rssi_pkt_raw =
+-signal_rssi_pkt_db * 2.0f`. The RSSI line alone explains the 0; the signal field is also 0 and the SNR scale does not
+match either reading, so **we do not know which code the C6 firmware actually runs** — hence a report, not a patch.
+
+**Ask for Nicolai:** which source the shipped C6 radio firmware is built from, and whether the three conversions match
+the header. Until then OM Lite shows no RSSI and treats the SNR as unknown. *(Not sent yet; Filip sends it.)*
+
 ## 6. Other facts read off this unit
 
 - LoRa: the radio reports **`SX1261 V2D 2D02`** (from the C6's lora coprocessor). ⚠️ **That string is the generic

@@ -27,6 +27,16 @@ MeshCore session, settings/NVS, the SD card and map tiles, the clock — and mod
 through the core. Nothing is a process: one module that crashes takes the app down, and a leaking module
 starves the others, so start/stop is not a convenience feature, it is the memory discipline.
 
+**Decision S514 (2026-11-19, Filip; written by Claude): ONE app, modules on the shared core.** Filip asked
+whether OM Lite, OPS-TOC and Mesh-Torry should be one app or three, and decided: *"I agree, it is better as one
+app, but I wasn't sure it would work.."*. Why: OPS-TOC and Mesh-Torry need what OM Lite already owns (the radio,
+the MeshCore identity and contacts, the SD map packs); in one app they share one copy, switching is instant and the
+mesh keeps running behind another module; three AppFS apps would each duplicate radio/MeshCore/map code in an 8 MB
+AppFS that also holds other apps, and switching costs a restart (~6.5 s to the first frame). **Limits to watch:**
+3,200 KiB per app (v49 ≈ 1,496 KiB, ~47 %) and internal RAM. **Split a module out** only if one of those runs short
+(Mesh-Torry's Wi-Fi/TLS is the likely trigger). The in-app start menu stays (three app cards, S514 v39), and each
+module brings its own Settings tab through the module settings hook (S514 EST-448).
+
 ## 2. Structure (module / core)
 
 ```
