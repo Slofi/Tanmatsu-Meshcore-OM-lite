@@ -18,6 +18,7 @@ MAP="$(mktemp /tmp/tm-map.XXXXXX)"
 TXQ="$(mktemp /tmp/tm-txq.XXXXXX)"
 CARDS="$(mktemp /tmp/tm-cards.XXXXXX)"
 META="$(mktemp /tmp/tm-chat-meta.XXXXXX)"
+SELECT="$(mktemp /tmp/tm-chat-select.XXXXXX)"
 MENU="$(mktemp /tmp/tm-menu.XXXXXX)"
 DM="$(mktemp /tmp/tm-dm.XXXXXX)"
 ADV="$(mktemp /tmp/tm-advert.XXXXXX)"
@@ -52,7 +53,7 @@ RPTRED="$(mktemp -d /tmp/tm-rptr-ed.XXXXXX)"
 CHANORACLE="$(mktemp -d /tmp/tm-chan-oracle.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN" "$NODEVIEW" "$NODESMAPN" "$MSGPOPUP" "$MSGLED"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN" "$NODEVIEW" "$NODESMAPN" "$MSGPOPUP" "$MSGLED" "$SELECT"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -200,6 +201,16 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
     ../../core/chat_meta.cpp ../../core/mc_store.cpp \
     -o "$META"
 "$META"
+
+# Selecting a chat message (S515/EST-469): the box's index rules (enter at the newest, move, Down past the newest
+# leaves, the frame stays on the SAME message by seq when one arrives), the menu rows per message kind, the
+# name-to-node rule (a unique full-key match only), the MeshCore reply prefix, and the Info sheet's lines — with
+# "not kept after a restart" for what a restored record does not carry.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_chat_select.cpp \
+    ../../core/chat_select.cpp ../../core/chat_meta.cpp ../../core/mc_store.cpp \
+    -o "$SELECT"
+"$SELECT"
 
 # The start menu's rules (S513/EST-432): three app cards, focus clamped at both ends, Enter on an available
 # card vs a LATER one, and s only on a running card. The panel has no second area any more (the S499 two-area

@@ -171,6 +171,44 @@ void test_window_overflows_to_the_newest() {
     CHECK_EQ(w.hidden_above, 0);
 }
 
+// S515/EST-469: the window that FOLLOWS a selected message. chatWindow stops at the topmost FULL window
+// (max_scroll), so the oldest messages are above it; the selection box must reach every one of them.
+void test_window_at_follows_the_selection() {
+    int lines[20];
+    for (int i = 0; i < 20; i++) lines[i] = 3;   // 3*22 + 8 = 74 px each
+
+    // The selected message is the BOTTOM of the window: selecting 12 of 20 leaves 7 newer messages below it.
+    om::mc::Window w = om::mc::chatWindowAt(lines, 20, 22, 8, 288, 7);
+    CHECK_EQ(w.last, 12);
+    CHECK_EQ(w.first, 10);
+    CHECK_EQ(w.hidden_below, 7);
+
+    // The oldest message is reachable, even though chatWindow's own max_scroll (17) would stop short of it.
+    w = om::mc::chatWindowAt(lines, 20, 22, 8, 288, 19);
+    CHECK_EQ(w.last, 0);
+    CHECK_EQ(w.first, 0);
+    CHECK_EQ(w.hidden_above, 0);
+    CHECK_EQ(w.hidden_below, 19);
+
+    // It is the SAME rule as chatWindow wherever chatWindow's clamp does not bite.
+    const om::mc::Window a = om::mc::chatWindow(lines, 20, 22, 8, 288, 3);
+    const om::mc::Window b = om::mc::chatWindowAt(lines, 20, 22, 8, 288, 3);
+    CHECK_EQ(a.first, b.first);
+    CHECK_EQ(a.last, b.last);
+    CHECK_EQ(a.max_scroll, b.max_scroll);
+
+    // And a scroll beyond the array clamps instead of reading past it.
+    w = om::mc::chatWindowAt(lines, 20, 22, 8, 288, 999);
+    CHECK_EQ(w.last, 0);
+    w = om::mc::chatWindowAt(lines, 20, 22, 8, 288, -5);
+    CHECK_EQ(w.last, 19);
+
+    // Nothing to draw: the same empty answer chatWindow gives.
+    const int empty_window = 0;
+    w = om::mc::chatWindowAt(&empty_window, 0, 22, 8, 288, 0);
+    CHECK_EQ(w.last, -1);
+}
+
 void test_window_shows_one_tall_message() {
     const int lines[2]     = {20, 1};
     om::mc::Window w       = om::mc::chatWindow(lines, 2, 22, 8, 100, 0);
@@ -211,6 +249,7 @@ int main() {
     test_window_all_fit();
     test_window_overflows_to_the_newest();
     test_window_shows_one_tall_message();
+    test_window_at_follows_the_selection();
     test_read_prefix();
 
     printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);

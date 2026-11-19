@@ -147,7 +147,7 @@ void test_formatter_n_hops_with_via_and_copies() {
     m.copies = 2;
     char out[om::mc::kChatMetaCap];
     om::mc::chatMetaText(m, out, sizeof(out));
-    CHECK_STR(out, "3 hops via TEST-RPT-A \xC2\xB7 87 B \xC2\xB7 heard 2\xC3\x97");
+    CHECK_STR(out, "3 hops via TEST-RPT-A \xC2\xB7 87 B \xC2\xB7 heard 3\xC3\x97");
 }
 
 void test_formatter_one_hop_singular() {
@@ -168,7 +168,7 @@ void test_formatter_n_hops_without_via() {
     m.copies     = 2;
     char out[om::mc::kChatMetaCap];
     om::mc::chatMetaText(m, out, sizeof(out));
-    CHECK_STR(out, "3 hops \xC2\xB7 87 B \xC2\xB7 heard 2\xC3\x97");
+    CHECK_STR(out, "3 hops \xC2\xB7 87 B \xC2\xB7 heard 3\xC3\x97");
 }
 
 void test_formatter_restored_old_record_is_empty() {
@@ -195,10 +195,10 @@ void test_formatter_one_copy_is_not_shown() {
     m.hops_known = true;
     m.hops       = 0;
     m.bytes      = 87;
-    m.copies     = 1;    // one copy is the line that arrived; only a second is worth the ink
+    m.copies     = 1;    // S515 (Claude): copies = EXTRA copies, so one duplicate = heard twice
     char out[om::mc::kChatMetaCap];
     om::mc::chatMetaText(m, out, sizeof(out));
-    CHECK_STR(out, "direct \xC2\xB7 87 B");
+    CHECK_STR(out, "direct \xC2\xB7 87 B \xC2\xB7 heard 2\xC3\x97");
 }
 
 void test_formatter_own_bytes_and_repeats() {
@@ -211,12 +211,15 @@ void test_formatter_own_bytes_and_repeats() {
     CHECK_STR(out, "87 B \xC2\xB7 repeated 2\xC3\x97");
 }
 
-void test_formatter_own_one_echo_is_not_shown() {
+void test_formatter_own_one_echo_is_not_shown() {   // S515 (Claude): one echo IS shown now; name kept for the run list
     om::mc::MsgMeta m;
     m.outgoing = true;
     m.bytes    = 87;
     m.copies   = 1;
     char out[om::mc::kChatMetaCap];
+    om::mc::chatMetaText(m, out, sizeof(out));
+    CHECK_STR(out, "87 B \xC2\xB7 repeated 1\xC3\x97");
+    m.copies = 0;   // no echo: nothing
     om::mc::chatMetaText(m, out, sizeof(out));
     CHECK_STR(out, "87 B");
 }

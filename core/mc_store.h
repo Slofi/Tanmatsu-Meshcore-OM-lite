@@ -184,6 +184,11 @@ struct Message {
     // Meta record's seen point refers to, so unread can be restored after a restart — `seq` cannot do that
     // because messagesPush restarts it at 1 on every boot.
     uint32_t log_id = 0;
+    // S515/EST-469: this line came back from the card's log, not from the air THIS boot. The record keeps the
+    // path and one wall time, but not the route, the frame's bytes or the copy count (mc_history sets those
+    // absent), so the Info sheet says "not kept after a restart" for them instead of printing a zero that
+    // would read as a measurement. Set only by core/mc_history's restore paths.
+    bool     restored = false;
 };
 
 struct MessageRing {
@@ -228,6 +233,8 @@ struct DmMessage {
     // message leaves this at Sending; only an outgoing one is ever advanced, and the log's Update record keeps it
     // across a restart (dm_delivery.h + history_log.h).
     om::ui::DmState delivery = om::ui::DmState::Sending;
+    // S515/EST-469: read back from the card's log, not heard this boot (see Message::restored).
+    bool restored = false;
 };
 
 struct DmRing {

@@ -78,11 +78,12 @@ void chatMetaText(const MsgMeta& m, char* out, size_t cap) {
             snprintf(b, sizeof(b), "%u B", (unsigned)m.bytes);
             appendStr(out, cap, &n, b);
         }
-        // One copy is already "the line that arrived"; a second is the fact worth the ink.
-        if (m.copies >= 2) {
+        // `copies` counts the EXTRA copies (the seen ring's drops), so the times heard is copies + 1. Shown from
+        // two: one is just "the line that arrived". (S515, Claude review: it printed copies, one too low.)
+        if (m.copies >= 1) {
             appendSep(out, cap, &n);
             char c[24];
-            snprintf(c, sizeof(c), "heard %u\xC3\x97", (unsigned)m.copies);
+            snprintf(c, sizeof(c), "heard %u\xC3\x97", (unsigned)m.copies + 1u);
             appendStr(out, cap, &n, c);
         }
         return;
@@ -94,7 +95,9 @@ void chatMetaText(const MsgMeta& m, char* out, size_t cap) {
         snprintf(b, sizeof(b), "%u B", (unsigned)m.bytes);
         appendStr(out, cap, &n, b);
     }
-    if (m.copies >= 2) {
+    // Our own frame heard back: each echo is a repeat, so ONE echo is already "repeated 1×" (S515, Claude review:
+    // it needed two, so a message the mesh repeated once showed nothing).
+    if (m.copies >= 1) {
         appendSep(out, cap, &n);
         char c[24];
         snprintf(c, sizeof(c), "repeated %u\xC3\x97", (unsigned)m.copies);

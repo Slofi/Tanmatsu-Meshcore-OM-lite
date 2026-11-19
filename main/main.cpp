@@ -1171,6 +1171,45 @@ om::mc::MsgMeta chatMetaFor(const M& m) {
     return mm;
 }
 
+// S515/EST-469: ONE selected message's facts, copied out under the store's lock so the menu and the Info sheet
+// work from a snapshot. A channel Message and a DmMessage carry the same fields under the same names, hence the
+// template; the two rings differ only in what a thread is keyed by.
+struct ChatSelMsg {
+    bool     found      = false;
+    uint32_t seq        = 0;
+    bool     outgoing   = false;
+    bool     restored   = false;
+    char     sender[om::mc::kNameBytes] = {0};
+    uint32_t ts         = 0;
+    uint32_t local_ts   = 0;
+    om::mc::RouteType route = om::mc::RouteType::Unknown;
+    bool     hops_known = false;
+    uint8_t  hops       = 0;
+    uint8_t  hash_size  = 0;
+    uint8_t  path_bytes = 0;
+    uint8_t  path[meshcore::kMaxPath] = {0};
+    uint16_t frame_len  = 0;
+    uint16_t copies     = 0;
+};
+
+template <typename M>
+void chatSelCopy(const M& m, ChatSelMsg* out) {
+    out->found      = true;
+    out->seq        = m.seq;
+    out->outgoing   = m.outgoing;
+    out->restored   = m.restored;
+    out->ts         = m.ts;
+    out->local_ts   = m.local_ts;
+    out->route      = m.route;
+    out->hops_known = m.hops_known;
+    out->hops       = m.hops;
+    out->hash_size  = m.hash_size;
+    out->path_bytes = m.path_bytes;
+    out->frame_len  = m.frame_len;
+    out->copies     = m.copies;
+    if (m.path_bytes > 0 && m.path_bytes <= sizeof(out->path)) memcpy(out->path, m.path, m.path_bytes);
+}
+
 }  // namespace
 
 // --- step 3b slice 1: prove the MeshCore codec ON THE CHIP ------------------------------------------
@@ -1445,12 +1484,11 @@ extern "C" void app_main(void) {
     static bool    chat_dm_open     = false;
     static uint8_t chat_dm_pub[32]  = {0};
     char   chat_dm_name[32] = "";
-    // S503: how many messages the open channel is scrolled BACK from the newest (0 = pinned to the bottom), how
-    // far it can go (from the last draw — a channel that all fits has nowhere to scroll), and how many messages it
-    // had at the last draw, so arriving messages do not drag the view out from under the reader.
-    static int chat_scroll     = 0;
-    int    chat_max_scroll = 0;
-    static int chat_seen_count = -1;
+    // How many messages the open chat is scrolled BACK from the newest (0 = pinned to the bottom). S515/EST-469:
+    // this is no longer a free scroll — it follows the selection box only, and with no box it is 0. The two
+    // counters the free scroll needed (its furthest-back limit and the seen count that kept arrivals from dragging
+    // the view) went with it: nothing clamps this any more, and a message arriving above the box does not move it.
+    static int chat_scroll = 0;
     // Step 6: the Map page's view. wx/wy are the world pixel at the top-left of the map area; -1 means
     // "not placed yet", which the first draw places from the MAP settings (Last position or Ljubljana) at the
     // chosen Start zoom (S514/EST-447; the default is still today's Ljubljana at z16).
@@ -1465,6 +1503,17 @@ extern "C" void app_main(void) {
     // write can move a row but never a key.
     uint8_t  map_highlight_pub[32] = {0};
     bool     map_highlight         = false;
+    // S515/EST-469: the message selection, its menu, and the Info sheet. The shell keeps only the SELECTED
+    // message's identity (its seq) and the sheets' focus: everything else is read from the store on demand under
+    // its lock, so a message evicted while a sheet is open cannot leave a stale copy on the screen.
+    // `static` for the same reason the chat state above is: the module's onTop hook (installed below) closes an
+    // inner level from a captureless lambda, and leaving the chat must also drop the box.
+    static bool     chat_sel        = false;
+    static uint32_t chat_sel_seq    = 0;
+    static int      chat_sel_index  = -1;   // where that seq is in the current list, recomputed on every draw
+    static bool     chat_menu_open  = false;
+    static int      chat_menu_focus = 0;
+    static bool     chat_info_open  = false;
     char   composer[120] = {0};
     size_t composer_len  = 0;
     // S513: a short-lived line for the one thing the composer cannot say by itself — that a send was REFUSED
@@ -2067,7 +2116,13 @@ extern "C" void app_main(void) {
         chat_dm_open    = true;
         chat_open       = true;
         chat_scroll     = 0;
-        chat_seen_count = -1;
+        // S515/EST-469: a different chat is on screen now, so no box or sheet may survive from the old one.
+        chat_sel        = false;
+        chat_sel_seq    = 0;
+        chat_sel_index  = -1;
+        chat_menu_open  = false;
+        chat_menu_focus = 0;
+        chat_info_open  = false;
         om::mc::noteDmRead(chat_dm_pub);
         core.goPage(tm::Page::Chat);
         ESP_LOGI(TAG, "nodes: DM thread with %s", name);
@@ -2143,6 +2198,227 @@ extern "C" void app_main(void) {
         ctx.pingPending  = om::mc::nodePingPendingFor(cs.c[store_index].pub);
         ctx.tracePending = om::mc::nodeTracePendingFor(cs.c[store_index].pub);
         return om::ui::nodeMenuRows(ctx, out, max);
+    };
+
+    // ---- S515/EST-469: the message selection, its menu, and the Info sheet --------------------------------
+    // The RULES are core/chat_select.h (host-tested); these lambdas read the store under its lock and perform the
+    // side effects. The selection itself lives in `chat_sel_seq` (see above), so a message arriving while the box
+    // is up cannot move the frame to a different line.
+    auto chatCloseSelection = [&]() {
+        chat_sel        = false;
+        chat_sel_seq    = 0;
+        chat_sel_index  = -1;
+        chat_menu_open  = false;
+        chat_menu_focus = 0;
+        chat_info_open  = false;
+    };
+
+    // How many messages the open chat holds (0 for a channel with nothing on it yet).
+    auto chatMsgCount = [&]() -> int {
+        om::mc::StoreLock l;
+        if (chat_dm_open) {
+            int idx[om::mc::kMaxDms];
+            return (int)om::mc::dmForPeer(om::mc::dmThreads(), chat_dm_pub, idx, om::mc::kMaxDms);
+        }
+        int idx[om::mc::kMaxMessages];
+        return (int)om::mc::messagesForChannel(om::mc::messages(), (uint8_t)chat_focus, idx, om::mc::kMaxMessages);
+    };
+
+    // The seq of the message `from_newest` positions back from the newest (0 = the newest itself), 0 for none.
+    auto chatSeqAtFromNewest = [&](int from_newest) -> uint32_t {
+        om::mc::StoreLock l;
+        if (chat_dm_open) {
+            int          idx[om::mc::kMaxDms];
+            const size_t n = om::mc::dmForPeer(om::mc::dmThreads(), chat_dm_pub, idx, om::mc::kMaxDms);
+            const int    i = (int)n - 1 - from_newest;
+            if (i < 0 || i >= (int)n) return 0;
+            const om::mc::DmMessage* m = om::mc::dmAt(om::mc::dmThreads(), (size_t)idx[i]);
+            return m != nullptr ? m->seq : 0;
+        }
+        int          idx[om::mc::kMaxMessages];
+        const size_t n = om::mc::messagesForChannel(om::mc::messages(), (uint8_t)chat_focus, idx,
+                                                    om::mc::kMaxMessages);
+        const int    i = (int)n - 1 - from_newest;
+        if (i < 0 || i >= (int)n) return 0;
+        const om::mc::Message* m = om::mc::messagesAt(om::mc::messages(), (size_t)idx[i]);
+        return m != nullptr ? m->seq : 0;
+    };
+
+    // Up/Down inside the box, in ONE pass under the store's lock: the list, where the selected seq sits in it, the
+    // rule (core/chat_select::chatSelMove) and the seq the box lands on. False = the move leaves the box (Down past
+    // the newest). One lock and one list, so a message arriving mid-press cannot make the box jump by two.
+    auto chatSelStep = [&](int delta, uint32_t* out_seq) -> bool {
+        if (out_seq == nullptr) return false;
+        *out_seq = 0;
+        static uint32_t   seqs[om::mc::kMaxMessages];
+        int               n = 0;
+        om::mc::StoreLock l;
+        if (chat_dm_open) {
+            int idx[om::mc::kMaxDms];
+            n = (int)om::mc::dmForPeer(om::mc::dmThreads(), chat_dm_pub, idx, om::mc::kMaxDms);
+            for (int i = 0; i < n; ++i) {
+                const om::mc::DmMessage* m = om::mc::dmAt(om::mc::dmThreads(), (size_t)idx[i]);
+                seqs[i]                    = m != nullptr ? m->seq : 0;
+            }
+        } else {
+            int idx[om::mc::kMaxMessages];
+            n = (int)om::mc::messagesForChannel(om::mc::messages(), (uint8_t)chat_focus, idx, om::mc::kMaxMessages);
+            for (int i = 0; i < n; ++i) {
+                const om::mc::Message* m = om::mc::messagesAt(om::mc::messages(), (size_t)idx[i]);
+                seqs[i]                  = m != nullptr ? m->seq : 0;
+            }
+        }
+        const int                 at = om::ui::chatSelIndexForSeq(seqs, n, chat_sel_seq);
+        const om::ui::ChatSelMove mv = om::ui::chatSelMove(at, delta, n);
+        if (!mv.active) return false;
+        *out_seq = seqs[mv.index];
+        return true;
+    };
+
+    // The selected message's facts, from whichever ring the open chat reads. False when it is gone (the ring
+    // evicted it while a sheet was up) — the caller then closes the selection instead of acting on nothing.
+    auto chatSelLoad = [&](ChatSelMsg* out) -> bool {
+        if (out == nullptr) return false;
+        *out = ChatSelMsg();
+        if (chat_sel_seq == 0) return false;
+        om::mc::StoreLock l;
+        if (chat_dm_open) {
+            int          idx[om::mc::kMaxDms];
+            const size_t n = om::mc::dmForPeer(om::mc::dmThreads(), chat_dm_pub, idx, om::mc::kMaxDms);
+            for (size_t i = 0; i < n; ++i) {
+                const om::mc::DmMessage* m = om::mc::dmAt(om::mc::dmThreads(), (size_t)idx[i]);
+                if (m != nullptr && m->seq == chat_sel_seq) {
+                    chatSelCopy(*m, out);
+                    // A DM ring names the peer; the frame's own sender word is ours when the line is outgoing.
+                    snprintf(out->sender, sizeof(out->sender), "%s", m->peer_name);
+                    return true;
+                }
+            }
+        } else {
+            int          idx[om::mc::kMaxMessages];
+            const size_t n = om::mc::messagesForChannel(om::mc::messages(), (uint8_t)chat_focus, idx,
+                                                        om::mc::kMaxMessages);
+            for (size_t i = 0; i < n; ++i) {
+                const om::mc::Message* m = om::mc::messagesAt(om::mc::messages(), (size_t)idx[i]);
+                if (m != nullptr && m->seq == chat_sel_seq) {
+                    chatSelCopy(*m, out);
+                    snprintf(out->sender, sizeof(out->sender), "%s", m->sender);
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    // The menu's rows for one message: the sender resolved to a NODE (a DM thread knows the peer's key; a channel
+    // message carries only a name, and then only an exact, unique match counts). `node_out` hands that row to the
+    // action Enter runs, so DM/Map/Node cannot resolve it a second time and land somewhere else.
+    auto chatMenuBuild = [&](const ChatSelMsg& m, om::ui::ChatMsgRow* rows, int* node_out) -> int {
+        om::ui::ChatMsgContext ctx;
+        ctx.kind   = m.outgoing ? om::ui::ChatMsgKind::Own
+                                : (chat_dm_open ? om::ui::ChatMsgKind::IncomingDm
+                                                : om::ui::ChatMsgKind::IncomingChannel);
+        ctx.sender = m.sender;
+        ctx.in_dm  = chat_dm_open;
+        char        note[40] = "";
+        const char* why      = "";
+        int         node     = -1;
+        {
+            om::mc::StoreLock l;
+            if (!m.outgoing) {
+                if (chat_dm_open) {
+                    node = om::mc::contactsFind(om::mc::contacts(), chat_dm_pub);
+                    why  = node >= 0 ? "" : "unknown node";
+                } else {
+                    const om::ui::ChatNodeByName byname = om::ui::chatNodeByName(om::mc::contacts(), m.sender);
+                    node = byname.index;
+                    why  = om::ui::chatNodeNote(byname, note, sizeof(note));
+                }
+                if (node >= 0) {
+                    const om::mc::Contact& c = om::mc::contacts().c[node];
+                    ctx.node_has_position = om::map::positionDrawable(c.has_position, c.lat_e6, c.lon_e6);
+                }
+            }
+        }
+        ctx.node_index = node;
+        ctx.node_note  = why;   // a literal or `note`: both outlive the call, which copies them into the rows
+        if (node_out != nullptr) *node_out = node;
+        return om::ui::chatMsgRows(ctx, rows, om::ui::kMaxChatMenuRows);
+    };
+
+    // The Info sheet's lines for one message.
+    auto chatInfoBuild = [&](const ChatSelMsg& m, char* title, size_t title_cap, char* sub, size_t sub_cap,
+                             om::ui::InfoRow* rows) -> int {
+        om::ui::ChatInfo in;
+        in.kind     = m.outgoing ? om::ui::ChatMsgKind::Own
+                                 : (chat_dm_open ? om::ui::ChatMsgKind::IncomingDm
+                                                 : om::ui::ChatMsgKind::IncomingChannel);
+        in.outgoing = m.outgoing;
+        snprintf(in.sender, sizeof(in.sender), "%s", m.sender);
+        if (!chat_dm_open)
+            snprintf(in.chat_name, sizeof(in.chat_name), "%s", om::mc::channelName((size_t)chat_focus));
+        if (m.ts != 0) om::time_source::hhmmOf(m.ts, in.sent, sizeof(in.sent));
+        // The arrival time is OUR clock and a restored record does not keep it (the log stores one wall time), so
+        // after a restart this stays empty and the sheet says so.
+        if (!m.restored && m.local_ts != 0) om::time_source::hhmmOf(m.local_ts, in.received, sizeof(in.received));
+        in.restored   = m.restored;
+        in.route      = m.route;
+        in.hops_known = m.hops_known;
+        in.hops       = m.hops;
+        in.hash_size  = m.hash_size;
+        in.path_bytes = m.path_bytes;
+        in.frame_len  = m.frame_len;
+        in.copies     = m.copies;
+        if (m.path_bytes > 0 && m.path_bytes <= sizeof(in.path)) memcpy(in.path, m.path, m.path_bytes);
+        om::ui::chatInfoHead(in, title, title_cap, sub, sub_cap);
+        om::mc::StoreLock l;
+        return om::ui::chatInfoRows(in, om::mc::contacts(), rows, om::ui::kMaxInfoRows);
+    };
+
+    // "Node": the Nodes page with the box on that node. A name that only resolves inside the current filter or
+    // search would put the box on somebody else, so the filter is cleared to All and the query dropped first —
+    // the one place the chat may change another page's state, and it changes it to the state that shows the node.
+    auto focusNodeInNodesList = [&](int store_index) {
+        if (store_index < 0) return;
+        nodes_bar = false;
+        nodes_query[0] = '\0';
+        nodes_query_len = 0;
+        int*      shown = g_nodes_shown;
+        int       pos   = om::ui::nodeMenuFocusFollow(shown, nodesShownOrder(shown), store_index);
+        if (pos < 0) {
+            nodes_view = om::ui::kNodeViewDefault;
+            pos        = om::ui::nodeMenuFocusFollow(shown, nodesShownOrder(shown), store_index);
+        }
+        if (pos >= 0) nodes_focus = pos;
+        core.goPage(tm::Page::Nodes);
+        // No repaint flag here: `dirty` is declared further down and the key handler that calls this already sets
+        // it. One writer of that flag per press is the rule in this loop.
+    };
+
+    // "Map": the node menu's own path (centreOnNode at z15, the gold highlight ring, the Map page). It sets the
+    // SAME highlight state the node menu sets, so the map cannot tell which page asked.
+    auto centreMapOnStoreNode = [&](int store_index) -> bool {
+        if (store_index < 0) return false;
+        uint8_t pub[32] = {0};
+        int     nz      = 15;
+        int64_t nwx     = 0, nwy = 0;
+        {
+            om::mc::StoreLock     l;
+            om::mc::ContactStore& cs = om::mc::contacts();
+            if ((size_t)store_index >= cs.count) return false;
+            memcpy(pub, cs.c[store_index].pub, sizeof(pub));
+            if (!om::map::centreOnNode(cs.c[store_index].lat_e6, cs.c[store_index].lon_e6, 15,
+                                       om::ui::kMapAreaW, om::ui::kMapAreaH, &nz, &nwx, &nwy))
+                return false;
+        }
+        map_z            = nz;
+        map_wx           = nwx;
+        map_wy           = nwy;
+        memcpy(map_highlight_pub, pub, sizeof(map_highlight_pub));
+        map_highlight    = true;
+        map_view_changed = true;
+        core.goPage(tm::Page::Map);
+        return true;   // the caller's dirty flag repaints; see focusNodeInNodesList
     };
 
     auto drawChatPage = [&]() {
@@ -2244,6 +2520,7 @@ extern "C" void app_main(void) {
                     bool              outgoing;
                     uint8_t           delivery;   // S513/EST-439: an outgoing DM's DmState (dm_delivery.h)
                     om::mc::MsgMeta   meta;       // S515/EST-462: hops/via, bytes, copies — built from the message
+                    uint32_t          seq;        // S515/EST-469: what the selection box holds on to
                 };
                 static Src srcs[om::mc::kMaxDms];
                 int        idx[om::mc::kMaxDms];
@@ -2256,7 +2533,7 @@ extern "C" void app_main(void) {
                         const om::mc::DmMessage* m = om::mc::dmAt(dmr, (size_t)idx[i]);
                         if (m == nullptr) continue;
                         srcs[i] = {m->text, m->peer_name, m->local_ts, m->ts, m->outgoing,
-                                   (uint8_t)m->delivery, chatMetaFor(*m)};
+                                   (uint8_t)m->delivery, chatMetaFor(*m), m->seq};
                     }
                 } else {
                     snprintf(cv.channel_name, sizeof(cv.channel_name), "%s",
@@ -2269,17 +2546,27 @@ extern "C" void app_main(void) {
                     for (size_t i = 0; i < n; i++) {
                         const om::mc::Message* m = om::mc::messagesAt(msgs, (size_t)idx[i]);
                         if (m == nullptr) continue;
-                        srcs[i] = {m->text, m->sender, m->local_ts, m->ts, m->outgoing, 0, chatMetaFor(*m)};
+                        srcs[i] = {m->text, m->sender, m->local_ts, m->ts, m->outgoing, 0, chatMetaFor(*m), m->seq};
                     }
                 }
 
-                // A message arriving must not drag the view out from under someone who scrolled back (S503):
-                // move the scroll by the same amount the chat grew, so the same messages stay on screen.
-                if (chat_seen_count >= 0 && (int)n > chat_seen_count && chat_scroll > 0) {
-                    chat_scroll += (int)n - chat_seen_count;
+                // S515/EST-469: the selection box, kept by SEQ. A message that arrives while the box is up does not
+                // move it — the frame stays on the same line and the window grows above it. Scrolling WITHOUT
+                // selecting is gone (that was S503's Up/Down): the scroll only ever follows the box, so with no box
+                // this chat is always pinned to the newest message.
+                if (chat_sel) {
+                    static uint32_t seqs[om::mc::kMaxDms];
+                    for (size_t i = 0; i < n; i++) seqs[i] = srcs[i].seq;
+                    chat_sel_index = om::ui::chatSelIndexForSeq(seqs, (int)n, chat_sel_seq);
+                    if (chat_sel_index < 0) {
+                        chatCloseSelection();   // the ring evicted it: there is nothing left to frame
+                    } else {
+                        chat_scroll = om::ui::chatSelScroll(chat_sel_index, (int)n);
+                    }
+                } else {
+                    chat_scroll    = 0;
+                    chat_sel_index = -1;
                 }
-                chat_seen_count = (int)n;
-                if (chat_scroll < 0) chat_scroll = 0;
 
                 // How many lines every message takes. Wrapping is core logic (chat_layout) measured with the real
                 // body font; chatWindow then decides which messages fit in the space above the composer.
@@ -2291,13 +2578,16 @@ extern "C" void app_main(void) {
                                                 measureBody, (void*)body);
                     line_counts[i] = 1 + (int)(wraps[i].count ? wraps[i].count : 1);
                 }
-                const om::mc::Window win = om::mc::chatWindow(line_counts, (int)n, om::ui::kTmChatLineH,
-                                                             om::ui::kTmChatGapH, om::ui::kTmChatHeight,
-                                                             chat_scroll);
-                // The window clamps, so keep the counter in step: otherwise Up would spend presses on values the
-                // screen never showed and Down would seem to do nothing at first.
-                chat_max_scroll    = win.max_scroll;
-                if (chat_scroll > chat_max_scroll) chat_scroll = chat_max_scroll;
+                // chatWindow clamps the scroll to the topmost FULL window (a plain Up must never hide the newest
+                // message); the box must reach every message, the oldest included, so in selection mode the
+                // unclamped chatWindowAt is the one that decides which messages are on screen.
+                const om::mc::Window win =
+                    chat_sel ? om::mc::chatWindowAt(line_counts, (int)n, om::ui::kTmChatLineH, om::ui::kTmChatGapH,
+                                                    om::ui::kTmChatHeight, chat_scroll)
+                             : om::mc::chatWindow(line_counts, (int)n, om::ui::kTmChatLineH, om::ui::kTmChatGapH,
+                                                  om::ui::kTmChatHeight, chat_scroll);
+                // No clamp back into `chat_scroll` any more: chatWindowAt already clamps to the list, and the box
+                // needs the scrolls chatWindow would refuse (see core/chat_select::chatSelScroll).
                 cv.hidden_above    = win.hidden_above;
                 cv.hidden_below    = win.hidden_below;
                 const uint32_t now = om::time_source::epochNow();
@@ -2331,6 +2621,37 @@ extern "C" void app_main(void) {
                     mv.line_count = wraps[i].count ? wraps[i].count : 1;
                     mv.clipped    = wraps[i].clipped;
                     for (int l = 0; l < om::mc::kMaxLines; l++) mv.line[l] = wraps[i].line[l];
+                }
+
+                // ---- S515/EST-469: the box, the menu on it, and the Info sheet it can open. Everything here is
+                // read from the SELECTED message by its seq, so what a sheet shows and what the box frames are the
+                // same line even while messages arrive.
+                cv.sel = (chat_sel && chat_sel_index >= win.first && chat_sel_index <= win.last)
+                             ? chat_sel_index - win.first
+                             : -1;
+                if (cv.sel >= 0 && cv.sel < cv.msg_count && chat_menu_open) {
+                    ChatSelMsg sm;
+                    if (chatSelLoad(&sm)) {
+                        cv.menu_open  = true;
+                        cv.menu_focus = chat_menu_focus;
+                        cv.menu_count = chatMenuBuild(sm, cv.menu, nullptr);
+                        snprintf(cv.menu_title, sizeof(cv.menu_title), "%s",
+                                 sm.outgoing ? "your message"
+                                             : (sm.sender[0] != '\0' ? sm.sender : "this message"));
+                        char when[8] = "";
+                        if (sm.local_ts != 0) om::time_source::hhmmOf(sm.local_ts, when, sizeof(when));
+                        snprintf(cv.menu_sub, sizeof(cv.menu_sub), "%s%s%s",
+                                 chat_dm_open ? "direct message" : "channel message", when[0] ? " \xC2\xB7 " : "",
+                                 when);
+                    }
+                }
+                if (cv.sel >= 0 && cv.sel < cv.msg_count && chat_info_open) {
+                    ChatSelMsg sm;
+                    if (chatSelLoad(&sm)) {
+                        cv.info_open  = true;
+                        cv.info_count = chatInfoBuild(sm, cv.info_title, sizeof(cv.info_title), cv.info_sub,
+                                                      sizeof(cv.info_sub), cv.info);
+                    }
                 }
             }
             om::ui::drawChat(g_screen, cv);
@@ -2473,7 +2794,13 @@ extern "C" void app_main(void) {
                     om::mc::noteChannelRead((uint8_t)chat_focus);
                 }
                 chat_scroll     = 0;
-                chat_seen_count = -1;
+                // S515/EST-469: the own key closing the chat also drops the box and any sheet on it.
+                chat_sel        = false;
+                chat_sel_seq    = 0;
+                chat_sel_index  = -1;
+                chat_menu_open  = false;
+                chat_menu_focus = 0;
+                chat_info_open  = false;
             }
             return closed;
         }
@@ -2658,7 +2985,90 @@ extern "C" void app_main(void) {
 
                 // ---- the Chat page owns its keys while a channel is open: typing goes to the composer.
                 if (page_now == tm::Page::Chat && chat_open) {
-                    if (k == tm::Key::Esc) {
+                    // ---- S515/EST-469: the Info sheet, then the menu, then the box, own every key while they are
+                    // up. A typed key is SWALLOWED there (handled, and nothing reaches the composer): typing is off
+                    // while selecting, and the draft is kept exactly as it was for Esc to hand back.
+                    if (chat_info_open) {
+                        handled = true;
+                        dirty   = true;
+                        if (k == tm::Key::Esc) chat_info_open = false;   // back to the selection box
+                    } else if (chat_menu_open) {
+                        handled = true;
+                        dirty   = true;
+                        ChatSelMsg         sm;
+                        om::ui::ChatMsgRow rows[om::ui::kMaxChatMenuRows];
+                        int                node = -1;
+                        const int rc = chatSelLoad(&sm) ? chatMenuBuild(sm, rows, &node) : 0;
+                        if (k == tm::Key::Esc) {
+                            chat_menu_open = false;   // back to the box
+                        } else if (k == tm::Key::Up) {
+                            chat_menu_focus = om::ui::nodeMenuFocusMove(chat_menu_focus, -1, rc);
+                        } else if (k == tm::Key::Down) {
+                            chat_menu_focus = om::ui::nodeMenuFocusMove(chat_menu_focus, 1, rc);
+                        } else if (k == tm::Key::Enter && rc > 0 && chat_menu_focus >= 0 &&
+                                   chat_menu_focus < rc && !rows[chat_menu_focus].dim) {
+                            // A DIM row runs nothing at all: its reason is already on the row, and doing half an
+                            // action (a DM to nobody) is worse than doing none.
+                            switch (rows[chat_menu_focus].action) {
+                                case om::ui::ChatMsgAction::Reply: {
+                                    // Back to the composer. On a CHANNEL the reply IS the MeshCore mention
+                                    // "@Name " in front of the draft (firmware/src/main.cpp:1175); a DM thread
+                                    // already says who it is for, so it adds no bytes at all.
+                                    if (!chat_dm_open) {
+                                        char         prefix[40];
+                                        const size_t plen =
+                                            om::ui::chatReplyPrefix(prefix, sizeof(prefix), sm.sender);
+                                        if (plen > 0 && composer_len + plen < sizeof(composer)) {
+                                            memmove(composer + plen, composer, composer_len + 1);
+                                            memcpy(composer, prefix, plen);
+                                            composer_len += plen;
+                                        }
+                                    }
+                                    chatCloseSelection();
+                                    break;
+                                }
+                                case om::ui::ChatMsgAction::DirectMessage:
+                                    openDmThread(node);
+                                    chatCloseSelection();
+                                    break;
+                                case om::ui::ChatMsgAction::Map:
+                                    if (centreMapOnStoreNode(node)) chatCloseSelection();
+                                    break;
+                                case om::ui::ChatMsgAction::Node:
+                                    focusNodeInNodesList(node);
+                                    chatCloseSelection();
+                                    break;
+                                case om::ui::ChatMsgAction::Info:
+                                    chat_menu_open = false;
+                                    chat_info_open = true;   // Esc there comes back to the box
+                                    break;
+                                case om::ui::ChatMsgAction::None:
+                                    break;
+                            }
+                        }
+                    } else if (chat_sel) {
+                        handled = true;
+                        dirty   = true;
+                        if (k == tm::Key::Esc) {
+                            chatCloseSelection();   // the composer takes keys again; the draft is untouched
+                        } else if (k == tm::Key::Up || k == tm::Key::Down) {
+                            uint32_t seq = 0;
+                            if (!chatSelStep(k == tm::Key::Up ? -1 : 1, &seq)) {
+                                chatCloseSelection();   // Down past the newest leaves the box
+                            } else if (seq != 0) {
+                                chat_sel_seq = seq;     // follow the MESSAGE, not the slot number
+                            }
+                        } else if (k == tm::Key::Enter) {
+                            ChatSelMsg         sm;
+                            om::ui::ChatMsgRow rows[om::ui::kMaxChatMenuRows];
+                            const int rc = chatSelLoad(&sm) ? chatMenuBuild(sm, rows, nullptr) : 0;
+                            if (rc > 0) {
+                                chat_menu_open  = true;
+                                chat_menu_focus = 0;
+                            }
+                        }
+                        // every other key falls out of here swallowed: typing is off while selecting
+                    } else if (k == tm::Key::Esc) {
                         // A DM thread and a channel leave the same way; each marks itself read on the way up.
                         if (chat_dm_open) {
                             om::mc::noteDmRead(chat_dm_pub);
@@ -2668,7 +3078,7 @@ extern "C" void app_main(void) {
                         }
                         chat_open       = false;
                         chat_scroll     = 0;
-                        chat_seen_count = -1;
+                        chatCloseSelection();
                         // What you were looking at is READ — in the store AND on the card (the seen point), so it
                         // is still read after a restart. Without this a message that arrived while the channel
                         // was open came back as a badge the moment you went up a level (Filip, S502).
@@ -2733,13 +3143,18 @@ extern "C" void app_main(void) {
                         }
                         handled = true;
                     } else if (k == tm::Key::Up || k == tm::Key::Down) {
-                        // Scrolling back through the channel (S503). Up goes older, Down newer. The limit comes
-                        // from the last draw: a channel whose messages all fit has nowhere to scroll, so Up does
-                        // nothing instead of hiding the newest message (found on the glass at three messages).
+                        // S515/EST-469 (Filip): Up from the composer is no longer a scroll — it puts the selection
+                        // box on the NEWEST message, and the box is what moves. Down with nothing selected does
+                        // nothing (there is no "scroll without selecting" any more). The message must exist: an
+                        // empty channel leaves the box closed and the composer typing.
                         if (k == tm::Key::Up) {
-                            if (chat_scroll < chat_max_scroll) ++chat_scroll;
-                        } else if (chat_scroll > 0) {
-                            --chat_scroll;
+                            const uint32_t seq = chatSeqAtFromNewest(0);
+                            if (seq != 0) {
+                                chat_sel       = true;
+                                chat_sel_seq   = seq;
+                                chat_sel_index = chatMsgCount() - 1;
+                                chat_scroll    = 0;
+                            }
                         }
                         handled = true;
                     }
@@ -2773,7 +3188,7 @@ extern "C" void app_main(void) {
                             chat_dm_open    = false;
                             chat_open       = true;
                             chat_scroll     = 0;    // always opens at the newest message
-                            chat_seen_count = -1;
+                            chatCloseSelection();   // S515/EST-469: a fresh chat starts with no box
                             om::mc::noteChannelRead((uint8_t)chat_focus);   // opening a channel marks it read
                         } else if (chat_col == om::mc::kColDms && chat_dm_count > 0) {
                             om::mc::DmSummary sums[om::ui::kChatRows];
@@ -2795,7 +3210,7 @@ extern "C" void app_main(void) {
                                 chat_dm_open    = true;
                                 chat_open       = true;
                                 chat_scroll     = 0;
-                                chat_seen_count = -1;
+                                chatCloseSelection();   // S515/EST-469: a fresh thread starts with no box
                                 om::mc::noteDmRead(chat_dm_pub);   // opening a thread marks it read
                             }
                         }

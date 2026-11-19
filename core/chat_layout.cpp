@@ -103,6 +103,51 @@ Wrapped wrapText(const char* text, int width, MeasureFn measure, void* ctx) {
     return out;
 }
 
+namespace {
+
+// Walk back from `last` while the blocks still fit. The newest message is always included, even when one
+// message alone is taller than the window: the alternative is a blank screen with a scroll indicator.
+int firstFrom(const int* lines, int line_h, int gap_h, int height, int last) {
+    int used  = 0;
+    int first = last;
+    for (int i = last; i >= 0; --i) {
+        const int n     = (lines[i] > 0) ? lines[i] : 1;
+        const int block = n * line_h + gap_h;
+        if (i != last && used + block > height) break;
+        used += block;
+        first = i;
+    }
+    return first;
+}
+
+}  // namespace
+
+Window chatWindowAt(const int* lines, int count, int line_h, int gap_h, int height, int scroll) {
+    Window w;
+    if (count <= 0 || lines == nullptr) {
+        w.last = -1;
+        return w;
+    }
+    if (line_h <= 0) line_h = 1;
+    if (gap_h < 0) gap_h = 0;
+
+    w.max_scroll = firstFrom(lines, line_h, gap_h, height, count - 1);
+
+    // Only 0..count-1: the caller follows a selected MESSAGE, and every message must be reachable, including the
+    // oldest one above the normal topmost window.
+    if (scroll < 0) scroll = 0;
+    if (scroll > count - 1) scroll = count - 1;
+
+    const int last  = count - 1 - scroll;
+    const int first = firstFrom(lines, line_h, gap_h, height, last);
+
+    w.first        = first;
+    w.last         = last;
+    w.hidden_above = first;
+    w.hidden_below = count - 1 - last;
+    return w;
+}
+
 Window chatWindow(const int* lines, int count, int line_h, int gap_h, int height, int scroll) {
     Window w;
     if (count <= 0 || lines == nullptr) {
@@ -112,31 +157,16 @@ Window chatWindow(const int* lines, int count, int line_h, int gap_h, int height
     if (line_h <= 0) line_h = 1;
     if (gap_h < 0) gap_h = 0;
 
-    // Walk back from `last` while the blocks still fit. The newest message is always included, even when one
-    // message alone is taller than the window: the alternative is a blank screen with a scroll indicator.
-    auto firstFrom = [&](int last) {
-        int used  = 0;
-        int first = last;
-        for (int i = last; i >= 0; --i) {
-            const int n     = (lines[i] > 0) ? lines[i] : 1;
-            const int block = n * line_h + gap_h;
-            if (i != last && used + block > height) break;
-            used += block;
-            first = i;
-        }
-        return first;
-    };
-
     // How far back scrolling MEANS anything: as far as it takes to put the oldest message at the top of a full
     // window. When everything already fits, that is 0 — pressing Up in a short channel must not hide the newest
     // message to reveal history that is not there (S503, caught on the glass at three messages).
-    w.max_scroll = firstFrom(count - 1);
+    w.max_scroll = firstFrom(lines, line_h, gap_h, height, count - 1);
 
     if (scroll < 0) scroll = 0;
     if (scroll > w.max_scroll) scroll = w.max_scroll;
 
-    const int last = count - 1 - scroll;
-    const int first = firstFrom(last);
+    const int last  = count - 1 - scroll;
+    const int first = firstFrom(lines, line_h, gap_h, height, last);
 
     w.first        = first;
     w.last         = last;

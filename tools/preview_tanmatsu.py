@@ -2994,7 +2994,199 @@ MAP_NODES_Z14 = [
     ('ROOM-Test', 0.46, 0.14, 'room', False, 5000),
 ]
 
-RENDERERS = dict(map_nodes_z12=map_nodes_z12, map_nodes_z14=map_nodes_z14, nodes_views=nodes_views, nodes_sd_wording=nodes_sd_wording, node_menu_radio=node_menu_radio, launcher=launcher, nodes_fresh=nodes_fresh, hint_dots=hint_dots, menu=menu, nodes=nodes, nodes_search=nodes_search,
+
+# --------------------------------------------------- selecting a message + its menu + Info (S515/EST-469)
+# One INVENTED thread for the three shots (public-repo rule 9): every name and line of text is a fixture.
+SELECT_THREAD = [
+    ('09:12', 'Alpha', 'Was at the coast today, the direct path is clear.', False, 'direct \u00b7 87 B'),
+    ('09:14', 'Beta', 'The third repeater works from the hill.', False,
+     '3 hops via TEST-RPT-A \u00b7 101 B'),
+    ('09:16', 'Gamma', 'Morning all, coffee is on. \u0161 \u010d \u017e', False,
+     '3 hops via 86a8 \u00b7 94 B'),
+    ('09:20', 'Alpha', 'Path is 3 now instead of 4.', False, '3 hops \u00b7 87 B'),
+    ('09:22', 'you', 'Testing from the Tanmatsu keyboard.', True, '87 B \u00b7 repeated 2\u00d7'),
+]
+
+
+def _chat_open_page(focus=None):
+    """The open chat, drawn with main/chat_page.cpp's own numbers: head line 22, body line 22, gap 8, the
+    composer's floor above the hint bar. Returns (img, d, blocks) where `blocks` is each message's rect, so a
+    preview can put the selection frame on exactly the block the device would ring.
+
+    `focus` = the index of the SELECTED message (None = nothing selected, the composer state)."""
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    img, d = new_screen()
+    status_bar(d)
+
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Chat', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    # The head's right slot is the WINDOW's own words (chat_page.cpp): with the box on a message, how many newer
+    # ones the window leaves out. All five of these one-line messages fit above the composer, so nothing is "older".
+    right = ('%d messages' % len(SELECT_THREAD)) if focus is None \
+        else ('%d newer' % (len(SELECT_THREAD) - 1 - focus))
+    text(d, (W - pad, y + TM['head_h'] // 2), right, font(FONT_MONO, TM['f_meta']), P['Dimmer'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+
+    work_top = y + TM['head_h']
+    text(d, (pad, work_top + 18), '# test', font(FONT_SANS, 20), P['Ink'])
+
+    left_x = pad + 58       # kTmChatBodyX0
+    right_x = W - pad - 46  # kTmChatBodyX1
+    fstamp = font(FONT_MONO, TM['f_meta'])
+    fname = font(FONT_SANS, TM['f_body'])
+    fmeta = font(FONT_MONO, TM['f_meta'])
+    fbody = font(FONT_SANS, TM['f_body'])
+    fage = font(FONT_MONO, TM['f_meta'])
+    ages = ['10m', '8m', '6m', '2m', 'now']
+
+    # The WINDOW, not the whole thread: with the box up the selected message is the BOTTOM of it
+    # (chatSelScroll puts it there), so the newer ones below are out of the window — the head says how many.
+    shown = SELECT_THREAD if focus is None else SELECT_THREAD[:focus + 1]
+    yy = work_top + 40
+    blocks = []
+    for (stamp, who, body, mine, meta), age in zip(shown, ages):
+        top = yy - 2
+        text(d, (pad + 4, yy), stamp, fstamp, P['Dimmer'])
+        if mine:
+            text(d, (right_x, yy), 'you', fmeta, P['Dim'], anchor='ra')
+            if meta:
+                text(d, (right_x - tw(fmeta, 'you') - 10, yy), meta, fmeta, P['Dimmer'], anchor='ra')
+        else:
+            text(d, (left_x, yy), who, fname, P['Acc'])
+            if meta:
+                text(d, (left_x + tw(fname, who) + 10, yy), meta, fmeta, P['Dimmer'])
+        text(d, (W - pad, yy), age, fage, P['Dimmer'], anchor='ra')
+        yy += 19
+        lines = wrap(d, body, fbody, right_x - left_x)
+        for line in lines:
+            if mine:
+                text(d, (right_x, yy), line, fbody, P['Ink'], anchor='ra')
+            else:
+                text(d, (left_x, yy), line, fbody, P['Ink'])
+            yy += 19
+        blocks.append([pad - 4, top, W - pad + 4, yy - 19 + 22])
+        yy += 7
+
+    ch = H - TM['hint_h'] - 56
+    plate(d, [pad, ch, W - pad, ch + 44], P['FieldBg'], P['Line'], r=4)
+    text(d, (pad + 12, ch + 22), 'message the channel, Enter sends', font(FONT_MONO, TM['f_meta']),
+         P['Dimmer'], anchor='lm')
+    key_cap(d, [W - pad - 84, ch + 8, W - pad - 8, ch + 36], '\u21b5 Enter', P['Dimmer'],
+            font(FONT_SANS, TM['f_hint']))
+    return img, d, blocks
+
+
+def _selection_frame(d, blocks, i):
+    """The selection box exactly as main/chat_page.cpp draws it: kSelBg inside a 2 px gold ring around the WHOLE
+    message block (head line + every body line), then the text re-stated on top so no glyph is covered."""
+    box = blocks[i]
+    d.rectangle(box, fill=P['SelBg'])
+    d.rectangle(box, outline=P['Acc'], width=2)
+    stamp, who, body, mine, meta = SELECT_THREAD[i]
+    left_x = TM['pad'] + 58
+    right_x = TM['W'] - TM['pad'] - 46
+    yy = box[1] + 2
+    fstamp = font(FONT_MONO, TM['f_meta'])
+    fname = font(FONT_SANS, TM['f_body'])
+    fbody = font(FONT_SANS, TM['f_body'])
+    text(d, (TM['pad'] + 4, yy), stamp, fstamp, P['Dimmer'])
+    if mine:
+        text(d, (right_x, yy), 'you', fstamp, P['Dim'], anchor='ra')
+        if meta:
+            text(d, (right_x - tw(fstamp, 'you') - 10, yy), meta, fstamp, P['Dimmer'], anchor='ra')
+    else:
+        text(d, (left_x, yy), who, fname, P['Acc'])
+        if meta:
+            text(d, (left_x + tw(fname, who) + 10, yy), meta, fstamp, P['Dimmer'])
+    text(d, (TM['W'] - TM['pad'], yy), '2m', fstamp, P['Dimmer'], anchor='ra')
+    text(d, (left_x, yy + 19), body, fbody, P['Ink'] if not mine else P['Ink'],
+         anchor='ra' if mine else 'la')
+
+
+def _dim_page(img):
+    """The node menu's scrim at preview fidelity: the page darkened, then the sheet on top."""
+    img = Image.blend(img, Image.new('RGB', img.size, '#000000'), 0.62)
+    return img, ImageDraw.Draw(img)
+
+
+def _chat_sheet(d, title, sub, rows, sheet_w=620, row_h=42, head_h=64, spad=16, focus=0, key_hint=None):
+    """ONE chat sheet, the node menu's house style: panel + gold outline, a two-line head, then rows (a row may
+    be dim and carry its reason on the right). `focus` = the focused row index, or None for the Info sheet."""
+    W, H = TM['W'], TM['H']
+    fm = font(FONT_MONO, TM['f_meta'])
+    sheet_h = 2 * spad + head_h + len(rows) * row_h
+    x0 = (W - sheet_w) // 2
+    x1 = x0 + sheet_w
+    y0 = max(4, H - TM['hint_h'] - 8 - sheet_h)
+    plate(d, [x0, y0, x1, y0 + sheet_h], P['Panel'], P['Acc'], r=0, w=2)
+    text(d, (x0 + 20, y0 + spad), title, font(FONT_SANS, 22), P['Ink'])
+    text(d, (x0 + 20, y0 + spad + 34), sub, fm, P['Dim'])
+    hline(d, x0 + 1, x1 - 1, y0 + spad + head_h - 1, P['Line'])
+    ry = y0 + spad + head_h
+    for i, (label, value, dim) in enumerate(rows):
+        if focus is not None and i == focus:
+            focus_band(d, x0 + 8, x1 - 8, ry + 1, ry + row_h - 2)
+        ink = P['AccInk'] if (focus is not None and i == focus) else (P['Dimmer'] if dim else P['Ink'])
+        text(d, (x0 + 24, ry + row_h // 2), label, font(FONT_SANS, 17), ink, anchor='lm')
+        if value:
+            text(d, (x1 - 24, ry + row_h // 2), value, font(FONT_MONO, TM['f_hint']),
+                 P['Dimmer'] if dim else P['Dim'], anchor='rm')
+        if i + 1 < len(rows):
+            hline(d, x0 + 8, x1 - 8, ry + row_h - 1, P['RowLine'])
+        ry += row_h
+    if key_hint:
+        hint_bar(d, 'chat', key_hint)
+
+
+def chat_select():
+    """S515/EST-469, item 4: the selection box. Up from the composer puts a gold frame on a message (the Nodes
+    list's own focus look: kSelBg + a 2 px gold ring) around its WHOLE block — the head line and every body
+    line. Typing is off while the box is up (the draft stays), which is what the hint bar says."""
+    img, d, blocks = _chat_open_page(focus=3)
+    _selection_frame(d, blocks, 3)
+    hint_bar(d, 'chat', [('up/dn', 'move'), ('Enter', 'menu'), ('esc', 'type')])
+    return save(img, '2026-11-19-chat-select.png')
+
+
+def chat_msg_menu():
+    """S515/EST-469, item 4: Enter on the selected message opens the message menu, the node menu's sheet style.
+    An incoming CHANNEL message gets Reply, DM <sender>, Map, Node, Info. Map is DIM with its reason: this node
+    has told us no position, so Enter on it runs nothing."""
+    img, d, blocks = _chat_open_page(focus=3)
+    _selection_frame(d, blocks, 3)   # the box stays under the sheet, as it does on the device
+    img, d = _dim_page(img)
+    rows = [('Reply', '', False),
+            ('DM Alpha', '', False),
+            ('Map', 'no position', True),
+            ('Node', '', False),
+            ('Info', '', False)]
+    _chat_sheet(d, 'Alpha', 'channel message \u00b7 09:20', rows, focus=0,
+                key_hint=[('up/dn', 'move'), ('Enter', 'choose'), ('esc', 'close')])
+    return save(img, '2026-11-19-chat-msg-menu.png')
+
+
+def chat_msg_info():
+    """S515/EST-469, item 4: Info. The sheet says what the frame carried: sent and received, the route, the hops
+    with EACH hop's hash (a name only where exactly one node matches — v58's pathHopLabel), the bytes and the
+    copies heard. No RSSI, no SNR (DEVICE.md \u00a7 5b)."""
+    img, d, blocks = _chat_open_page(focus=1)
+    _selection_frame(d, blocks, 1)   # the box stays under the sheet
+    img, d = _dim_page(img)
+    rows = [('Sent', '09:14', False),
+            ('Received', '09:14', False),
+            ('Route', 'flood', False),
+            ('Hops', '3 hops', False),
+            ('Hop 1', 'TEST-RPT-B (33c4)', False),
+            ('Hop 2', 'TEST-RPT-A (86a8)', False),
+            ('Hop 3', 'a1b2', False),
+            ('Bytes', '101 B', False),
+            ('Heard', '2\u00d7', False)]
+    _chat_sheet(d, 'Beta', 'channel test', rows, sheet_w=620, row_h=28, head_h=56, spad=12, focus=None,
+                key_hint=[('esc', 'close')])
+    return save(img, '2026-11-19-chat-msg-info.png')
+
+
+RENDERERS = dict(chat_select=chat_select, chat_msg_menu=chat_msg_menu, chat_msg_info=chat_msg_info, map_nodes_z12=map_nodes_z12, map_nodes_z14=map_nodes_z14, nodes_views=nodes_views, nodes_sd_wording=nodes_sd_wording, node_menu_radio=node_menu_radio, launcher=launcher, nodes_fresh=nodes_fresh, hint_dots=hint_dots, menu=menu, nodes=nodes, nodes_search=nodes_search,
                  nodes_favourites=nodes_favourites, node_trace=node_trace, chat=chat, chat2=chat_cards,
                  chat_emoji=chat_emoji,
                  chat_dm=chat_dm_column, chat_meta=chat_meta, dm_enter=dm_enter, map=map_page, rptr=rptr, rptr_list=rptr_list, rptr_status=rptr_status, settings=settings,

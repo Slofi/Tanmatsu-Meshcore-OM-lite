@@ -14,6 +14,7 @@
 #include "chat_cards.h"    // mc::CardGrid: the two-column card geometry and focus rules (S513)
 #include "chat_layout.h"   // mc::Line / kMaxLines: the wrap the view carries (S503)
 #include "chat_meta.h"     // S515/EST-462: kChatMetaCap + the head-line pixel arithmetic
+#include "chat_select.h"   // S515/EST-469: the selection, the message menu's rows and the Info sheet's lines
 #include "mc_store.h"
 #include "screen.h"
 #include "tm_theme.h"
@@ -117,6 +118,23 @@ struct ChatView {
     // It lives in the same slot as "N messages" so the composer and the message list keep their geometry.
     const char* notice = nullptr;
     bool        sending = false;   // a send is in flight (the log says when it lands)
+
+    // ---- S515/EST-469: the selection box, the message menu and the Info sheet
+    int sel = -1;                  // index into `msgs`, -1 = not selecting
+    // The menu is a sheet in the node menu's style (one menu look in the app). Its rows are built by
+    // core/chat_select.h from the selected message's kind and the node it resolves to.
+    bool          menu_open = false;
+    int           menu_focus = 0;
+    int           menu_count = 0;
+    ChatMsgRow    menu[kMaxChatMenuRows];
+    char          menu_title[40] = "";
+    char          menu_sub[48] = "";
+    // The Info sheet: no focus, no scrolling — Esc closes it back to the selection box.
+    bool       info_open = false;
+    int        info_count = 0;
+    InfoRow    info[kMaxInfoRows];
+    char       info_title[40] = "";
+    char       info_sub[48] = "";
 
     // ---- chrome
     const char* clock = "--:--";

@@ -174,6 +174,7 @@ size_t historyLoadDm(const uint8_t* data, size_t len, const uint8_t peer_pub[32]
             m.frame_len = 0;
             m.route     = p.direct ? RouteType::Direct : RouteType::Unknown;
             m.copies    = 0;
+            m.restored  = true;   // S515/EST-469: the Info sheet must not print these zeros as measurements
         }
         m.delivery = h.delivery <= (uint8_t)om::ui::DmState::Failed
                          ? (om::ui::DmState)h.delivery
@@ -288,6 +289,7 @@ size_t historyLoad(const uint8_t* data, size_t len, uint8_t channel, Message* ou
             m.frame_len = 0;   // not in the record: bytes are shown for THIS boot only
             m.route     = p.direct ? RouteType::Direct : RouteType::Unknown;
             m.copies    = 0;
+            m.restored  = true;   // S515/EST-469: the Info sheet must not print these zeros as measurements
         }
         // The L2's name field is 32 bytes and ours is 24, so a long name is CUT here, not refused.
         snprintf(m.sender, sizeof(m.sender), "%.*s", (int)(sizeof(m.sender) - 1), h.name);

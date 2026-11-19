@@ -67,6 +67,57 @@ void drawMsgLine(Screen& s, Face face, int x, int baseline, int max_w, const cha
     }
 }
 
+// --------------------------------------------------------------------------------- the message sheets (S515/EST-469)
+// ONE bottom sheet, the node menu's house style: a dither scrim (Screen has no alpha blend), a panel with the gold
+// 2 px outline, a two-line head, then one row per line. The message menu draws its rows focusable; the Info sheet
+// passes no focus at all. One implementation, so the app cannot grow two menu looks.
+struct SheetLine {
+    const char* label   = "";
+    const char* value   = "";
+    bool        dim     = false;
+    bool        focused = false;
+};
+
+void drawChatSheet(Screen& s, const char* title, const char* sub, const SheetLine* rows, int count, int pad,
+                   int head_h, int row_h) {
+    if (rows == nullptr || count <= 0) return;
+    const int W = kTmW, H = kTmH;
+    for (int y = 0; y < H; y += 2) s.fillRect(0, y, W, 1, kBg);
+
+    const int sheet_w = 620;
+    const int sheet_h = 2 * pad + head_h + count * row_h;
+    const int x0      = (W - sheet_w) / 2;
+    const int x1      = x0 + sheet_w;
+    int       y0      = H - kTmHintH - 8 - sheet_h;
+    if (y0 < 4) y0 = 4;
+
+    s.fillRect(x0, y0, sheet_w, sheet_h, kPanel);
+    s.frame(x0, y0, sheet_w, sheet_h, 2, kAcc);
+    drawTextClipped(s, Face::Title, x0 + 20, textBaseline(s, Face::Title, y0 + pad, 34), sheet_w - 40,
+                    title != nullptr ? title : "", kInk);
+    drawTextClipped(s, Face::Meta, x0 + 20, textBaseline(s, Face::Meta, y0 + pad + 34, 22), sheet_w - 40,
+                    sub != nullptr ? sub : "", kDim);
+    s.hline(x0 + 1, x1 - 1, y0 + pad + head_h - 1, kLine);
+
+    int ry = y0 + pad + head_h;
+    for (int i = 0; i < count; ++i) {
+        const SheetLine& r = rows[i];
+        if (r.focused) {
+            s.fillRect(x0 + 8, ry + 1, sheet_w - 16, row_h - 3, kSelBg);
+            s.frame(x0 + 8, ry + 1, sheet_w - 16, row_h - 3, kTmRingW, kAcc);
+        }
+        // A dim row keeps its reason on the right (the node menu's own rule); focus still lands on it so the
+        // reason can be read, and Enter runs nothing.
+        drawText(s, Face::Row, x0 + 24, textBaseline(s, Face::Row, ry, row_h), r.label,
+                 r.focused ? (uint16_t)kAccInk : (r.dim ? (uint16_t)kDimmer : (uint16_t)kInk));
+        if (r.value[0] != '\0')
+            drawTextRight(s, Face::Hint, x1 - 24, textBaseline(s, Face::Hint, ry, row_h), r.value,
+                          r.dim ? (uint16_t)kDimmer : (uint16_t)kDim);
+        if (i + 1 < count) s.hline(x0 + 8, x1 - 8, ry + row_h - 1, kRowLine);
+        ry += row_h;
+    }
+}
+
 }  // namespace
 
 mc::CardGrid chatCardGrid() {
@@ -168,6 +219,16 @@ void drawChat(Screen& s, const ChatView& v) {
             const int lines = (m.line_count > 0) ? m.line_count : 1;
             // Never draw into the composer, whatever the caller says.
             if (y + kTmChatHeadH + (lines - 1) * kTmChatLineH + kTmChatLineH > kTmChatBot + kTmChatGapH) break;
+            // S515/EST-469: the selection box. The Nodes list's focus look, around the WHOLE message — its head
+            // line (time + who) and every body line — drawn under the text so the frame never hides a glyph.
+            // Four pixels wider than the text on both sides, because "around that message" has to read as one
+            // block and not as two separate marks.
+            if (i == v.sel) {
+                const int sy = y - 2;
+                const int sh = kTmChatHeadH + lines * kTmChatLineH + 2;
+                s.fillRect(kTmPad - 4, sy, W - 2 * (kTmPad - 4), sh, kSelBg);
+                s.frame(kTmPad - 4, sy, W - 2 * (kTmPad - 4), sh, kTmRingW, kAcc);
+            }
             // WHO said it decides WHERE it sits (Filip, S502: "my messages on the right, others on the left, so
             // it is clear who said what"). Incoming hugs the left edge under the time column; our own hugs the
             // right edge, with the age column kept clear. "you" replaces the node name here only — the frame on
@@ -251,12 +312,51 @@ void drawChat(Screen& s, const ChatView& v) {
         const int bw = 76, bh = 26;
         const int bx = W - kTmPad - bw - 8, by = cy0 + (kTmChatComposerH - bh) / 2;
         drawEnterKeyCap(s, bx, by, bw, bh, empty ? (uint16_t)kDimmer : (uint16_t)kInk);
+
+        // ---- S515/EST-469: the message menu and the Info sheet, in the node menu's house style, above the page
+        // (the composer goes under the scrim, so it is plain that typing is off while a sheet is up). The hint bar
+        // is drawn after this, so its keys stay readable.
+        if (v.info_open && v.info_count > 0) {
+            static SheetLine lines[kMaxInfoRows];
+            for (int i = 0; i < v.info_count && i < kMaxInfoRows; ++i) {
+                lines[i].label   = v.info[i].label;
+                lines[i].value   = v.info[i].value;
+                lines[i].dim     = false;
+                lines[i].focused = false;
+            }
+            // 14 rows of 26 px + the 56 px head + 12 px pads is 444 px: the tallest sheet that still clears the
+            // hint bar at 800x480, which is why kMaxInfoRows is what it is (the builder makes "+N more" fit).
+            drawChatSheet(s, v.info_title, v.info_sub, lines, v.info_count, 12, 56, 26);
+        } else if (v.menu_open && v.menu_count > 0) {
+            static SheetLine lines[kMaxChatMenuRows];
+            for (int i = 0; i < v.menu_count && i < kMaxChatMenuRows; ++i) {
+                lines[i].label   = v.menu[i].label;
+                lines[i].value   = v.menu[i].value;
+                lines[i].dim     = v.menu[i].dim;
+                lines[i].focused = (i == v.menu_focus);
+            }
+            drawChatSheet(s, v.menu_title, v.menu_sub, lines, v.menu_count, 16, 64, 42);
+        }
     }
 
     static const HintItem hints_list[] = {{"Enter", "open"}, {"esc", "back"}, {"up/dn", "move"}, {"l/r", "column"}, {",", "settings"}};
-    static const HintItem hints_open[] = {{"Enter", "send"}, {"esc", "back"}, {"type", "write"}, {"up/dn", "scroll"}, {",", "settings"}};
+    static const HintItem hints_open[] = {{"Enter", "send"}, {"esc", "back"}, {"type", "write"}, {",", "settings"}};
+    // S515/EST-469: three states of the open chat, each with the keys that actually work there. Up/Down no
+    // longer SCROLL — that was S503's "up/dn scroll". Up enters the selection box, and the box is what moves.
+    static const HintItem hints_sel[]  = {{"up/dn", "move"}, {"Enter", "menu"}, {"esc", "type"}};
+    static const HintItem hints_menu[] = {{"up/dn", "move"}, {"Enter", "choose"}, {"esc", "close"}};
+    static const HintItem hints_info[] = {{"esc", "close"}};
     // A DM thread types and sends exactly like a channel (EST-439), so the two open states share one hint bar.
-    drawHintBar(s, tm::Page::Chat, v.open ? hints_open : hints_list, 5);
+    if (!v.open)
+        drawHintBar(s, tm::Page::Chat, hints_list, 5);
+    else if (v.info_open)
+        drawHintBar(s, tm::Page::Chat, hints_info, 1);
+    else if (v.menu_open)
+        drawHintBar(s, tm::Page::Chat, hints_menu, 3);
+    else if (v.sel >= 0)
+        drawHintBar(s, tm::Page::Chat, hints_sel, 3);
+    else
+        drawHintBar(s, tm::Page::Chat, hints_open, 4);
 }
 
 }  // namespace ui

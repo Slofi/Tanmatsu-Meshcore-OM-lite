@@ -15,6 +15,135 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S515 (EST-469) message selection + menu
+
+> Written by **DeepSeek** for ticket **EST-469**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed, pushed or committed. Starting point **v63 `e240663`** (tree clean, before work, committed by Claude).
+> **Version: 64** (`core/settings.h` kAppVersion). `firmware/` was read only and is unchanged.
+>
+> **Filip's words (quoted, S515):** *"when 'scrolling' up in the chat, add a selection box, and pressing enter opens
+> up a 'pop-up menu' for reply, map, DM, info, etc.. pressing Esc closes the selection box and enables to type
+> again"*.
+>
+> **ITEMS DONE: 1, 2, 3, 4, 5.** `sh test/host/run.sh` **exit 0**: **33,431 counted checks** (+138 over v63's
+> 33,293: the new `chat-select` suite is **125**, `test_layout` 62 → **75**). `make build` **exit 0**,
+> `application.bin` **0x1A5680 = 1,724,032 B** (**+7,504 B** over v63's 1,716,528 B; 18 % of the app partition
+> free). Three new previews (`shots/2026-11-19-chat-select.png`, `-chat-msg-menu.png`, `-chat-msg-info.png`);
+> every preview re-rendered. Nothing is installed, flashed, pushed or committed.
+
+### 1. The selection box (item 1)
+
+- **Up from the composer now ENTERS the selection box on the newest message** instead of scrolling, and Down with
+  nothing selected does nothing. **Scrolling without selecting no longer exists** — that is the ticket's own
+  change, and this entry says it because the old hint (`up/dn scroll`, S503) is gone: `up/dn` now means "move the
+  box". The draft is never touched by a move.
+- The frame is the Nodes list's focus look — `kSelBg` fill + the 2 px gold `kAcc` ring — around the **whole
+  message**: its head line (time + who) and every body line, drawn UNDER the text so no glyph is covered.
+- Up/Down move it message by message; **Up at the oldest stops**, **Down past the newest leaves the box** (the
+  ticket's second way out), **Esc leaves the box and the composer takes keys again**, draft intact. A typed key
+  while the box is up is swallowed: `handled = true` at the top of the branch, so nothing reaches `composer[]`.
+- **The window follows the box** and `chat_layout` decides it: `chatSelScroll(index, count)` = `count-1-index`
+  (the selected message is the bottom of the window), and the new **`chatWindowAt`** is the same `chatWindow`
+  with the scroll clamped only to `0..count-1`. It is needed because `chatWindow`'s `max_scroll` stops at the
+  topmost FULL window, so the oldest messages would otherwise be unreachable — the box must reach all of them.
+- **The box is kept by SEQ, not by index**: a message that arrives while it is up does not move the frame (the
+  window grows above it). If the ring evicts the selected message (64 messages) the box closes by itself.
+- State cleared wherever the chat changes under it: Esc out of the chat, the own CHAT symbol key (`onTop`), a
+  channel/DM card opened from the list, and the node menu's DM (`openDmThread`).
+
+### 2. Enter = the message menu (item 2)
+
+- A sheet in the **node menu's house style** — dither scrim, panel, gold 2 px outline, two-line head, 42 px rows,
+  `kSelBg` + gold ring on the focused row — drawn by ONE function (`drawChatSheet` in `main/chat_page.cpp`) that
+  the Info sheet also uses, so the app keeps one menu look.
+- Rows per message kind, from `core/chat_select.h::chatMsgRows`:
+  - **incoming channel**: `Reply`, `DM <sender>`, `Map`, `Node`, `Info`;
+  - **incoming DM**: `Reply`, `Map`, `Node`, `Info` (no DM row: this IS the DM);
+  - **our own line**: `Info` only.
+- `Reply` puts **`@<sender> `** in front of the draft on a channel. The form and its source:
+  **`firmware/src/main.cpp:1175`** — `snprintf(wire, sizeof(wire), "@%s %s", g_replyName, g_kbText);` — with
+  `firmware/src/ui/message_sheet.h:26` naming the same thing (*"the `@Name text` draft, as REPLY did"*) and
+  `firmware/src/main.cpp:1332` using the identical `"@%s "` tag for a mention. A DM's reply adds **nothing**: the
+  thread already says who it is for (the L2's own rule, `firmware/src/main.cpp:1145-1147`).
+- **A channel message carries only the sender's NAME**, resolved by `chatNodeByName`: only full-key contacts
+  count (a prefix-only row is not a node), and only **exactly one** match names a node. Zero → the row is dim
+  with **`unknown node`**; two or more → dim with **`2 nodes share this name`** (`N nodes` for N > 2) and
+  **Enter does nothing at all** — the same "never guess" rule `pathHopLabel` follows for a path hash. A DM thread
+  resolves by the peer's KEY (`contactsFind`), since it has one.
+- `Map` is dim with **`no position`** when the resolved node has none (`positionDrawable`); otherwise it takes the
+  **node menu's own path** (`centreOnNode` at z15, the `map_highlight_pub` gold ring, `goPage(Map)`), so the map
+  cannot tell which page asked.
+- `Node` is the Nodes page with the box on that node (`nodeMenuFocusFollow`); if the node is outside the current
+  filter/search the filter goes to **All** and the query is dropped first, otherwise the box would land on
+  somebody else.
+- `DM` opens the thread through **`openDmThread`**, the same function the node menu's DM row uses (created empty
+  if it has no messages).
+- `Info` opens a sheet: **channel or DM and the sender are its head**, then `Sent` (the frame's timestamp),
+  `Received` (our clock, local), `Route` (`flood` / `scoped` / `direct`), `Hops`, **one row per hop with its hash
+  and its name only where exactly one node matches** (`pathHopLabel`), `Bytes`, `Heard` / `Repeated` N×.
+  **No RSSI and no SNR** (docs/DEVICE.md § 5b).
+- **A restored message shows only what the record carries**: `Received`, `Route`, `Bytes` and the copy count say
+  **`not kept after a restart`**. This needed ONE new store field: `Message::restored` / `DmMessage::restored`,
+  set by `core/mc_history.cpp`'s two restore paths (the alternative — inferring it from `frame_len == 0` — would
+  guess). Hops and the path ARE stored (v58), so they are shown when `hops_known`.
+- Esc closes the Info sheet back to the box; Esc closes the menu back to the box; Esc closes the box and hands
+  the keys back (S502's layer-up rule, unchanged).
+
+### 3. Pure logic in core + host tests (item 3)
+
+- `core/chat_select.h` / `.cpp` (new): `chatSelEnter`, `chatSelIndexForSeq`, `chatSelMove`, `chatSelScroll`,
+  `chatMsgRows`, `chatNodeByName`, `chatNodeNote`, `chatReplyPrefix`, `chatInfoHead`, `chatInfoRows`.
+  `core/chat_layout.*`: `chatWindowAt`. Registered in `core/CMakeLists.txt`.
+- `test/host/test_chat_select.cpp` (new, **125 checks**) pins: enter at the newest; Up at the oldest stops; Down
+  past the newest LEAVES; the frame stays on the same seq when a message arrives; the rows per kind and the dim
+  reasons; a name shared by two nodes resolves to nobody; a prefix-only row never resolves; the reply prefix
+  (including the empty sender and a short buffer); the Info rows for a live channel message, a DM, our own line,
+  and a restored record; and that a path too long for the sheet ends in `+N more` with the TRUE count (a 64-hop
+  path folds, it is not silently cut).
+- `test/host/test_layout.cpp` +13: `chatWindowAt` reaches the oldest message, agrees with `chatWindow` where the
+  clamp does not bite, clamps at both ends, and answers the empty case.
+- **ARMED, two (FAIL lines pasted, then restored — `cmp` says the file is identical again):**
+  1. `chatSelMove` clamping instead of leaving at the newest:
+     `FAIL test_chat_select.cpp:89  m.active == false (got 1, want 0)` — **121 checks, 1 failure(s)**.
+  2. `chatNodeByName` taking the first of two matches:
+     `FAIL test_chat_select.cpp:234  m.matches == 2 (got 1, want 2)` — **123 checks, 1 failure(s)**.
+
+### 4. The hint bar (item 5)
+
+- In selection mode: **`up/dn move`, `Enter menu`, `esc type`** — three chips, and the preview renders the same
+  arithmetic `chrome.cpp` uses: they end well short of the five symbol keys, nothing is dropped.
+- The menu shows `up/dn move`, `Enter choose`, `esc close`; the Info sheet `esc close`; the plain open chat lost
+  `up/dn scroll` and is now `Enter send`, `esc back`, `type write`, `, settings`.
+
+### 5. Files
+
+- **New:** `core/chat_select.h`, `core/chat_select.cpp`, `test/host/test_chat_select.cpp`,
+  `shots/2026-11-19-chat-select.png`, `shots/2026-11-19-chat-msg-menu.png`,
+  `shots/2026-11-19-chat-msg-info.png`.
+- **Changed:** `core/CMakeLists.txt`, `core/chat_layout.h`, `core/chat_layout.cpp`, `core/mc_store.h` (the
+  `restored` flag on both message structs), `core/mc_history.cpp` (sets it), `core/settings.h` (v64),
+  `main/chat_page.h`, `main/chat_page.cpp`, `main/main.cpp`, `test/host/run.sh`, `test/host/test_layout.cpp`,
+  `tools/preview_tanmatsu.py`, this entry.
+
+### 6. Assumptions, and what was NOT checked
+
+- **The reply prefix is `@Name ` with one space**, from the cited firmware line. The ticket wrote it
+  `"@[<sender>] "`; I read the brackets as the placeholder for the name, not as characters to type — the L2 writes
+  none, and a `[` would change what every reply-looking bot on the channel sees.
+- **`Heard N×` keeps the EST-462 convention** (`copies` printed as-is, floored at 1) so the Info sheet and the
+  time row cannot disagree; note that `mc_store` documents `copies` as the count of DUPLICATE frames, so the
+  short line and the sheet are both one lower than "frames heard" for a repeated message. **Not changed here**
+  (it would move an EST-462 test and its preview) — flagged for Filip, not fixed.
+- **A `Reply` whose prefix would not fit** (draft longer than 93 of the composer's 120 bytes) leaves the draft
+  alone and closes the box. The draft is never truncated; the box just does not add the mention. Not surfaced.
+- **NOT checked:** anything on the glass (no install); whether the frame's 4 px side margin looks right on the
+  real panel; whether a long path's `+N more` row is the best fold (it is honest, it is not pretty); the Map
+  action's real z15 pack on the card; the DM/Node jumps across pages live.
+- `make build` still prints the pre-existing `unused variable 'order'` warning in `main/main.cpp`
+  (`drawNodesPage`, there in the v63 baseline); no new warnings.
+
+
+**Claude's review of EST-469 (S515, 2026-11-19 20:5x):** DeepSeek's flag 2 was a real defect from v58, fixed: `copies` counts the EXTRA copies (a message arrives with 0; `mc_history.cpp:176`), but the time row printed it as "heard N×" and only from 2, so a message heard twice showed nothing and one heard three times said "heard 2×"; and our own message needed two echoes before "repeated" appeared. Now: incoming heard = copies + 1, shown from 2 (copies ≥ 1); own repeated = echoes, shown from 1. Four `test_chat_meta.cpp` expectations and one `test_chat_select.cpp` row moved with it (the v58 tests had pinned the one-too-low model). Flag 1 accepted: the reply prefix is the L2's `@Name ` (`firmware/src/main.cpp:1175`), not `@[Name]`, for one convention across Filip's two devices; to be confirmed by Filip. Flag 3 (a Reply that would not fit leaves the draft as it is) accepted. Previews checked (menu with a dim Map row).
 ## 2026-11-19 · S515 (EST-468) message LED + storage wording
 
 > Written by **DeepSeek** for ticket **EST-468**: fenced Paperclip run, no session start/end, nothing installed,

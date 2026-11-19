@@ -62,6 +62,12 @@ struct Window {
 
 Window chatWindow(const int* lines, int count, int line_h, int gap_h, int height, int scroll);
 
+// S515/EST-469: the SAME window with the caller's scroll NOT clamped to max_scroll. Selection mode scrolls to a
+// MESSAGE, not "back in history", and the oldest messages sit ABOVE the topmost full window chatWindow() allows
+// (that bound exists so a plain Up press never hides the newest message while merely scrolling). Here `scroll` is
+// clamped only to 0..count-1, and the selected message is reachable: chatSelScroll() puts it at the bottom.
+Window chatWindowAt(const int* lines, int count, int line_h, int gap_h, int height, int scroll);
+
 // How many of the loaded messages count as READ, given their on-card log ids (oldest first, ascending) and the
 // seen point stored in the log's Meta record. Ids are consecutive per file, so this is a prefix length; it is a
 // function rather than a loop in the caller because getting it wrong is silent: unread would either never clear

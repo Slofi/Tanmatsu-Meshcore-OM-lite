@@ -20,6 +20,10 @@ idf_component_register(
          # S515/EST-462: the chat time row — the last-repeater resolver and the dim head-line formatter. Pure, so
          # the host tests pin "never guess between two contacts" and "unknown stays unknown after a restart".
          "chat_meta.cpp"
+         # S515/EST-469: selecting a message, its menu's rows, the name-to-node rule, the reply prefix and the Info
+         # sheet's lines. Pure, so the box's index rules (by seq) and "a name shared by two nodes names nobody" are
+         # host tests rather than something the glass has to teach us.
+         "chat_select.cpp"
          # S513/EST-430: the Chat list's two-column card grid — the rects, the focus moves and the scroll that keeps
          # the focused card visible. Pure arithmetic on the page's box, so the host tests pin the panel's numbers.
          "chat_cards.cpp"
