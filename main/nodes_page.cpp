@@ -162,6 +162,9 @@ void drawNodes(Screen& s, const NodesView& v) {
         // S514/EST-455: the favourite mark. The generated faces carry ASCII + Latin-1/Latin Extended-A only,
         // so there is no U+2605 star; a small gold dot is the mark that can actually be drawn.
         if (c.favourite) s.disc(list_x1 - kTmRingInset - 74, y + 16, 3, kAcc);
+        // S515/EST-461: the NEW node's red dot, in the strip between the favourite mark and the age column
+        // (the name is clipped well before it, and the age/SNR keep the right edge), in the badge red.
+        if (c.fresh) s.disc(list_x1 - kTmRingInset - 46, y + 16, 3, kBad);
         // second line: how it reached us
         char sub[24];
         if (c.path_len == 0) snprintf(sub, sizeof(sub), "direct");

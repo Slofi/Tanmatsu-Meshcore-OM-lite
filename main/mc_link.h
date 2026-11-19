@@ -161,6 +161,16 @@ size_t contactsClear();                // returns how many rows were removed; 0 
 // loop's pass, exactly like remove/clear. False for an out-of-range index (a stale row must mark nobody).
 bool contactsSetFavourite(size_t index, bool on);
 
+// ---------------------------------------------- S515/EST-461: the NEW contact's ack (the Nodes page's red dot)
+// Clear one contact's `fresh` flag (the Nodes page's selection box landed on it, or rested on it for 1.5 s).
+// Returns false for an out-of-range row or a row that was already acked, so the caller knows whether anything
+// changed. The flag is part of the `mcct` blob (version 3), so this raises the ACK dirty flag and the same
+// contactsPersistTick() writes it: at most one write per 5 s, plus one forced write from contactsAckLeave().
+bool contactsAckFresh(size_t index);
+
+// The user left the Nodes page: flush the acked flags now, past the 5 s floor. Cheap when nothing is pending.
+void contactsAckLeave();
+
 // ------------------------------------------------- S514/EST-456: the NODE MENU's Ping and Trace
 // Both are the L2's: Ping is the EST-453 status request (REQ_TYPE_GET_STATUS) and measures the reply's round trip;
 // Trace is upstream Mesh::createTrace() + sendDirect() down the contact's stored out_path. Neither transmits here:

@@ -45,6 +45,8 @@ extern "C" {
 #include "nodes_page.h"          // step 4: the Nodes page
 #include "nodes_search.h"        // S514/EST-449: the Nodes search (matcher, count, focus rules)
 #include "node_menu.h"           // S514/EST-455: the per-node actions + the favourite notice/focus rule
+#include "nodes_fresh.h"         // S515/EST-461: the NEW contact's frozen order + ack (pure, host-tested)
+#include "screen_power.h"        // S515/EST-461: the power button's screen-off state machine (pure, host-tested)
 #include "rptr_page.h"           // S514/EST-453: RPTR part 1 (list, login, status)
 #include "rptr_link.h"           // S514/EST-453: the RPTR radio requests + remembered passwords
 #include "sd_history.h"          // step 5: chat history on the card
@@ -182,7 +184,36 @@ static bool hostedConnectC6() {
     return rc == 0;
 }
 
+// ---- S515/EST-461: the power button = screen off (the DECISION is core/screen_power.h) ---------------------
+// This trio is the only BSP work: remember both brightnesses, set both to 0, restore them. The loop decides
+// WHEN (press edge, key wake) and skips the panel blit while the state says OFF.
+om::ui::ScreenPower g_screen_power;
+uint8_t             g_disp_bright = 100;   // what the display was before OFF
+uint8_t             g_kbd_bright  = 100;   // …and the keyboard backlight
+
+void screenLightsOff() {
+    uint8_t d = 100, k = 100;
+    if (bsp_display_get_backlight_brightness(&d) != ESP_OK) d = 100;
+    if (bsp_input_get_backlight_brightness(&k) != ESP_OK) k = 100;
+    // A second press before the first restore must not remember 0 as "the" brightness.
+    if (d > 0) g_disp_bright = d;
+    if (k > 0) g_kbd_bright = k;
+    bsp_display_set_backlight_brightness(0);
+    bsp_input_set_backlight_brightness(0);
+}
+
+void screenLightsOn() {
+    bsp_display_set_backlight_brightness(g_disp_bright);
+    bsp_input_set_backlight_brightness(g_kbd_bright);
+}
+
 static void leaveToLauncher() {
+    // S515/EST-461: the launcher must never start DARK. Esc with the screen off is a wake as well as an exit.
+    if (g_screen_power.off) {
+        g_screen_power.off = false;
+        screenLightsOn();
+        ESP_LOGI(TAG, "[screen] on (launcher)");
+    }
 #if CONFIG_BOOTLOADER_RESERVE_RTC_MEM
     if (rtc_retain_mem_t* mem = bootloader_common_get_rtc_retain_mem()) {
         memset(mem->custom, 0, sizeof(mem->custom));
@@ -1268,6 +1299,14 @@ extern "C" void app_main(void) {
     // S514/EST-456: the last trace's hop list stays up until Esc or another node is traced.
     static bool node_trace_shown = false;
     static int  node_menu_index = -1;
+    // S515/EST-461: the NEW contact's frozen order + the ack dwell. `nodes_frozen` is a snapshot of STORE rows
+    // taken when the page OPENS (so an acked row keeps its place until the user leaves), and `nodes_ack` is the
+    // 1.5 s rest timer. `nodes_key_moved` is raised by the key handlers below and by the own-key hook, and the
+    // loop resolves it into one ack — so a move acks without every handler knowing about the rule.
+    static om::ui::NodesFrozen nodes_frozen;
+    static om::ui::NodesAck      nodes_ack;
+    static bool                  nodes_key_moved = false;
+    static tm::Page              nodes_page_prev = tm::Page::Launcher;
     // S513/EST-430: the Chat list is two columns of cards, so the selection is a (column, row) pair like the model
     // in core/chat_cards.h. `chat_focus` is the row in the Channels column (and therefore the channel index);
     // `chat_dm_focus` is the row in the Direct messages column, which cannot be focused while it has no cards.
@@ -1705,6 +1744,21 @@ extern "C" void app_main(void) {
         return true;
     };
 
+    // S515/EST-461: the order EVERY Nodes lambda draws and filters. On the Nodes page it is the FROZEN snapshot
+    // (kept true to the table: a contact that arrived is appended, a removed one dropped; never re-sorted), so
+    // an acked row keeps its place until the user leaves. Anywhere else the live contactsOrder().
+    auto nodesOrderForPage = [&](int* out) -> int {
+        om::mc::StoreLock     l;
+        om::mc::ContactStore& cs = om::mc::contacts();
+        if (core.router().current() == tm::Page::Nodes) {
+            om::ui::nodesFrozenSync(nodes_frozen, cs);
+            const int n = nodes_frozen.count;
+            for (int i = 0; i < n; ++i) out[i] = nodes_frozen.order[i];
+            return n;
+        }
+        return (int)om::mc::contactsOrder(cs, out, om::mc::kMaxContacts);
+    };
+
     auto drawNodesPage = [&]() {
         om::ui::NodesView nv;
         nv.clock       = clockText();
@@ -1715,7 +1769,7 @@ extern "C" void app_main(void) {
         {
             om::mc::StoreLock l;
             nv.store       = &om::mc::contacts();
-            const int total = (int)om::mc::contactsOrder(om::mc::contacts(), order, om::mc::kMaxContacts);
+            const int total = nodesOrderForPage(order);
             // S514/EST-449: the list shows the FILTERED order; the bar prints "N of M" against the whole
             // contact table (store->count), exactly the L2's count line.
             nv.order       = shown;
@@ -1772,7 +1826,7 @@ extern "C" void app_main(void) {
         int order[om::mc::kMaxContacts];
         int shown[om::mc::kMaxContacts];
         om::mc::StoreLock l;
-        const int total = (int)om::mc::contactsOrder(om::mc::contacts(), order, om::mc::kMaxContacts);
+        const int total = nodesOrderForPage(order);   // S515/EST-461: the frozen order on the page
         return om::ui::nodeSearchFilter(&om::mc::contacts(), order, total, nodes_query, shown);
     };
 
@@ -1782,7 +1836,7 @@ extern "C" void app_main(void) {
     auto nodesShownOrder = [&](int* shown) -> int {
         int order[om::mc::kMaxContacts];
         om::mc::StoreLock l;
-        const int total = (int)om::mc::contactsOrder(om::mc::contacts(), order, om::mc::kMaxContacts);
+        const int total = nodesOrderForPage(order);   // S515/EST-461: the frozen order on the page
         return om::ui::nodeSearchFilter(&om::mc::contacts(), order, total, nodes_query, shown);
     };
 
@@ -2179,6 +2233,9 @@ extern "C" void app_main(void) {
             const bool closed = tm::ownTopList(top);
             nodes_bar   = top.inner;
             nodes_focus = top.row;   // first node at the top; unchanged when the bar was the one closed
+            // S515/EST-461: the own key's RETURN TO THE TOP is a key press landing on row 0, so it acks that
+            // row like Up/Down do. Closing the search bar is not a move and acks nothing.
+            if (!closed) nodes_key_moved = true;
             return closed;           // the typed query is deliberately untouched
         }
         if (page == tm::Page::Chat) {
@@ -2335,6 +2392,31 @@ extern "C" void app_main(void) {
         const TickType_t wait = om::maplink::busy() ? pdMS_TO_TICKS(30) : pdMS_TO_TICKS(250);
         if (g_input_queue && xQueueReceive(g_input_queue, &ev, wait) == pdTRUE) {
             logInputEvent(ev);
+            // ---- S515/EST-461: the power button and the screen-off state machine (core/screen_power.h).
+            // Press toggles; the release edge is never acted on; while OFF every KEY is SWALLOWED and the screen
+            // stays dark (Filip, S515: the power button is also a key-lock for transport, only it wakes the
+            // screen). An arriving message never comes through here at all, so it cannot wake the panel.
+            if (ev.type == INPUT_EVENT_TYPE_ACTION) {
+                if (ev.args_action.type == BSP_INPUT_ACTION_TYPE_POWER_BUTTON) {
+                    const om::ui::ScreenAct act = g_screen_power.onEvent(
+                        ev.args_action.state ? om::ui::ScreenEv::PowerPress : om::ui::ScreenEv::PowerRelease);
+                    if (act == om::ui::ScreenAct::Off) {
+                        screenLightsOff();
+                        ESP_LOGI(TAG, "[screen] off");
+                    } else if (act == om::ui::ScreenAct::OnByPower) {
+                        screenLightsOn();
+                        ESP_LOGI(TAG, "[screen] on (by power)");
+                        dirty = true;   // one repaint of the page the user left
+                    }
+                }
+                continue;   // no other action event is a key (audio jack, PMIC faults)
+            }
+            if (g_screen_power.off &&
+                (ev.type == INPUT_EVENT_TYPE_NAVIGATION || ev.type == INPUT_EVENT_TYPE_KEYBOARD ||
+                 ev.type == INPUT_EVENT_TYPE_SCANCODE)) {
+                (void)g_screen_power.onEvent(om::ui::ScreenEv::Key);   // Swallow: locked, stays dark
+                continue;   // a key while locked does NOTHING
+            }
             const tm::Page page_now = core.router().current();
             const tm::Key  k        = mapKey(ev);
             if (k != tm::Key::None) {
@@ -3100,7 +3182,9 @@ extern "C" void app_main(void) {
                             om::ui::nodeSearchBackspace(nodes_query, &nodes_query_len);
                             nodes_focus = 0;   // the list just changed under the bar
                         } else if (k == tm::Key::Down) {
-                            om::ui::nodesFocusDown(&nodes_bar, &nodes_focus, nodesShownCount());
+                            // Out of the bar onto the first match: that is a move onto a row (S515/EST-461).
+                            if (om::ui::nodesFocusDown(&nodes_bar, &nodes_focus, nodesShownCount()) && !nodes_bar)
+                                nodes_key_moved = true;
                         } else if (k == tm::Key::Up) {
                             // The bar IS the top row: Up there does nothing (and must never type).
                         } else if (is_char) {
@@ -3129,11 +3213,13 @@ extern "C" void app_main(void) {
                         // the menu. Every other key keeps its old meaning (the `!handled` block below:
                         // ',' = Settings, 'a' = advert, Esc = back).
                         if (k == tm::Key::Up) {
-                            om::ui::nodesFocusUp(&nodes_bar, &nodes_focus);
+                            // S515/EST-461: a move that LANDS on a row acks its NEW dot at once.
+                            if (om::ui::nodesFocusUp(&nodes_bar, &nodes_focus) && !nodes_bar) nodes_key_moved = true;
                             handled = true;
                             dirty   = true;
                         } else if (k == tm::Key::Down) {
-                            om::ui::nodesFocusDown(&nodes_bar, &nodes_focus, nodesShownCount());
+                            if (om::ui::nodesFocusDown(&nodes_bar, &nodes_focus, nodesShownCount()) && !nodes_bar)
+                                nodes_key_moved = true;
                             handled = true;
                             dirty   = true;
                         } else if (k == tm::Key::Enter) {
@@ -3361,6 +3447,62 @@ extern "C" void app_main(void) {
             }
         }
 
+        // ---- S515/EST-461: the hint bar's dots, then the Nodes page's frozen order and the NEW-contact ack.
+        // The counts come from the SAME functions the chat list's badges use (unreadTotals sums
+        // unreadForChannel + dmUnreadForPeer), so a dot and its badge cannot disagree.
+        {
+            uint8_t mask = 0;
+            {
+                om::mc::StoreLock l;
+                uint32_t          unread_ch = 0, unread_dm = 0;
+                om::mc::unreadTotals(om::mc::messages(), om::mc::readState(), om::mc::channelCount(),
+                                     om::mc::dmThreads(), om::mc::contacts(), &unread_ch, &unread_dm);
+                mask = om::ui::hintDotMask(unread_ch, unread_dm, om::mc::contactsFreshCount(om::mc::contacts()));
+            }
+            om::ui::hintDotsSet(mask);
+            // A message arriving while the Map (or any page) is on screen raises this with no key press behind
+            // it, so the dot appears at the next 250 ms pass.
+            if (om::ui::hintDotsNeedsRepaint()) dirty = true;
+        }
+        {
+            const tm::Page pnow   = core.router().current();
+            const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            if (pnow != nodes_page_prev) {
+                // Leaving: the one ack write that does not wait for the 5 s floor.
+                if (nodes_page_prev == tm::Page::Nodes) om::mc::contactsAckLeave();
+                if (pnow == tm::Page::Nodes) {
+                    // Entering: RE-SORT (a fresh snapshot of the live order) and start the dwell. Entry alone
+                    // acks nothing — the top row is acked after 1.5 s of rest, or by the first key press.
+                    int live[om::mc::kMaxContacts];
+                    int n;
+                    {
+                        om::mc::StoreLock l;
+                        n = (int)om::mc::contactsOrder(om::mc::contacts(), live, om::mc::kMaxContacts);
+                    }
+                    om::ui::nodesFrozenBegin(nodes_frozen, live, n);
+                    om::ui::nodesAckEnter(nodes_ack, nodes_focus, now_ms);
+                }
+                nodes_page_prev = pnow;
+            }
+            if (pnow == tm::Page::Nodes) {
+                if (nodes_key_moved) {
+                    nodes_key_moved = false;
+                    if (om::ui::nodesAckKeyMoved(nodes_ack, nodes_focus, now_ms) >= 0) {
+                        const int si = nodesFocusedStoreIndex();
+                        if (si >= 0 && om::mc::contactsAckFresh((size_t)si)) dirty = true;   // the dot goes at once
+                    }
+                } else {
+                    const int row = om::ui::nodesAckTick(nodes_ack, now_ms);
+                    if (row >= 0) {
+                        int       shown[om::mc::kMaxContacts];
+                        const int n  = nodesShownOrder(shown);
+                        const int si = (row >= 0 && row < n) ? shown[row] : -1;
+                        if (si >= 0 && om::mc::contactsAckFresh((size_t)si)) dirty = true;
+                    }
+                }
+            }
+        }
+
         if (dirty) {
             switch (core.router().current()) {
                 case tm::Page::Launcher:
@@ -3391,13 +3533,17 @@ extern "C" void app_main(void) {
                     drawPlaceholder(core.router().current());
                     break;
             }
-            const int64_t present_t0 = esp_timer_get_time();
-            g_screen.present();
-            const long present_us = (long)(esp_timer_get_time() - present_t0);
-            // On the Map page the panel blit is a big share of a frame (it transposes 384k pixels on the CPU), so
-            // it is measured, not assumed: a fill-in only looks smooth if compose + present stays short.
-            if (core.router().current() == tm::Page::Map) {
-                ESP_LOGI(TAG, "map frame: present %ld ms", present_us / 1000);
+            // S515/EST-461: while the screen is OFF the frame is still COMPOSED (the state stays current), but
+            // it is not pushed to the panel. The backlights are at 0, so a blit would be invisible work.
+            if (!g_screen_power.off) {
+                const int64_t present_t0 = esp_timer_get_time();
+                g_screen.present();
+                const long present_us = (long)(esp_timer_get_time() - present_t0);
+                // On the Map page the panel blit is a big share of a frame (it transposes 384k pixels on the CPU), so
+                // it is measured, not assumed: a fill-in only looks smooth if compose + present stays short.
+                if (core.router().current() == tm::Page::Map) {
+                    ESP_LOGI(TAG, "map frame: present %ld ms", present_us / 1000);
+                }
             }
             dirty = false;
         }

@@ -121,10 +121,15 @@ SemaphoreHandle_t g_store_mutex = nullptr;
 constexpr const char* kContactsNvsNamespace = "mcct";
 constexpr const char* kContactsNvsKey       = "tbl";
 constexpr uint32_t    kContactsSoftWriteMs  = 10u * 60u * 1000u;   // last-heard/SNR floor
+// S515/EST-461: a NEW-contact ack (the Nodes dot gone) is worth a write of its own, but never one per key press:
+// at most one every 5 s, and one forced write when the user leaves the Nodes page.
+constexpr uint32_t    kContactsAckWriteMs   = 5u * 1000u;
 constexpr uint32_t    kContactsRetryMs      = 10u * 1000u;         // after a failed NVS write
 
 bool     g_contacts_dirty_struct = false;
 bool     g_contacts_dirty_soft   = false;
+bool     g_contacts_dirty_ack    = false;
+bool     g_contacts_ack_force    = false;   // "one write on leaving the page", past the 5 s floor
 bool     g_contacts_write_failed = false;
 uint32_t g_contacts_last_write_ms  = 0;
 uint32_t g_contacts_last_attempt_ms = 0;
@@ -134,6 +139,13 @@ uint8_t  g_contact_blob[kContactBlobMaxBytes];   // restore reads it, the main t
 void markContactsDirty(bool structural) {
     if (structural) g_contacts_dirty_struct = true;
     else g_contacts_dirty_soft = true;
+}
+
+// S515/EST-461: an ack clears `fresh` on one row. It rides the same writer, with its own floor: it must not
+// wait the 10-minute soft floor (the dot would come back after a restart) and it must not write per key press.
+void markContactsAck(bool leaving_page) {
+    g_contacts_dirty_ack = true;
+    if (leaving_page) g_contacts_ack_force = true;
 }
 
 // Step 5 / S503 — the id each channel's LOG FILE has reached, and the last seen point we appended. Both are per
@@ -436,9 +448,24 @@ meshcore::ChannelSet setWithout(const meshcore::ChannelSet& in, int drop) {
 
 }  // namespace
 
+// S515/EST-461: the NVS budget in ENTRIES (the nvs partition is only 16 KB, and blob v3 adds 10 bytes to every
+// contact row). Logged at boot before and after the contact blob is read, and after every blob write, so a
+// namespace that is filling up shows in the log instead of as a mysterious first-boot failure.
+void logNvsStats(const char* when) {
+    nvs_stats_t st{};
+    const esp_err_t r = nvs_get_stats(nullptr, &st);
+    if (r != ESP_OK) {
+        ESP_LOGW(TAG, "nvs %s: stats unavailable (%s)", when, esp_err_to_name(r));
+        return;
+    }
+    ESP_LOGI(TAG, "nvs %s: used %u, free %u, total %u entries", when, (unsigned)st.used_entries,
+             (unsigned)st.free_entries, (unsigned)st.total_entries);
+}
+
 // S513/EST-437: the contact table's one NVS blob. Read at boot before the radio task exists; a wrong blob is
 // ignored whole (decode writes into a scratch table), so a damaged namespace cannot half-fill the Nodes list.
 size_t restoreContacts() {
+    logNvsStats("before the contact blob (boot)");
     nvs_handle_t h;
     if (nvs_open(kContactsNvsNamespace, NVS_READONLY, &h) != ESP_OK) {
         ESP_LOGI(TAG, "contacts: none stored yet (no \"%s\" namespace)", kContactsNvsNamespace);
@@ -481,11 +508,14 @@ size_t restoreContacts() {
     // Nothing has changed since this was read: the first real mutation raises a flag again.
     g_contacts_dirty_struct = dropped > 0;   // a dropped row must reach NVS, or it returns on the next boot
     g_contacts_dirty_soft   = false;
+    g_contacts_dirty_ack    = false;
+    g_contacts_ack_force    = false;
     g_contacts_write_failed = false;
     if (dropped > 0) {
         ESP_LOGW(TAG, "contacts: dropped %u record(s) without a full key", (unsigned)dropped);
     }
     ESP_LOGI(TAG, "contacts: %u restored from NVS", (unsigned)g_contacts.count);
+    logNvsStats("after the contact blob (boot)");
     return g_contacts.count;
 }
 
@@ -496,18 +526,28 @@ void contactsPersistTick() {
 
     bool     structural = false;
     bool     soft       = false;
+    bool     ack        = false;
+    bool     force      = false;
     size_t   bytes      = 0;
     uint32_t count      = 0;
     {
         StoreLock l;
         structural = g_contacts_dirty_struct;
         soft       = g_contacts_dirty_soft;
-        if (!structural && !soft) return;
-        // A soft-only change waits for the floor; a structural one goes on this pass. The failure retry is its own
-        // 10 s clock, so a broken NVS does not turn into a write storm from the UI task.
-        if (!structural && g_contacts_last_write_ms != 0 &&
-            (uint32_t)(now - g_contacts_last_write_ms) < kContactsSoftWriteMs) {
-            return;
+        ack        = g_contacts_dirty_ack;
+        force      = g_contacts_ack_force;
+        if (!structural && !soft && !ack) return;
+        // A soft-only change waits for the 10-minute floor; a structural one goes on this pass; an ack waits 5 s
+        // (or goes at once when the page was left). The failure retry is its own 10 s clock, so a broken NVS does
+        // not turn into a write storm from the UI task.
+        if (!structural && !force) {
+            uint32_t floor_ms = 0;
+            if (soft) floor_ms = kContactsSoftWriteMs;
+            if (ack && (floor_ms == 0 || kContactsAckWriteMs < floor_ms)) floor_ms = kContactsAckWriteMs;
+            if (floor_ms != 0 && g_contacts_last_write_ms != 0 &&
+                (uint32_t)(now - g_contacts_last_write_ms) < floor_ms) {
+                return;
+            }
         }
         if (g_contacts_write_failed && g_contacts_last_attempt_ms != 0 &&
             (uint32_t)(now - g_contacts_last_attempt_ms) < kContactsRetryMs) {
@@ -525,6 +565,8 @@ void contactsPersistTick() {
         // Cleared BEFORE the lock is released: a mutation that lands while NVS is written sets a flag again.
         g_contacts_dirty_struct = false;
         g_contacts_dirty_soft   = false;
+        g_contacts_dirty_ack    = false;
+        g_contacts_ack_force    = false;
     }
 
     nvs_handle_t h;
@@ -539,6 +581,7 @@ void contactsPersistTick() {
         g_contacts_last_write_ms = now;
         g_contacts_write_failed  = false;
         ESP_LOGI(TAG, "contacts: %u stored to NVS (%u B)", (unsigned)count, (unsigned)bytes);
+        logNvsStats("after the contact blob (write)");
     } else {
         g_contacts_write_failed = true;
         ESP_LOGE(TAG, "contacts: NVS write failed (%s); retrying in %u s", esp_err_to_name(r),
@@ -546,6 +589,7 @@ void contactsPersistTick() {
         StoreLock l;
         if (structural) g_contacts_dirty_struct = true;
         else g_contacts_dirty_soft = true;
+        if (ack) g_contacts_dirty_ack = true;   // an ack is never lost to a failed write either
     }
 }
 
@@ -584,6 +628,27 @@ bool contactsSetFavourite(size_t index, bool on) {
     markContactsDirty(true);
     ESP_LOGI(TAG, "contacts: row %u favourite -> %s", (unsigned)index, on ? "on" : "off");
     return true;
+}
+
+// S515/EST-461: clear the NEW flag on one row. The dot goes at once (the caller repaints); the WRITE is
+// coalesced by the ack floor, so holding Down through twenty new nodes is still one NVS write.
+bool contactsAckFresh(size_t index) {
+    if (g_store_mutex == nullptr) return false;
+    StoreLock l;
+    if (index >= g_contacts.count || !g_contacts.c[index].fresh) return false;
+    g_contacts.c[index].fresh = false;
+    markContactsAck(false);
+    ESP_LOGI(TAG, "contacts: row %u acked (new dot gone, %u still new)", (unsigned)index,
+             (unsigned)contactsFreshCount(g_contacts));
+    return true;
+}
+
+// Leaving the Nodes page: the one write that must not wait (the ticket's "plus one on leaving the page").
+void contactsAckLeave() {
+    if (g_store_mutex == nullptr) return;
+    StoreLock l;
+    if (!g_contacts_dirty_ack) return;   // nothing acked: no write, no flash wear
+    markContactsAck(true);
 }
 
 bool newNodeNoticeEnabled() { return g_new_node_notice; }
@@ -1116,9 +1181,10 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
         uint32_t ts   = 0;
         uint8_t  type = 0;
         char     name[24] = {0};
+        meshcore::AdvertPosition pos;   // S515/EST-461: the advert's position, stored for EST-463's map
         // type != nullptr: keep EVERY verified node type here (repeaters included), not only chat nodes — the
         // Nodes page is a list of what the radio can hear.
-        if (!meshcore::advertParse(v, pub, &ts, name, sizeof(name), &type)) {
+        if (!meshcore::advertParse(v, pub, &ts, name, sizeof(name), &type, &pos)) {
             ESP_LOGW(TAG, "rx %u B: advert with an INVALID signature, dropped", (unsigned)len);
             return;
         }
@@ -1151,7 +1217,8 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
             }
             const uint32_t heard = om::time_source::epochNow();
             const int      idx =
-                contactsUpsert(g_contacts, pub, name, type, v.path_bytes, ts, heard, rssi_dbm, snr_db * 10);
+                contactsUpsert(g_contacts, pub, name, type, v.path_bytes, ts, heard, rssi_dbm, snr_db * 10,
+                               pos.has_position, pos.lat_e6, pos.lon_e6);
             if (idx >= 0) {
                 // Add / rename / route change is worth an immediate NVS write; a repeat advert that only moves
                 // last-heard and SNR waits for the 10-minute floor.

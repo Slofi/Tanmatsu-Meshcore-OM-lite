@@ -399,7 +399,7 @@ def status_bar(d, clock='--:--', batt=0.97, gps=False, radio=True):
         x -= tw(fm, '868') + 22
 
 
-def hint_bar(d, page, actions):
+def hint_bar(d, page, actions, dots=()):
     """The key-hint bar (BRIEF § 5): what the keys do HERE, same style as the L2's tab bar.
 
     Left: this page's actions. Right: the five symbol keys, the page switch; the current page's key is
@@ -422,6 +422,10 @@ def hint_bar(d, page, actions):
         text(d, (x, cy), lab, fm, col, anchor='rm')
         x -= tw(fm, lab) + 7
         sigil(d, kind, x - 8, cy, 7, col, width=2)
+        # S515/EST-461: the notification dot, at the sigil's top-right, clear of the gold ring. kBad is the
+        # chat list's unread-badge red, the same colour main/chrome.cpp uses (chrome.cpp: disc(sx+9, cy-8, 3)).
+        if pname in dots:
+            d.ellipse([x - 8 + 9 - 3, cy - 8 - 3, x - 8 + 9 + 3, cy - 8 + 3], fill=P['Bad'])
         x -= 22 if kind != 'cloud' else 24
     x -= 10
     vline(d, x, top + 5, TM['H'] - 6, P['Line'])
@@ -484,7 +488,7 @@ MODULES = [
 ]
 
 
-def launcher():
+def launcher(dots=(), name='2026-11-13-launcher-home.png'):
     """The Launcher home: this app's own menu (BRIEF § 3), CD clarity in the L2's clothes.
 
     Left: the module list, one row per module, each with a state chip (CD's status dot made explicit).
@@ -597,8 +601,10 @@ def launcher():
         text(d, (x, yy), line, fnote2, P['Dimmer'])
         yy += 16
 
-    hint_bar(d, 'home', [('↑↓', 'move'), ('↵', 'open'), ('s', 'stop'), ('esc', 'quit')])
-    return save(img, '2026-11-13-launcher-home.png')
+    hint_bar(d, 'home', [('↑↓', 'move'), ('↵', 'open'), ('s', 'stop'), ('esc', 'quit')], dots)
+    # S515/EST-461: the same page drawn with BOTH notification dots for the hint-dots preview. The launcher is
+    # deliberately not the page the dots live on, which is the point: every page shows them.
+    return save(img, name)
 
 
 # ---------------------------------------------------------------------------------------- om lite
@@ -2360,7 +2366,103 @@ def rptr_status():
     return save(img, '2026-11-19-rptr-status.png')
 
 
-RENDERERS = dict(launcher=launcher, menu=menu, nodes=nodes, nodes_search=nodes_search,
+# ------------------------------------------------- S515/EST-461: the NEW contacts, and the hint bar's dots
+# Invented, like every fixture here. Two favourites on top, then the still-NEW rows (their red dot), then the
+# rest by last heard — core/mc_store.h::contactsOrder's order, drawn at the device's own row geometry.
+NODES_FRESH = [
+    ('client', 'TEST-A1', 'direct', '14h', '3.2', 'favourite', False),
+    ('repeater', 'RPT-Sever', 'path 2', '18m', '7.5', 'favourite', False),
+    ('client', 'TEST-B2', 'direct', 'now', '4.1', None, True),      # NEW
+    ('room', 'ROOM-3', 'path 2', '2m', '1.8', None, True),          # NEW
+    ('repeater', 'RPT-Jug', 'path 2', '49m', '6.1', None, False),
+    ('repeater', 'RPT-Vzhod', 'path 3', '9h', '-1.4', None, False),
+    ('client', 'LOCAL-KB', 'direct', '2d', '4.4', None, False),
+]
+
+
+def nodes_fresh():
+    """OM Lite > Nodes after a first advert: the new rows sit under the favourites, each with a red dot.
+
+    The dot is drawn where main/nodes_page.cpp draws it (list_x1 - ring_inset - 46, row top + 16, r 3) in the
+    chat list's badge red, so the preview and the glass cannot disagree about the size or the place.
+    """
+    img, d = new_screen()
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    status_bar(d)
+
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Nodes', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    fm = font(FONT_MONO, TM['f_meta'])
+    text(d, (W - pad, y + TM['head_h'] // 2), '7 nodes heard · 5 in the last hour', fm, P['Dim'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+    work_top = y + TM['head_h'] + 1
+
+    list_x0, list_x1 = pad, pad + TM['list_w']
+    fl = font(FONT_MONO, TM['f_label'])
+    spaced(d, (list_x0, work_top + 16), 'NODES', fl, P['Dim'])
+    text(d, (list_x1 - 12, work_top + 16), '7 of 9', font(FONT_MONO, TM['f_label']), P['Dimmer'], anchor='ra')
+
+    rows_top = work_top + 40
+    row_h = 46
+    row_right = list_x1 - TM['ring_inset']
+    for i, (kind, name, hops, age, snr, mark, fresh) in enumerate(NODES_FRESH):
+        y0 = rows_top + i * row_h
+        y1 = y0 + row_h
+        if i == 2:
+            focus_band(d, list_x0 - 8, list_x1, y0, y1)   # the box is on the first NEW row; its dot stays
+        else:
+            hline(d, list_x0, row_right, y1, P['RowLine'])
+        col = P['Client'] if kind == 'client' else (P['Green'] if kind == 'repeater' else P['Warn'])
+        d.ellipse([list_x0 + 6, y0 + row_h // 2 - 4, list_x0 + 14, y0 + row_h // 2 + 4], fill=col)
+        nc = P['AccInk'] if i == 2 else P['Ink']
+        text(d, (list_x0 + 24, y0 + 10), name, font(FONT_SANS, 16), nc)
+        meta = font(FONT_MONO, TM['f_meta'])
+        text(d, (list_x0 + 24, y0 + 29), hops, meta, P['Dimmer'])
+        text(d, (row_right - 74, y0 + 11), age, meta, P['Dim'], anchor='ra')
+        text(d, (row_right - 6, y0 + 29), snr + ' dB', meta, P['Dim'], anchor='ra')
+        if mark == 'favourite':
+            d.ellipse([row_right - 74 - 3, y0 + 16 - 3, row_right - 74 + 3, y0 + 16 + 3], fill=P['Acc'])
+        if fresh:
+            # main/nodes_page.cpp: disc(list_x1 - kTmRingInset - 46, y + 16, 3, kBad)
+            d.ellipse([row_right - 46 - 3, y0 + 16 - 3, row_right - 46 + 3, y0 + 16 + 3], fill=P['Bad'])
+
+    scroll_indicator(d, (list_x0, rows_top, list_x1, rows_top + len(NODES_FRESH) * row_h), total=9,
+                     visible=len(NODES_FRESH))
+
+    # detail pane: the focused row, which is the first NEW node
+    vline(d, list_x1 + 8, work_top, H - TM['hint_h'] - 8, P['Line'])
+    x = list_x1 + 8 + 24
+    yy = work_top + 18
+    text(d, (x, yy), 'TEST-B2', font(FONT_SANS, 26), P['Ink'])
+    yy += 34
+    text(d, (x, yy), 'client · key ' + NODE_KEY + ' · new, not opened yet', fm, P['Dim'])
+    yy += 26
+    fk = font(FONT_MONO, TM['f_kv'])
+    kv = [('TYPE', 'client (companion)'), ('HOPS', 'direct · 0 hops'), ('SNR / RSSI', '4.1 dB / -68 dBm'),
+          ('LAST HEARD', 'now'), ('PUBLIC KEY', NODE_KEY), ('PATH', 'direct')]
+    for label, value in kv:
+        text(d, (x, yy), label, fk, P['Dimmer'])
+        text(d, (x + 130, yy), value, fk, P['Ink'])
+        yy += 28
+    yy += 8
+    hline(d, x, W - pad, yy, P['Line'])
+    yy += 16
+    text(d, (x, yy), 'Enter: actions for this node.', font(FONT_SANS, TM['f_body']), P['Dimmer'])
+    text(d, (x, yy + 22), 'f: favourite. The dot goes once the box lands here.',
+         font(FONT_SANS, TM['f_body']), P['Dimmer'])
+
+    hint_bar(d, 'nodes', [('ret', 'menu'), ('f', 'favourite'), ('/', 'search'), ('esc', 'back')],
+             dots=('chat', 'nodes'))
+    return save(img, '2026-11-19-nodes-fresh.png')
+
+
+def hint_dots():
+    """The hint bar with BOTH notification dots: Chat (a channel or a DM is unread) and Nodes (a contact is
+    still new). Drawn on the Launcher on purpose — the dots belong to the chrome, not to a page."""
+    return launcher(dots=('chat', 'nodes'), name='2026-11-19-hint-dots.png')
+
+
+RENDERERS = dict(launcher=launcher, nodes_fresh=nodes_fresh, hint_dots=hint_dots, menu=menu, nodes=nodes, nodes_search=nodes_search,
                  nodes_favourites=nodes_favourites, node_trace=node_trace, chat=chat, chat2=chat_cards,
                  chat_emoji=chat_emoji,
                  chat_dm=chat_dm_column, dm_enter=dm_enter, map=map_page, rptr=rptr, rptr_list=rptr_list, rptr_status=rptr_status, settings=settings,

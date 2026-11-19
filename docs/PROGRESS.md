@@ -15,6 +15,133 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S515 (EST-461) · dots, new contacts, screen off
+
+> Written by **DeepSeek** for ticket **EST-461**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed, pushed or committed. Starting point **v56 `22a1e86`**. **Version: 57** (`core/settings.h` kAppVersion).
+> Items 1 (dots), 2 (new contacts), 3 (power button), 4 (host tests) and 5 (previews) are all in; the one thing
+> this run could NOT do is MEASURE NVS (no install, see § NVS below).
+
+### 1. DOTS ON THE SIGILS (done)
+
+- `main/chrome.h/.cpp`: `hintDotsSet(mask)` / `hintDots()` / `hintDotsNeedsRepaint()`, one bit per sigil
+  (`kHintDotNodes` = bit 1, `kHintDotChat` = bit 2). `drawHintBar` draws a **7 px** (`disc r 3`) red dot at the
+  sigil's **top-right** (`sx + 9, cy - 8`), in the chat list's own badge red (`theme.h kBad`), clear of the gold
+  active ring (its nearest point on that diagonal is ~4.9 px from the sigil centre). Because it is drawn by
+  `drawHintBar`, **every** page shows it with no page code.
+- The RULE (which dot, from what) is `core/nodes_fresh.h::hintDotMask()`, and the bits are `static_assert`ed equal
+  to chrome.h's, so the two cannot drift.
+- The COUNT is one source: the new `core/mc_store.h::unreadTotals()` sums `unreadForChannel()` (channels) and
+  `dmUnreadForPeer()` (DMs) — the same two functions the chat cards draw their badges from. No second counter.
+- Repaint with no key press: the loop sets the mask once per pass and `hintDotsNeedsRepaint()` follows
+  `noticeNeedsRepaint()`'s pattern (True once per CHANGE), so a message arriving on the Map page lights the dot
+  within one 250 ms pass.
+
+### 2. NEW CONTACTS (done, except the NVS numbers — see below)
+
+- **a) `Contact::fresh`**, set **only** in `contactsUpsert()`'s INSERT branch (the one caller of it is the verified
+  advert path in `mc_link.cpp`); a refresh of an existing row keeps it as it was, and a restored row takes the
+  stored value (or `false` from v1/v2). `contactsOrder()` is now **favourites → fresh (newest heard first) → rest
+  (by last heard)**, three O(n²) passes, no unstable tie-break.
+- **b) The row's dot**: `main/nodes_page.cpp`, `disc(list_x1 - kTmRingInset - 46, y + 16, 3, kBad)` — in the strip
+  between the gold favourite mark (`-74`) and the age column (which keeps the right edge), so name, type, age
+  and SNR still fit.
+- **c) ACK** — `core/nodes_fresh.h` (`NodesAck`): a key press that LANDS on a row acks at once (`nodesAckKeyMoved`,
+  raised by Up/Down, Down out of the search bar, and the own symbol key's return to the top); otherwise the box
+  must REST 1.5 s (`kNodesFreshDwellMs`, `nodesAckTick`). Page ENTRY alone acks nothing (`nodesAckEnter` only
+  starts the dwell). **The order is frozen as DATA**: `NodesFrozen` is a snapshot of STORE indices taken on entry
+  (`nodesFrozenBegin`), the page draws and filters THAT (`nodesOrderForPage`), and `nodesFrozenSync` only appends
+  a contact that arrived while open and drops one that left. Re-sorted on the next entry. The search filter and the
+  node menu still work on it (EST-449/455: the menu follows its STORE row).
+- **d) Blob v3** (`core/contact_blob.h/.cpp`): the record grows from 148 to **158** bytes —
+  `fresh u8 | has_position u8 | lat_e6 i32 | lon_e6 i32`. The decoder derives the stride from the VERSION (v1/v2 =
+  148, v3 = 158) and reads the tail only for v3, with `stride - 10` as the offset; v1/v2 load with `fresh=false`
+  and no position. The position comes from `advertParse()`'s `AdvertPosition` (`mc_identity.h`, already decoded);
+  `contactsUpsert()` takes it as 3 defaulted arguments, and an advert without a position never wipes a known one
+  (the same rule as the name). **Nothing draws it yet** (EST-463).
+- **d) Writes**: `markContactsAck()` raises its own dirty flag; `contactsPersistTick()` now honours a **5 s** floor
+  for it (`kContactsAckWriteMs`), and `contactsAckLeave()` (called when the page changes away from Nodes) forces
+  one write past the floor. No write per key press, and a failed write re-raises the flag.
+- **e)** The "New node: …" notice is untouched.
+
+### 3. POWER BUTTON = SCREEN OFF (done)
+
+- `core/screen_power.h`: `ScreenPower::onEvent(ScreenEv)` → `ScreenAct`. Press toggles, RELEASE never acts, a KEY
+  while off wakes it (`OnByKey`, i.e. wake-and-swallow), a MESSAGE never wakes it.
+  **Corrected by Claude at review (S515, 2026-11-19), at Filip's word:** *"not any button, the power button wakes the device. It is also a 'key-lock' for transport.."* `OnByKey` is gone: a key while off returns `Swallow` and the screen STAYS OFF; only `PowerPress` wakes it. The test now checks two keys in a row stay dark (armed: the old wake-on-key rule gives 6 FAIL lines, `test_nodes_fresh.cpp:271-279`). The ticket had been filed with Claude's first, wrong wording.
+- `main/main.cpp`: the ACTION event is read as `ev.args_action.type == BSP_INPUT_ACTION_TYPE_POWER_BUTTON` with
+  `state == true` on press (struct names from `bsp/input.h`, not guessed). OFF remembers
+  `bsp_display_get_backlight_brightness` / `bsp_input_get_backlight_brightness`, sets both to 0, logs
+  `[screen] off`; ON restores both, logs `[screen] on (by power|key)` and repaints once. While off the frame is
+  composed but **not presented**. Any nav/keyboard/scancode event while off wakes the screen and is `continue`d
+  before the key handling, so it cannot move the focus, type or switch page. `leaveToLauncher()` restores the
+  backlights first (`[screen] on (launcher)`), so the launcher never starts dark.
+
+### 4. HOST TESTS (done)
+
+- New suite `test/host/test_nodes_fresh.cpp` (**83 checks**), wired into `run.sh` twice: plain and under
+  ASan+UBSan (like the blob stages). It pins: the dot mask from unread/fresh counts (including the real
+  `unreadTotals()` over a message ring + a DM ring), `contactsOrder` with favourites/fresh/rest, an upsert refresh
+  not re-freshening, the ack rules (key landing, 1.5 s rest, entry alone, the 32-bit wrap, one ack per rest), the
+  frozen order (no re-sort on ack, appended on arrival, dropped on removal, re-sorted on entry, still filtered by
+  the search) and the screen state machine.
+- `test_contact_blob.cpp` grew the v3 tail (fresh + position round trip, `has_position=false` leaving no trusted
+  coordinates, a REAL 148-byte v1 blob loading with `fresh=0`), and its version/width checks moved to 3/158.
+- **`sh test/host/run.sh` → exit 0** — **28 compiled suite summaries, 14,971 checks, 0 failures**
+  (before, on a pristine `22a1e86` exported to `/tmp`: **26 suites, 14,805 checks, 0 failures, exit 0**; the
+  difference is the new suite twice: 83 + 83).
+- **ARMED, three probes** (each patched into a copy under `/tmp`, never the tree):
+  1. old two-pass `contactsOrder` (no fresh group) → `FAIL test_nodes_fresh.cpp:128  order[1] == 1 (got 3, want 1)`
+     · `:129  order[2] == 2 (got 1, want 2)` · `:130  order[3] == 0 (got 2, want 0)` · `:131  order[4] == 3 (got 0,
+     want 3)`.
+  2. codec with no v3 tail (the pre-S515 record) → `FAIL test_contact_blob.cpp:87  a.fresh == b.fresh (got 1, want
+     0)` · `:88  a.has_position == b.has_position (got 1, want 0)` · `:92  a.lat_e6 == b.lat_e6 (got 461013000,
+     want -858993460)`.
+  3. `kNodesFreshDwellMs = 0` (opening the page would ack the top row at once) → `FAIL test_nodes_fresh.cpp:167
+     om::ui::nodesAckTick(a, 1000) == -1 (got 0, want -1)` · `:176  nodesAckTick(b, 1001) == -1 (got 3, want -1)`.
+
+### 5. PREVIEWS (done)
+
+- `shots/2026-11-19-nodes-fresh.png` — two favourites (gold mark), then the two still-new rows with the red dot in
+  the device's own place, then the rest; the focus box sits on the first new row and its dot is still there.
+- `shots/2026-11-19-hint-dots.png` — the hint bar with BOTH dots, drawn on the Launcher on purpose (the dots are
+  chrome, not a page). `tools/preview_tanmatsu.py`'s `hint_bar()` gained a `dots=` argument drawn exactly where
+  chrome.cpp draws them (`cx + 9, cy - 8, r 3`).
+
+### Build
+
+- `make build` → **exit 0**. `application.bin` **0x19c750 = 1,689,680 B (1,650.1 KiB) = 51.6 % of the 3,200 KiB
+  ceiling**; the build's own line: `Smallest app partition is 0x200000 bytes. 0x638b0 bytes (19%) free`. That is
+  **+5,408 B** on v56's 1,684,272 B.
+
+### NVS — logged, NOT measured (no install in this run)
+
+- `mc_link.cpp` logs `nvs before the contact blob (boot): used N, free N, total N entries`,
+  `nvs after the contact blob (boot): …` and `nvs after the contact blob (write): …` (`nvs_get_stats` on the
+  default partition), so the first boot log after the install answers the ticket's question.
+- **The two numbers are NOT in this entry because this run had no device**: the ticket's "measure" needs the
+  install that is explicitly excluded here. The v3 blob costs 10 B per row: 32 rows = 4 + 32 × 158 = **5,060 B**
+  against 4 + 32 × 148 = **4,740 B** before (+320 B at a full table).
+
+### Files
+
+- `core/nodes_fresh.h` (new), `core/screen_power.h` (new), `test/host/test_nodes_fresh.cpp` (new).
+- `core/mc_store.h/.cpp`, `core/contact_blob.h/.cpp`, `core/settings.h` (57), `main/chrome.h/.cpp`,
+  `main/nodes_page.cpp`, `main/mc_link.h/.cpp`, `main/main.cpp`, `test/host/test_contact_blob.cpp`,
+  `test/host/run.sh`, `tools/preview_tanmatsu.py`, two PNGs above.
+
+### Known limits (named, not hidden)
+
+- The freeze holds **STORE indices**, like EST-455's node menu. A **removal** while the page is open compacts the
+  table, so a later row shifts down one; the snapshot drops rows past `count` but cannot tell that index 2 is now
+  somebody else. Removing a node closes the menu, and the next entry re-sorts, so the window is one page visit.
+- The dwell is decided on the main-task pass (250 ms, 30 ms while the map fills), so the ack lands at 1.5 s + up to
+  one pass, never before 1.5 s.
+- While the screen is off the frame is still composed every dirty pass (cheap, keeps the state current) and the map
+  fill still logs; no panel blit, no backlight.
+- Not checked on glass: the dots' exact pixel look, the power button's ACTION edge on this board, and the NVS
+  entries above.
+
 ## 2026-11-19 · S514 (EST-457) · emoji in messages and names (a subset of the L2's set)
 
 > Written by **DeepSeek** for ticket **EST-457**: fenced Paperclip run, no session start/end, nothing installed,

@@ -64,6 +64,25 @@ bool noticeNeedsRepaint();
 // The five symbol keys as vectors (BRIEF § 5). kind: 0 triangle, 1 square, 2 circle, 3 cloud, 4 diamond.
 void drawSymbolSigil(Screen& s, int kind, int cx, int cy, int r, uint16_t c, bool active);
 
+// --------------------------------------------------------------------------- the hint bar's red dots (S515/EST-461)
+// Filip's ask: a notification dot on the CHAT sigil while a channel or a DM has unread, and on the NODES sigil
+// while a contact is still NEW. One bit per sigil, so a page cannot draw a dot on somebody else's key:
+//   bit 0 Launcher · bit 1 Nodes · bit 2 Chat · bit 3 Map · bit 4 RPTR.
+//
+// The CALLER supplies the data (main.cpp reads the store's own counters), exactly like the notice: every page
+// calls drawHintBar(), so every page shows the dots without a line of its own. The dot is the chat list's badge
+// red (theme.h kBad) and sits OUTSIDE the sigil's gold ring, at its top-right corner.
+constexpr uint8_t kHintDotNodes = 1u << 1;
+constexpr uint8_t kHintDotChat  = 1u << 2;
+
+// Main task only: set it once per loop pass (the mask is published by the task that draws).
+void    hintDotsSet(uint8_t mask);
+uint8_t hintDots();
+
+// True once after the mask CHANGED — the noticeNeedsRepaint() pattern, so a message arriving while the Map is
+// on screen makes the Chat dot appear with no key press behind it.
+bool hintDotsNeedsRepaint();
+
 // The rounded card style of S513/EST-430: the Chat list's cards and now the start menu's three app cards.
 // `drawRoundedRect` is a per-row span fill with an integer corner (no float, no allocation); `drawCardPlate`
 // draws the outline as the outer plate and the fill inside it, so the ring follows the corners exactly

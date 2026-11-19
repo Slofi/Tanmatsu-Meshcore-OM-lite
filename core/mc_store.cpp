@@ -28,7 +28,8 @@ int contactsFind(const ContactStore& s, const uint8_t pub[32]) {
 }
 
 int contactsUpsert(ContactStore& s, const uint8_t pub[32], const char* name, uint8_t type, uint8_t path_len,
-                   uint32_t remote_ts, uint32_t heard_at, int rssi, int snr_x10) {
+                   uint32_t remote_ts, uint32_t heard_at, int rssi, int snr_x10, bool has_position,
+                   int32_t lat_e6, int32_t lon_e6) {
     if (pub == nullptr) return -1;
     int idx = contactsFind(s, pub);
     if (idx < 0) {
@@ -36,10 +37,20 @@ int contactsUpsert(ContactStore& s, const uint8_t pub[32], const char* name, uin
         idx = (int)s.count++;
         memcpy(s.c[idx].pub, pub, sizeof(s.c[idx].pub));
         s.c[idx].favourite = false;
+        // S515/EST-461: NEW. This is the only place a row is born, and every caller of this function is the
+        // verified-advert path (mc_link's kTypeAdvert branch), so "inserted here" IS "first verified advert of a
+        // key that was not in the table". A restore from NVS/SD decodes the stored flag instead.
+        s.c[idx].fresh = true;
     }
     Contact& c = s.c[idx];
     // A name that arrives empty must not erase the one we already have (an app_data without the name mask).
     if (name != nullptr && name[0] != '\0') copyTrunc(c.name, sizeof(c.name), name);
+    // The same rule for the position: an advert that carries none must not wipe a known one.
+    if (has_position) {
+        c.has_position = true;
+        c.lat_e6       = lat_e6;
+        c.lon_e6       = lon_e6;
+    }
     c.type     = type;
     c.path_len = path_len;
     c.remote_ts = remote_ts;
@@ -52,16 +63,19 @@ int contactsUpsert(ContactStore& s, const uint8_t pub[32], const char* name, uin
 size_t contactsOrder(const ContactStore& s, int* out, size_t max_out) {
     if (out == nullptr) return 0;
     size_t n = 0;
-    // Two passes, no sort call: favourites first, each pass in descending heard_at. O(n^2) on 32 rows is
-    // nothing, and it cannot reorder equal rows by an unstable tie-break.
-    for (int pass = 0; pass < 2 && n < max_out; pass++) {
-        const bool want_fav = (pass == 0);
-        bool       taken[kMaxContacts] = {false};
+    // Three passes, no sort call (S515/EST-461): favourites first, then the still-fresh rows newest first,
+    // then everything else by last heard. Each pass is descending heard_at, so equal rows cannot swap places
+    // by an unstable tie-break (O(n^2) on 32 rows is nothing).
+    for (int pass = 0; pass < 3 && n < max_out; pass++) {
+        bool taken[kMaxContacts] = {false};
         for (;;) {
             int best = -1;
             for (size_t i = 0; i < s.count; i++) {
                 if (taken[i]) continue;
-                if (s.c[i].favourite != want_fav) continue;
+                const bool in_group = (pass == 0) ? s.c[i].favourite
+                                     : (pass == 1) ? (!s.c[i].favourite && s.c[i].fresh)
+                                                   : (!s.c[i].favourite && !s.c[i].fresh);
+                if (!in_group) continue;
                 if (best < 0 || s.c[i].heard_at > s.c[best].heard_at) best = (int)i;
             }
             if (best < 0) break;
@@ -70,6 +84,13 @@ size_t contactsOrder(const ContactStore& s, int* out, size_t max_out) {
             else return n;
         }
     }
+    return n;
+}
+
+size_t contactsFreshCount(const ContactStore& s) {
+    size_t n = 0;
+    for (size_t i = 0; i < s.count; i++)
+        if (s.c[i].fresh) n++;
     return n;
 }
 
@@ -206,6 +227,21 @@ void formatAge(uint32_t now, uint32_t ts, char* out, size_t n) {
     else if (d < 3600) snprintf(out, n, "%um", (unsigned)(d / 60));
     else if (d < 86400) snprintf(out, n, "%uh", (unsigned)(d / 3600));
     else snprintf(out, n, "%ud", (unsigned)(d / 86400));
+}
+
+void unreadTotals(const MessageRing& r, const ReadState& rs, size_t channel_count, const DmRing& d,
+                  const ContactStore& s, uint32_t* channel_unread, uint32_t* dm_unread) {
+    uint32_t ch = 0;
+    for (size_t i = 0; i < channel_count && i < kMaxChannels; i++) ch += unreadForChannel(r, rs, (uint8_t)i);
+    // A DM thread's unread is counted against its contact row (dm_seen), so only peers IN the table can have
+    // any — the same answer dmThreadSummaries() puts on the cards, without a 64-entry summary array.
+    uint32_t dm = 0;
+    for (size_t i = 0; i < s.count && i < kMaxContacts; i++) {
+        if (contactKeyIncomplete(s.c[i].pub)) continue;
+        dm += dmUnreadForPeer(d, s, s.c[i].pub);
+    }
+    if (channel_unread != nullptr) *channel_unread = ch;
+    if (dm_unread != nullptr) *dm_unread = dm;
 }
 
 // ------------------------------------------------------------------------------------- direct messages (S513/EST-434)

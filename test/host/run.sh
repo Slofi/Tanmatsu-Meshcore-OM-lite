@@ -38,11 +38,13 @@ RPTRASAN="$(mktemp /tmp/tm-rptr-asan.XXXXXX)"
 NODEOPS="$(mktemp /tmp/tm-node-ops.XXXXXX)"
 NODEOPSASAN="$(mktemp /tmp/tm-node-ops-asan.XXXXXX)"
 EMOJI="$(mktemp /tmp/tm-emoji.XXXXXX)"
+NODESFRESH="$(mktemp /tmp/tm-nodes-fresh.XXXXXX)"
+NODESFRESHASAN="$(mktemp /tmp/tm-nodes-fresh-asan.XXXXXX)"
 RPTRED="$(mktemp -d /tmp/tm-rptr-ed.XXXXXX)"
 CHANORACLE="$(mktemp -d /tmp/tm-chan-oracle.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -382,6 +384,26 @@ ASAN_OPTIONS=detect_leaks=1 "$NODEOPSASAN"
     ../../../firmware/src/ui/text_wrap.cpp \
     -o "$EMOJI"
 "$EMOJI"
+
+# NEW CONTACTS + DOTS + SCREEN OFF (S515/EST-461): the hint bar's dot mask from the SAME counters the chat
+# list's badges use, the favourites -> fresh -> rest order, the ack rules (a key landing, a 1.5 s rest, page
+# entry alone), the FROZEN order while Nodes is open (appended on arrival, re-sorted on entry, still filtered
+# by the search) and the power button's screen state machine (press toggles, release ignored, a key while off
+# is swallowed and the screen stays off, only the power button wakes it (Filip, S515), a message does not wake). The rules are headers; mc_store is the device's own.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_nodes_fresh.cpp \
+    ../../core/mc_store.cpp \
+    -o "$NODESFRESH"
+"$NODESFRESH"
+
+# …and the same suite under ASan/UBSan: the frozen order copies indices out of a 32-row table, and the blob's
+# version-3 tail is read at an offset derived from the header.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I ../../core \
+    test_nodes_fresh.cpp \
+    ../../core/mc_store.cpp \
+    -o "$NODESFRESHASAN"
+ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$NODESFRESHASAN"
 
 # The subset blob must be exactly what tools/mkemoji_subset.py builds from the L2's table: a stale .bin (edited by
 # hand, or left behind after the L2's blob changed) fails here, not on the glass.

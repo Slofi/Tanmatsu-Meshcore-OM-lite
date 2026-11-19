@@ -42,6 +42,16 @@ struct Contact {
     int16_t  rssi = 0;
     int16_t  snr_x10 = 0;       // dB x 10: the UI prints "3.2 dB"
     bool     favourite = false;
+    // S515/EST-461: NEW = the row was created by the first verified advert of a key that was not in the table
+    // (contactsUpsert's insert branch only — never a refresh, never a row restored from NVS/SD). It sorts
+    // directly under the favourites, carries a red dot in Nodes, and clears when the selection box lands on it
+    // (a key press, or a 1.5 s dwell). Persisted in blob version 3, so a restart does not lose it.
+    bool     fresh = false;
+    // S515/EST-461, for EST-463's map: the position the advert carried. Only `has_position` makes lat/lon
+    // readable (an advert without ADV_LATLON_MASK leaves them zero). Not drawn anywhere yet.
+    bool     has_position = false;
+    int32_t  lat_e6 = 0;
+    int32_t  lon_e6 = 0;
     // S513/EST-434: the highest DM sequence the user has seen in THIS contact's thread. Unread is counted from
     // it, exactly like a channel's ReadState — a restored seen point (SD, item 4) will seed it too.
     uint32_t dm_seen = 0;
@@ -66,12 +76,17 @@ struct ContactStore {
 // than adding a second one — that is the whole point of identifying by key. Returns the index, or -1 when the
 // store is full and the key is new.
 int contactsUpsert(ContactStore& s, const uint8_t pub[32], const char* name, uint8_t type, uint8_t path_len,
-                   uint32_t remote_ts, uint32_t heard_at, int rssi, int snr_x10);
+                   uint32_t remote_ts, uint32_t heard_at, int rssi, int snr_x10, bool has_position = false,
+                   int32_t lat_e6 = 0, int32_t lon_e6 = 0);
 int contactsFind(const ContactStore& s, const uint8_t pub[32]);
 
-// The order the Nodes list shows: favourites first, then most recently heard. Writes indices, returns how many.
-// A stable order matters more than a clever sort: two rows must not swap places while the user is looking.
+// The order the Nodes list shows (S515/EST-461): favourites first, then rows that are still FRESH (newest
+// heard first), then everything else by last heard. Writes indices, returns how many. A stable order matters
+// more than a clever sort: two rows must not swap places while the user is looking.
 size_t contactsOrder(const ContactStore& s, int* out, size_t max_out);
+
+// How many rows are still fresh (the Nodes sigil's dot). Same flag contactsOrder sorts by.
+size_t contactsFreshCount(const ContactStore& s);
 
 // "2 in the last hour": how many were heard within `window_s` of `now`.
 size_t contactsHeardWithin(const ContactStore& s, uint32_t now, uint32_t window_s);
@@ -214,6 +229,13 @@ ChannelSummary channelSummary(const MessageRing& r, uint8_t ch);
 // "now" / "12m" / "4h" / "3d" — the same shape the L2 prints on its lists. `now` and `ts` are epoch seconds;
 // a ts in the future (a peer's clock ahead of ours) reads "now" rather than a negative age.
 void formatAge(uint32_t now, uint32_t ts, char* out, size_t n);
+
+// S515/EST-461: the ONE counter behind both the chat list's badges and the Chat sigil's dot. Channels are
+// counted with unreadForChannel() and DMs with dmUnreadForPeer() — the very functions the cards use, so a dot
+// can never disagree with the badge beside it. `channel_count` is clamped to kMaxChannels; a null out gets
+// nothing written.
+void unreadTotals(const MessageRing& r, const ReadState& rs, size_t channel_count, const DmRing& d,
+                  const ContactStore& s, uint32_t* channel_unread, uint32_t* dm_unread);
 
 }  // namespace mc
 }  // namespace om

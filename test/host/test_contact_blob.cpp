@@ -49,6 +49,11 @@ om::mc::Contact makeContact(uint8_t seed) {
   c.dm_seen   = 100u + seed;
   c.dm_seen_log = 200u + seed;
   c.dm_log_next = 300u + seed;
+  // S515/EST-461: the NEW flag and the advert's position, both part of a version-3 record.
+  c.fresh        = (seed % 3) != 0;
+  c.has_position = (seed % 5) != 0;
+  c.lat_e6       = (int32_t)(461000000 + (int)seed * 1000);
+  c.lon_e6       = (int32_t)(-144000000 - (int)seed * 500);
   // S513/EST-439: a route as MeshCore keeps it. Every fourth row has none (0xFF); of the rest, every third is a
   // ZERO-HOP direct route (0x40, a neighbour heard directly), the others a two-hop one.
   if (seed % 4 == 0) {
@@ -79,6 +84,17 @@ void sameContact(const om::mc::Contact& a, const om::mc::Contact& b) {
   CHECK_EQ(a.dm_log_next, b.dm_log_next);
   CHECK_EQ(a.out_path_len, b.out_path_len);
   CHECK(memcmp(a.out_path, b.out_path, sizeof(a.out_path)) == 0);
+  CHECK_EQ(a.fresh, b.fresh);
+  CHECK_EQ(a.has_position, b.has_position);
+  // A coordinates pair without the flag is NOT trusted back off the blob (the decoder zeroes it), which is the
+  // same rule as an advert without ADV_LATLON_MASK.
+  if (a.has_position) {
+    CHECK_EQ(a.lat_e6, b.lat_e6);
+    CHECK_EQ(a.lon_e6, b.lon_e6);
+  } else {
+    CHECK_EQ(b.lat_e6, 0);
+    CHECK_EQ(b.lon_e6, 0);
+  }
 }
 
 // 1. An empty table is a legal blob: just the header, and it decodes to zero rows.
@@ -250,7 +266,7 @@ void routeRoundTrip() {
   const size_t n = om::mc::contactsEncode(s, buf, sizeof(buf));
   CHECK_EQ(n, om::mc::kContactBlobHeaderBytes + 3 * om::mc::kContactBlobRecordBytes);
   CHECK_EQ(buf[0], om::mc::kContactBlobVersion);
-  CHECK_EQ(buf[0], 2);   // the version moved when the slot started carrying a route
+  CHECK_EQ(buf[0], 3);   // S515/EST-461: v3 = the route, plus fresh + has_position + lat/lon
 
   const size_t route_off = om::mc::kContactBlobHeaderBytes + 83;   // after dm_log_next
   CHECK_EQ(buf[route_off], om::mc::kOutPathUnknown);               // row 0: no route, not a zero-length one
@@ -281,12 +297,20 @@ void oldBlobAndBadRoute() {
   const size_t n = om::mc::contactsEncode(s, buf, sizeof(buf));
   const size_t route_off = om::mc::kContactBlobHeaderBytes + 83;
 
+  // A REAL version-1 blob: same record, 148 bytes wide, the route slot zeroed exactly as EST-437 wrote it.
   uint8_t v1[om::mc::kContactBlobMaxBytes];
-  memcpy(v1, buf, n);
+  memcpy(v1, buf, om::mc::kContactBlobRecordBytesV2);
   v1[0] = 1;
+  v1[1] = 1;
+  v1[2] = (uint8_t)(om::mc::kContactBlobRecordBytesV2 & 0xFF);
+  v1[3] = (uint8_t)(om::mc::kContactBlobRecordBytesV2 >> 8);
   memset(v1 + route_off, 0, 1 + om::mc::kContactBlobRouteBytes);   // exactly what EST-437 wrote
+  const size_t n1 = om::mc::kContactBlobHeaderBytes + om::mc::kContactBlobRecordBytesV2;
   om::mc::ContactStore d;
-  CHECK(om::mc::contactsDecode(v1, n, d) == om::mc::ContactDecode::Ok);
+  CHECK(om::mc::contactsDecode(v1, n1, d) == om::mc::ContactDecode::Ok);
+  CHECK_EQ(d.c[0].fresh, 0);            // S515/EST-461: an old blob knows nothing about new contacts
+  CHECK_EQ(d.c[0].has_position, 0);
+  CHECK_EQ(d.c[0].lat_e6, 0);
   CHECK_EQ(d.c[0].out_path_len, om::mc::kOutPathUnknown);
   CHECK_EQ(d.c[0].out_path[0], 0);
   CHECK_EQ(d.c[0].name[0], s.c[0].name[0]);   // the rest of the row is untouched

@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: MIT
+// S515/EST-461: the Nodes page's NEW contact — its frozen order and its acknowledgement (Filip: a red dot on a
+// newly heard node "until a selection box is hovered over it, or scrolled over it").
+//
+// Two rules, both decidable without a display, so test/host pins them:
+//
+// 1. THE ORDER IS FROZEN WHILE THE PAGE IS OPEN. A list that re-sorts under the cursor is worse than a late
+//    sort: the row is acked at once (its dot goes) but it keeps its place until the user leaves Nodes. The
+//    freeze is DATA — an array of STORE indices taken on entry — not a timer: the page draws the snapshot,
+//    appends a contact that arrived while it was open, and re-sorts only on the next entry.
+//
+// 2. AN ACK IS A MOVE OR A DWELL. The row is acked when the selection box LANDS on it by a key press (Up/Down,
+//    a page move, the own symbol key's return to the top), or when the box has RESTED on it for 1.5 s. Opening
+//    the page therefore does not ack the top row the instant it appears; leaving the box alone on it does.
+//
+// Store indices, never positions: the node menu and the search filter work on STORE rows (EST-449/455), and a
+// frozen order of positions would name a different node after one removal.
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "mc_store.h"
+
+namespace om {
+namespace ui {
+
+// How long the box must rest on a row before it counts as looked at. Long enough that scrolling past a row
+// with the keyboard does not ack it, short enough that stopping to read does.
+constexpr uint32_t kNodesFreshDwellMs = 1500;
+
+struct NodesFrozen {
+    int order[om::mc::kMaxContacts] = {};
+    int count = 0;
+};
+
+// Take the snapshot when the page OPENS, from the live contactsOrder() the page would have drawn.
+inline void nodesFrozenBegin(NodesFrozen& f, const int* live, int live_count) {
+    f.count = 0;
+    if (live == nullptr) return;
+    for (int i = 0; i < live_count && f.count < (int)om::mc::kMaxContacts; ++i) f.order[f.count++] = live[i];
+}
+
+// Keep the snapshot true to the table while the page is open: append a store row that is not in it yet (a
+// contact that arrived), drop rows that left the table (removed, or cleared). NEVER re-order. Returns true when
+// the picture changed and the page must repaint.
+inline bool nodesFrozenSync(NodesFrozen& f, const om::mc::ContactStore& s) {
+    bool changed = false;
+    int  kept[om::mc::kMaxContacts];
+    int  n = 0;
+    for (int i = 0; i < f.count; ++i) {
+        const int ci = f.order[i];
+        if (ci < 0 || ci >= (int)s.count) {
+            changed = true;   // the row is gone
+            continue;
+        }
+        kept[n++] = ci;
+    }
+    // New rows are appended in store order, which is the order they were created in (the newest last).
+    for (int ci = 0; ci < (int)s.count && n < (int)om::mc::kMaxContacts; ++ci) {
+        bool have = false;
+        for (int i = 0; i < n; ++i)
+            if (kept[i] == ci) {
+                have = true;
+                break;
+            }
+        if (!have) {
+            kept[n++] = ci;
+            changed   = true;
+        }
+    }
+    for (int i = 0; i < n; ++i) f.order[i] = kept[i];
+    f.count = n;
+    return changed;
+}
+
+// ---------------------------------------------------------------- the hint bar's dot mask (S515/EST-461 item 1)
+// Bits are the sigil indices of main/chrome.h (static_asserted there, so the two cannot drift).
+constexpr uint8_t kHintDotBitNodes = 1u << 1;
+constexpr uint8_t kHintDotBitChat  = 1u << 2;
+
+// The mask, from the SAME numbers the Chat list's badges are drawn from: chat while a channel OR a DM has
+// unread, nodes while a contact is still new. main.cpp only supplies the counts.
+inline uint8_t hintDotMask(uint32_t channel_unread, uint32_t dm_unread, size_t fresh_count) {
+    uint8_t m = 0;
+    if (channel_unread + dm_unread > 0) m |= kHintDotBitChat;
+    if (fresh_count > 0) m |= kHintDotBitNodes;
+    return m;
+}
+
+struct NodesAck {
+    int      row      = -1;   // the row the dwell is running on (-1: none)
+    uint32_t since_ms = 0;
+};
+
+// The page opened with the box on `row`: start the dwell there and ack NOTHING yet.
+inline void nodesAckEnter(NodesAck& a, int row, uint32_t now_ms) {
+    a.row      = (row >= 0) ? row : -1;
+    a.since_ms = now_ms;
+}
+
+// A KEY pressed the box onto `row`: that is a look, so it acks at once. The dwell restarts on the new row.
+// Returns the row to ack (>= 0), or -1 when there is no row (the search bar, an empty list).
+inline int nodesAckKeyMoved(NodesAck& a, int row, uint32_t now_ms) {
+    a.row      = (row >= 0) ? row : -1;
+    a.since_ms = now_ms;
+    return row;
+}
+
+// The dwell expired: returns the row to ack, or -1. The caller clears the flag and the ack cannot repeat for
+// the same rest (a.row is cleared here).
+inline int nodesAckTick(NodesAck& a, uint32_t now_ms) {
+    if (a.row < 0) return -1;
+    if ((uint32_t)(now_ms - a.since_ms) < kNodesFreshDwellMs) return -1;
+    const int row = a.row;
+    a.row         = -1;   // one ack per rest; a new rest is a new nodesAckEnter/Moved
+    return row;
+}
+
+}  // namespace ui
+}  // namespace om

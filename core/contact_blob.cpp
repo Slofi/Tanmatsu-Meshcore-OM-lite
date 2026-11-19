@@ -71,9 +71,20 @@ void encodeRecord(const Contact& c, uint8_t* p) {
     if (path_bytes > kContactBlobRouteBytes) path_bytes = 0;
     if (path_bytes > 0) memcpy(p + o, c.out_path, path_bytes);
     memset(p + o + path_bytes, 0, kContactBlobRouteBytes - path_bytes);
+    o += kContactBlobRouteBytes;
+    // S515/EST-461 (version 3): the new-contact flag and the advert's position. lat/lon are written only when
+    // the advert carried them, so a row without a position stores zeros the decoder will not trust either.
+    p[o++] = c.fresh ? 1 : 0;
+    p[o++] = c.has_position ? 1 : 0;
+    put32(p + o, (uint32_t)c.lat_e6);
+    o += 4;
+    put32(p + o, (uint32_t)c.lon_e6);
+    o += 4;
 }
 
-void decodeRecord(const uint8_t* p, uint8_t version, Contact& c) {
+// `stride` is the record width the header claims: 148 for versions 1-2, 158 for version 3. The tail is read only
+// when the version actually has one.
+void decodeRecord(const uint8_t* p, uint8_t version, size_t stride, Contact& c) {
     c      = Contact{};
     size_t o = 0;
     memcpy(c.pub, p + o, sizeof(c.pub));
@@ -109,6 +120,20 @@ void decodeRecord(const uint8_t* p, uint8_t version, Contact& c) {
                 const size_t path_bytes = (size_t)(len & 63) * (size_t)((len >> 6) + 1);
                 if (path_bytes > 0) memcpy(c.out_path, &p[o + 1], path_bytes);
             }
+        }
+    }
+    // Version 3's tail: the new-contact flag and the advert's position, at the record's own width (stride - 10).
+    // A version-1/2 record has no tail, so both stay false (and `Contact{}` already zeroed them).
+    if (version >= 3 && stride >= kContactBlobRecordBytes) {
+        size_t t = stride - 10;
+        c.fresh        = p[t++] != 0;
+        c.has_position = p[t++] != 0;
+        c.lat_e6       = (int32_t)get32(p + t);
+        t += 4;
+        c.lon_e6 = (int32_t)get32(p + t);
+        if (!c.has_position) {   // a blob is not trusted to carry a position it does not claim
+            c.lat_e6 = 0;
+            c.lon_e6 = 0;
         }
     }
 }
@@ -151,13 +176,16 @@ ContactDecode contactsDecode(const uint8_t* in, size_t len, ContactStore& out) {
     }
     if (in == nullptr || len < kContactBlobHeaderBytes) return ContactDecode::Truncated;
     const uint8_t version = in[0];
-    // Version 1 is the EST-437 blob whose route slot was reserved; it loads with every route unknown.
-    if (version != 1 && version != kContactBlobVersion) return ContactDecode::BadVersion;
-    const size_t count = in[1];
-    if (get16(in + 2) != kContactBlobRecordBytes) return ContactDecode::BadRecordSize;
+    // Version 1 is the EST-437 blob whose route slot was reserved (every route unknown); version 2 filled it;
+    // version 3 appends fresh + position. An older record is 148 bytes, this build's is 158.
+    if (version != 1 && version != 2 && version != kContactBlobVersion) return ContactDecode::BadVersion;
+    const size_t count    = in[1];
+    const size_t stride   = get16(in + 2);
+    const size_t expected = (version >= 3) ? kContactBlobRecordBytes : kContactBlobRecordBytesV2;
+    if (stride != expected) return ContactDecode::BadRecordSize;
     if (count > kMaxContacts) return ContactDecode::BadCount;
 
-    const size_t need = kContactBlobHeaderBytes + count * kContactBlobRecordBytes;
+    const size_t need = kContactBlobHeaderBytes + count * stride;
     if (len < need) return ContactDecode::Truncated;
     if (len > need) return ContactDecode::BadSize;
 
@@ -166,7 +194,7 @@ ContactDecode contactsDecode(const uint8_t* in, size_t len, ContactStore& out) {
     out       = ContactStore{};
     out.count = count;
     for (size_t i = 0; i < count; i++) {
-        decodeRecord(in + kContactBlobHeaderBytes + i * kContactBlobRecordBytes, version, out.c[i]);
+        decodeRecord(in + kContactBlobHeaderBytes + i * stride, version, stride, out.c[i]);
     }
     return ContactDecode::Ok;
 }

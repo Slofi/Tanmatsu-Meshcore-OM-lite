@@ -76,6 +76,33 @@ bool noticeNeedsRepaint() {
     return changed || expired;
 }
 
+#include "nodes_fresh.h"   // S515/EST-461: the dot mask's bits, pinned against the constants below
+
+// ---- S515/EST-461: the hint bar's dots -------------------------------------------------------------------------
+// The main task both writes and reads this (the radio task never decides a dot: it changes the store, and the
+// main task counts). So it is a plain byte, not a critical section — the same reasoning as the notice's copy,
+// with one fewer task involved.
+namespace {
+
+// The rule's bits live in core/nodes_fresh.h (host-tested); these two names are the chrome's, and the
+// static_asserts make a silent divergence a compile error.
+static_assert(kHintDotNodes == om::ui::kHintDotBitNodes, "the Nodes dot bit moved");
+static_assert(kHintDotChat == om::ui::kHintDotBitChat, "the Chat dot bit moved");
+
+uint8_t g_hint_dots = 0;
+
+}  // namespace
+
+void    hintDotsSet(uint8_t mask) { g_hint_dots = (uint8_t)(mask & 0x1F); }
+uint8_t hintDots() { return g_hint_dots; }
+
+bool hintDotsNeedsRepaint() {
+    static uint8_t seen = 0;
+    if (g_hint_dots == seen) return false;
+    seen = g_hint_dots;
+    return true;   // one repaint per CHANGE, so a dot cannot cost a frame per loop pass
+}
+
 
 // The five physical symbol keys, drawn as vectors (BRIEF § 5; the preview tool's recipes, ported).
 // Cloud is an OUTLINE like the other four (Filip, S499 "fix the cloud symbol").
@@ -301,6 +328,7 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
     }
 
     sx = W - kTmPad;
+    const uint8_t dots = g_hint_dots;
     for (int i = 4; i >= 0; i--) {
         const bool on = (static_cast<int>(active) == i);
         const int  tw = (hf && hf->ready()) ? hf->textWidth(page_names[i]) : 40;
@@ -308,6 +336,10 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
         drawText(s, Face::Hint, sx, bl, page_names[i], on ? (uint16_t)kAccInk : kDimmer);
         sx -= 22;
         drawSymbolSigil(s, i, sx, cy, 7, on ? (uint16_t)kAcc : (uint16_t)kDim, on);
+        // S515/EST-461: the notification dot, at the sigil's TOP-RIGHT and clear of its gold ring (the ring's
+        // nearest point is ~4.9 px from the centre on that diagonal, the dot's edge ~6 px). kBad is the chat
+        // list's unread-badge red, so the two reds on the glass cannot drift apart.
+        if ((dots & (1u << i)) != 0) s.disc(sx + 9, cy - 8, 3, kBad);
         sx -= 18;
     }
 }

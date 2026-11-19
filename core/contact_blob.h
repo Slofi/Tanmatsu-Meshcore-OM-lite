@@ -10,10 +10,15 @@
 //   record: pub[32] | name[kNameBytes] | type u8 | path_len u8 | remote_ts u32 | heard_at u32 |
 //           rssi i16 | snr_x10 i16 | favourite u8 | dm_seen u32 | dm_seen_log u32 | dm_log_next u32 |
 //           out_path_len u8 | out_path[kMaxPath]
+//   v3 tail: fresh u8 | has_position u8 | lat_e6 i32 | lon_e6 i32
 //
 // S513/EST-439: the out_path slot IS the route now (it was reserved by EST-437, so the record width does not
 // move). Version 2 encodes it; a version-1 blob still loads, with every contact's route OUT_PATH_UNKNOWN (0xFF),
 // because "an old blob must not make a message look direct".
+//
+// S515/EST-461: version 3 appends the new-contact flag AND the advert's position (EST-463 will draw it), so the
+// NVS format changes once instead of twice. Versions 1 and 2 still load: their records are 148 bytes and every
+// row comes back with fresh=false and no position, which is exactly what an older build knew.
 #pragma once
 
 #include <stddef.h>
@@ -25,20 +30,22 @@
 namespace om {
 namespace mc {
 
-constexpr uint8_t kContactBlobVersion     = 2;   // 2 = out_path filled; 1 still loads (route unknown)
+constexpr uint8_t kContactBlobVersion     = 3;   // 3 = fresh + position; 2 = out_path; 1 still loads
 constexpr size_t  kContactBlobHeaderBytes = 4;
 constexpr size_t  kContactBlobRouteBytes  = meshcore::kMaxPath;   // one out_path_len byte + the path
 
-// 32 + 24 + 1 + 1 + 4 + 4 + 2 + 2 + 1 + 4 + 4 + 4 + 1 + 64.
-constexpr size_t kContactBlobRecordBytes = 148;
+// 32 + 24 + 1 + 1 + 4 + 4 + 2 + 2 + 1 + 4 + 4 + 4 + 1 + 64 = 148, the width of a version-1/2 record.
+constexpr size_t kContactBlobRecordBytesV2 = 148;
+// …plus fresh u8 + has_position u8 + lat_e6 i32 + lon_e6 i32 = 158 for a version-3 record.
+constexpr size_t kContactBlobRecordBytes = kContactBlobRecordBytesV2 + 10;
 constexpr size_t kContactBlobMaxBytes    = kContactBlobHeaderBytes + kMaxContacts * kContactBlobRecordBytes;
 
 enum class ContactDecode : uint8_t {
     Ok = 0,
     Empty,           // len == 0: nothing stored, not an error
     Truncated,       // fewer bytes than the header/records claim
-    BadVersion,      // a blob from a format this build does not know (1 and 2 are accepted)
-    BadRecordSize,   // the header's record width is not this build's
+    BadVersion,      // a blob from a format this build does not know (1, 2 and 3 are accepted)
+    BadRecordSize,   // the header's record width is not what THAT version's records are
     BadCount,        // more contacts than the table can hold
     BadSize,         // more bytes than the header/count account for
 };
