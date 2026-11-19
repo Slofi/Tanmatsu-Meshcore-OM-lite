@@ -272,49 +272,54 @@ void menuRowsPerType() {
   om::ui::NodeMenuRow rows[om::ui::kMaxNodeMenuRows];
   om::ui::NodeMenuContext c;
 
-  // A client with a route: DM, Info, Ping, Trace, Add to radio, Favourite, Delete everywhere (S515/EST-465).
+  // A client with a route: DM, Info, Ping, Trace, Map, Add to radio, Favourite, Delete everywhere
+  // (S515/EST-465 and EST-466's Map row, which sits after Trace).
   c.advType = om::ui::kNodeMenuAdvChat;
   c.hasKey = true;
   c.pathKnown = true;
   c.favourite = true;
-  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 7);
+  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 8);
   CHECK(rows[0].action == om::ui::NodeAction::DirectMessage);
   CHECK(rows[1].action == om::ui::NodeAction::Info);
   CHECK(rows[2].action == om::ui::NodeAction::Ping);
   CHECK(rows[3].action == om::ui::NodeAction::Trace);
-  CHECK(rows[4].action == om::ui::NodeAction::AddToRadio);
-  CHECK(rows[5].action == om::ui::NodeAction::Favourite);
-  CHECK_STR(rows[5].value, "on");
-  CHECK(rows[5].valueAccent);
-  CHECK(rows[6].action == om::ui::NodeAction::DeleteEverywhere);
+  CHECK(rows[4].action == om::ui::NodeAction::Map);
+  CHECK(rows[5].action == om::ui::NodeAction::AddToRadio);
+  CHECK(rows[6].action == om::ui::NodeAction::Favourite);
+  CHECK_STR(rows[6].value, "on");
+  CHECK(rows[6].valueAccent);
+  CHECK(rows[7].action == om::ui::NodeAction::DeleteEverywhere);
 
   // NO stored route: the Trace row is ABSENT (not dimmed), and the rows after it move up.
   c.pathKnown = false;
-  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 6);
+  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 7);
   CHECK(rows[2].action == om::ui::NodeAction::Ping);
-  CHECK(rows[3].action == om::ui::NodeAction::AddToRadio);
-  CHECK(rows[4].action == om::ui::NodeAction::Favourite);
-  for (int i = 0; i < 6; ++i) CHECK(rows[i].action != om::ui::NodeAction::Trace);
+  CHECK(rows[3].action == om::ui::NodeAction::Map);   // S515/EST-466: Map is not behind a route
+  CHECK(rows[4].action == om::ui::NodeAction::AddToRadio);
+  CHECK(rows[5].action == om::ui::NodeAction::Favourite);
+  for (int i = 0; i < 7; ++i) CHECK(rows[i].action != om::ui::NodeAction::Trace);
 
   // A repeater with a route: no DM, but Ping and Trace are offered (L2: Ping on hasKey, Trace on hasKey+route).
   c.advType = om::ui::kNodeMenuAdvRepeater;
   c.pathKnown = true;
-  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 6);
+  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 7);
   CHECK(rows[0].action == om::ui::NodeAction::Info);
   CHECK(rows[1].action == om::ui::NodeAction::Ping);
   CHECK(rows[2].action == om::ui::NodeAction::Trace);
+  CHECK(rows[3].action == om::ui::NodeAction::Map);
 
-  // No full key: Info only. Neither action can work without the contact's public key.
+  // No full key: Info only (plus EST-466's Map, which needs no key). Neither action can work without the key.
   c.hasKey = false;
-  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 1);
+  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 2);
   CHECK(rows[0].action == om::ui::NodeAction::Info);
+  CHECK(rows[1].action == om::ui::NodeAction::Map);
 
   // A job in flight puts "waiting..." in that row's value; Esc (the caller) stops the wait.
   c.hasKey = true;
   c.pathKnown = true;
   c.pingPending = true;
   c.tracePending = true;
-  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 6);
+  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 7);   // still the repeater above
   CHECK(rows[1].action == om::ui::NodeAction::Ping);
   CHECK_STR(rows[1].value, "waiting...");
   CHECK(rows[2].action == om::ui::NodeAction::Trace);

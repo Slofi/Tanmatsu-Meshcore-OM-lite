@@ -9,8 +9,10 @@
 #include "esp_timer.h"
 #include "launcher_page.h"
 #include "map_link.h"
+#include "mc_link.h"      // StoreLock: the node table is written by the radio task
+#include "map_nodes.h"    // S515/EST-466: projection, culling, the label greedy
 #include "map_view.h"
-#include "nodes_page.h"   // drawTextClipped
+#include "nodes_page.h"   // drawTextClipped, nodeTypeColour
 #include "tm_theme.h"
 #include "../../firmware/src/ui/theme.h"
 
@@ -102,6 +104,95 @@ bool drawPlaceholders(Screen& s, uint8_t z, uint32_t tx, uint32_t ty, int dx, in
 // The zoom of the previous compose, so the page knows which stand-in to ask for. -1 = no previous draw.
 int g_prev_z = -1;
 
+// ---------------------------------------------------------------------------------- S515/EST-466: the nodes
+// A marker is a disc of about 8 px (radius 4) in the Nodes list's own type colour, over a disc one pixel larger in
+// the near-black of the page, so the dot reads on a pale road AND on dark forest without a blend. A favourite gets
+// a gold ring; the node the node menu centred on gets a bigger, thicker gold ring until the view moves.
+constexpr int kMarkerR       = 4;
+constexpr int kFavRingR      = 6;
+constexpr int kHighlightRingR = 10;
+constexpr int kHighlightRingW = 2;
+
+// The label plate's ink: the same near-black the void tiles use, so a name over a bright map reads as a plate and
+// not as another place name printed by the map itself.
+constexpr uint16_t kLabelPlate = kMapVoid;
+
+// How many labels may be on screen at once, and how many candidates are ranked for them. A bound, not a policy:
+// the greedy stops as soon as the plates start to collide, and 24 names already cover most of the map area.
+constexpr int kLabelCap = 32;
+
+// The rate limit on the one cost line. A pan repaints on every key press, so a line per compose would be a line
+// per 100 ms; once every 3 s is enough to read the cost without the log drowning in itself.
+constexpr uint32_t kMarkerLogMs = 3000;
+
+om::map::LabelCandidate g_label_cand[kLabelCap];
+om::map::MapLabel       g_labels[kLabelCap];
+
+// The label width, from the face the plate is drawn with. Passed as a callback so the collision test is the same
+// function on the host (a fake font) and on the glass.
+int measureLabel(void* ctx, const char* utf8) {
+    const Font* f = static_cast<const Font*>(ctx);
+    return (f != nullptr && f->ready()) ? f->textWidth(utf8) : 0;
+}
+
+// Every positioned node in the view gets a marker (radio AND archive: one table), then the names that fit.
+// Called AFTER the tile loop, so a marker is drawn over a real tile, over a stand-in and over the void alike.
+void drawMapNodes(Screen& s, const MapView& v) {
+    if (v.store == nullptr || v.store->c == nullptr) return;
+
+    const int64_t t0  = esp_timer_get_time();
+    const Font*   lf  = fontFor(Face::Hint);
+    int           markers = 0;
+    int           labels  = 0;
+
+    for (int i = 0; i < (int)v.store->count; ++i) {
+        const mc::Contact& c = v.store->c[i];
+        if (!om::map::positionDrawable(c.has_position, c.lat_e6, c.lon_e6)) continue;
+        int x = 0, y = 0;
+        if (!om::map::projectForView(v.z, v.wx, v.wy, kMapAreaW, kMapAreaH, c.lat_e6, c.lon_e6, &x, &y)) continue;
+
+        ++markers;
+        const int px = kMapAreaX + x;
+        const int py = kMapAreaY + y;
+        s.disc(px, py, kMarkerR + 1, (uint16_t)kBg);   // the 1 px dark outline
+        s.disc(px, py, kMarkerR, nodeTypeColour(c.type));
+        if (c.favourite) s.ring(px, py, kFavRingR, 1, kAcc);
+        if (v.highlight_pub != nullptr && memcmp(c.pub, v.highlight_pub, 32) == 0)
+            s.ring(px, py, kHighlightRingR, kHighlightRingW, kAcc);
+    }
+
+    if (v.z >= om::map::kLabelMinZoom) {
+        const int nc = om::map::collectLabelCandidates(*v.store, v.z, v.wx, v.wy, kMapAreaW, kMapAreaH, g_label_cand,
+                                                       kLabelCap);
+        labels = om::map::placeLabels(*v.store, g_label_cand, nc, kMapAreaW, kMapAreaH, &measureLabel,
+                                      const_cast<Font*>(lf), g_labels, kLabelCap);
+        for (int i = 0; i < labels; ++i) {
+            const om::map::LabelRect& b = g_labels[i].box;
+            s.fillRect(kMapAreaX + b.x0, kMapAreaY + b.y0, b.x1 - b.x0, b.y1 - b.y0, kLabelPlate);
+            drawText(s, Face::Hint, kMapAreaX + b.x0 + om::map::kLabelPadX,
+                     textBaseline(s, Face::Hint, kMapAreaY + b.y0, b.y1 - b.y0), g_labels[i].text, kInk);
+        }
+    }
+
+    const long us = (long)(esp_timer_get_time() - t0);
+
+    // ONE line per compose that drew markers, rate limited. `fresh` also logs the first draw after a view with no
+    // markers, so a pan onto a town says so at once instead of up to 3 s later.
+    static uint32_t s_log_ms      = 0;
+    static int      s_log_markers = 0;
+    const uint32_t  now_ms        = (uint32_t)(esp_timer_get_time() / 1000);
+    if (markers > 0) {
+        const bool fresh = (s_log_markers == 0);
+        if (fresh || (uint32_t)(now_ms - s_log_ms) >= kMarkerLogMs) {
+            ESP_LOGI("tm/map", "map: %d nodes in view, %d labels, %ld us", markers, labels, us);
+            s_log_ms      = now_ms;
+            s_log_markers = markers;
+        }
+    } else {
+        s_log_markers = 0;
+    }
+}
+
 const char* attribution() {
     // Required by the tile source's terms (kept on the card as attribution.txt too). Short on purpose: the panel
     // is 800 px wide and this must stay readable, not complete.
@@ -169,6 +260,15 @@ void drawMap(Screen& s, const MapView& v) {
         if (queued < 0) {
             // The plan did not fit: say so on the page, because a silently clipped edge looks like a pack bug.
             drawText(s, Face::Hint, kMapAreaX + kTmPad, kMapAreaY + 4, "view too large for the tile queue", kWhite);
+        }
+
+        // S515/EST-466: the nodes, over whatever the tiles left behind (a decoded tile, a stand-in, the void).
+        // S515 (Claude, review): under the store lock, like the Nodes page: the radio task inserts rows into this
+        // table (advertInArchive) at any time. Only the marker pass holds it (well under a millisecond measured),
+        // never the tile compose, so RX is not held up by a slow frame.
+        {
+            om::mc::StoreLock l;
+            drawMapNodes(s, v);
         }
 
         // Crosshair at the centre of the view: where the app thinks "here" is. No GPS on this board yet, so it

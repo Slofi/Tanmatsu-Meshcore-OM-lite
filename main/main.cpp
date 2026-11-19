@@ -55,6 +55,7 @@ extern "C" {
 #include "map_link.h"            // step 6: the map pack on the card
 #include "map_page.h"            // step 6: the Map page
 #include "map_pack.h"            // step 6: tile coordinates for the default view
+#include "map_nodes.h"           // S515/EST-466: centreOnNode (the node menu's Map item)
 #include "map_view.h"            // step 6: view tiles, pan, zoom
 #include "time_source.h"         // S502: the app's own clock (CH32 RTC -> NVS floor -> a peer's time)
 #include "mc_wire.h"             // step 3b: the MeshCore packet + channel codec (portable, host-tested)
@@ -1424,6 +1425,11 @@ extern "C" void app_main(void) {
     // whether the view has moved since. The RULE is core/map_settings.h::lastPositionWriteDue (time passed in).
     uint32_t map_last_write_ms = 0;
     bool     map_view_changed  = false;
+    // S515/EST-466: the node the node menu's Map item centred on. Its marker carries a gold ring until the user
+    // pans or zooms (then the map is no longer "about" that node). The key is copied, never a row index: a store
+    // write can move a row but never a key.
+    uint8_t  map_highlight_pub[32] = {0};
+    bool     map_highlight         = false;
     char   composer[120] = {0};
     size_t composer_len  = 0;
     // S513: a short-lived line for the one thing the composer cannot say by itself — that a send was REFUSED
@@ -2320,6 +2326,10 @@ extern "C" void app_main(void) {
             mv.wx = map_wx;
             mv.wy = map_wy;
         }
+        // S515/EST-466: both stores' positioned nodes (one table) and the menu's highlighted node. Drawn even when
+        // the tiles are still decoding: a marker is where a node IS, not something that waits for a PNG.
+        mv.store         = &om::mc::contacts();
+        mv.highlight_pub = map_highlight ? map_highlight_pub : nullptr;
         om::ui::drawMap(g_screen, mv);
     };
 
@@ -3215,6 +3225,9 @@ extern "C" void app_main(void) {
                         const int dx = (k == tm::Key::Left) ? -step : (k == tm::Key::Right) ? step : 0;
                         const int dy = (k == tm::Key::Up) ? -step : (k == tm::Key::Down) ? step : 0;
                         om::map::panBy(map_z, &map_wx, &map_wy, dx, dy, om::ui::kMapAreaW, om::ui::kMapAreaH);
+                        // S515/EST-466: the ring marks the node the menu centred on; once the view moves it is
+                        // no longer "there", so it goes.
+                        map_highlight    = false;
                         map_view_changed = true;   // the once-a-minute / on-leaving rule decides the write
                         handled = true;
                         dirty   = true;
@@ -3224,6 +3237,7 @@ extern "C" void app_main(void) {
                         const int want = (ev.args_keyboard.ascii == '-') ? map_z - 1 : map_z + 1;
                         map_z = om::map::zoomTo(map_z, want, &map_wx, &map_wy, om::ui::kMapAreaW,
                                                 om::ui::kMapAreaH);
+                        map_highlight    = false;   // S515/EST-466: the ring ends with the first zoom
                         map_view_changed = true;
                         handled = true;
                         dirty   = true;
@@ -3340,6 +3354,36 @@ extern "C" void app_main(void) {
                                     if (nodeMenuPub(pub)) {
                                         const bool ok = om::mc::nodeTrace(pub);
                                         om::ui::noticeSet(ok ? "Trace: waiting..." : "Trace: not sent", 3000);
+                                    }
+                                    break;
+                                }
+                                case om::ui::NodeAction::Map: {
+                                    // S515/EST-466: centre the Map page on this node at z15, inside the zooms the
+                                    // map itself has (9..17; z15 lives in the "slo" pack). A node that never told us
+                                    // a position keeps the sheet up and says why — the row is dim for the same
+                                    // reason, and this is what its Enter answers.
+                                    uint8_t pub[32];
+                                    if (nodeMenuPub(pub)) {
+                                        const int idx = om::mc::contactsFind(om::mc::contacts(), pub);
+                                        const om::mc::Contact* c =
+                                            (idx >= 0) ? &om::mc::contacts().c[idx] : nullptr;
+                                        int     nz = 15;
+                                        int64_t nwx = 0, nwy = 0;
+                                        if (c != nullptr &&
+                                            om::map::centreOnNode(c->lat_e6, c->lon_e6, 15, om::ui::kMapAreaW,
+                                                                  om::ui::kMapAreaH, &nz, &nwx, &nwy)) {
+                                            map_z = nz;
+                                            map_wx = nwx;
+                                            map_wy = nwy;
+                                            memcpy(map_highlight_pub, pub, 32);
+                                            map_highlight    = true;
+                                            map_view_changed = true;
+                                            node_menu_open   = false;
+                                            node_menu_index  = -1;
+                                            core.goPage(tm::Page::Map);
+                                        } else {
+                                            om::ui::noticeSet(om::ui::nodeNoPositionNotice(), 3000);
+                                        }
                                     }
                                     break;
                                 }

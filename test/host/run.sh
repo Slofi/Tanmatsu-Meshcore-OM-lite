@@ -45,11 +45,12 @@ NODETABLE="$(mktemp /tmp/tm-node-table.XXXXXX)"
 NODESTORE="$(mktemp /tmp/tm-node-store.XXXXXX)"
 NODESTOREASAN="$(mktemp /tmp/tm-node-store-asan.XXXXXX)"
 NODEVIEW="$(mktemp /tmp/tm-node-view.XXXXXX)"
+NODESMAPN="$(mktemp /tmp/tm-nodes-map-nodes.XXXXXX)"
 RPTRED="$(mktemp -d /tmp/tm-rptr-ed.XXXXXX)"
 CHANORACLE="$(mktemp -d /tmp/tm-chan-oracle.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN" "$NODEVIEW"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN" "$NODEVIEW" "$NODESMAPN"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -461,3 +462,15 @@ ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$NODESTOREASAN"
     ../../core/mc_store.cpp ../../core/node_table.cpp \
     -o "$NODEVIEW"
 "$NODEVIEW"
+
+# S515/EST-466: the nodes ON the map. The projection is checked AGAINST the pack's own tile maths (a node at a tile
+# corner is that tile's pixel corner at z9..z17), then the culling at all four edges, the refused positions (no
+# flag, out of range, 0,0), the label greedy (two colliding plates -> the favourite only), the node menu's Map row
+# with and without a position (dim + "no position"), the centre-on-node view and its zoom clamp — and the whole
+# marker+label pass is TIMED on 300 and on 2,000 rows, because the ticket's budget is 2 ms for 300.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_map_nodes.cpp \
+    ../../core/map_nodes.cpp ../../core/map_pack.cpp ../../core/map_view.cpp ../../core/mc_store.cpp \
+    -lm \
+    -o "$NODESMAPN"
+"$NODESMAPN"

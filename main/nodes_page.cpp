@@ -6,6 +6,7 @@
 
 #include "chrome.h"
 #include "launcher_page.h"   // drawText* / textBaseline
+#include "map_nodes.h"       // S515/EST-466: positionDrawable, the Map row's state
 #include "node_menu.h"       // S514/EST-455: the rows the node menu offers
 #include "nodes_search.h"    // S514/EST-449: the "N of M" text (one home for the rule)
 #include "tm_theme.h"
@@ -15,18 +16,9 @@ namespace om {
 namespace ui {
 namespace {
 
+
 constexpr int kNodesRowH = 48;   // two lines: name, then "direct" / "path 4". The preview's 7 rows at 800x480.
 constexpr int kPaneGap   = 8;
-
-// The L2's dot colours: client blue, repeater green, room amber, sensor dim. One switch, all pages.
-uint16_t dotColour(uint8_t type) {
-    switch (type) {
-        case 1: return kClient;     // chat / companion
-        case 2: return kGreen;      // repeater
-        case 3: return kWarn;       // room
-        default: return kDimmer;    // unknown / sensor
-    }
-}
 
 const char* typeName(uint8_t type) {
     switch (type) {
@@ -79,6 +71,17 @@ const char* clipInto(char* buf, size_t n, const Font* f, const char* utf8, int m
 }
 
 }  // namespace
+
+// S515/EST-466: moved out of this file's anonymous namespace so the Map page draws the same colours. The L2's dot
+// colours: client blue, repeater green, room amber, sensor dim. One switch, all pages.
+uint16_t nodeTypeColour(uint8_t type) {
+    switch (type) {
+        case 1: return kClient;     // chat / companion
+        case 2: return kGreen;      // repeater
+        case 3: return kWarn;       // room
+        default: return kDimmer;    // unknown / sensor
+    }
+}
 
 void drawTextClipped(Screen& s, Face face, int x, int baseline, int max_w, const char* utf8, uint16_t colour) {
     const Font* f = fontFor(face);
@@ -190,7 +193,7 @@ void drawNodes(Screen& s, const NodesView& v) {
             s.fillRect(list_x0, y, list_x1 - kTmRingInset - list_x0, kNodesRowH - 2, kSelBg);
             s.frame(list_x0, y, list_x1 - kTmRingInset - list_x0, kNodesRowH - 2, kTmRingW, kAcc);
         }
-        s.disc(list_x0 + 12, y + kNodesRowH / 2 - 1, 4, dotColour(c.type));
+        s.disc(list_x0 + 12, y + kNodesRowH / 2 - 1, 4, nodeTypeColour(c.type));
         const int row_right = list_x1 - kTmRingInset;
         // S515/EST-465: the store tag. A radio row gets a small gold "R" plate before the name; an archive row
         // gets nothing (its silence is the tag). The name starts at the same x in both views, so the two lists
@@ -323,6 +326,8 @@ void drawNodeMenu(Screen& s, const mc::Contact& c, int focus, uint32_t now, bool
     ctx.favourite    = c.favourite;
     ctx.in_radio     = c.in_radio;   // S515/EST-465: Add to radio / Move to archive
     ctx.pathKnown    = mc::contactHasOutPath(c);
+    // S515/EST-466: the Map row needs a position the map can actually draw (core/map_nodes.h owns the rule).
+    ctx.hasPosition  = om::map::positionDrawable(c.has_position, c.lat_e6, c.lon_e6);
     ctx.pingPending  = ping_pending;
     ctx.tracePending = trace_pending;
     NodeMenuRow rows[kMaxNodeMenuRows];
@@ -411,11 +416,13 @@ void drawNodeMenu(Screen& s, const mc::Contact& c, int focus, uint32_t now, bool
             s.fillRect(x0 + 8, ry + 1, sheet_w - 16, row_h - 3, kSelBg);
             s.frame(x0 + 8, ry + 1, sheet_w - 16, row_h - 3, kTmRingW, kAcc);
         }
+        // S515/EST-466: a dim row (the Map row of a node with no position) is drawn in the dimmer ink and keeps
+        // its reason on the right; the focus band is unchanged, so the box can still land on it and say why.
         drawText(s, Face::Row, x0 + 24, textBaseline(s, Face::Row, ry, row_h), rows[i].label,
-                 f ? (uint16_t)kAccInk : (uint16_t)kInk);
+                 f ? (uint16_t)kAccInk : (rows[i].dim ? (uint16_t)kDimmer : (uint16_t)kInk));
         if (rows[i].value[0] != '\0') {
             drawTextRight(s, Face::Hint, x1 - 24, textBaseline(s, Face::Hint, ry, row_h), rows[i].value,
-                          rows[i].valueAccent ? (uint16_t)kAcc : (uint16_t)kDim);
+                          rows[i].valueAccent ? (uint16_t)kAcc : (rows[i].dim ? (uint16_t)kDimmer : (uint16_t)kDim));
         }
         if (i + 1 < row_count) s.hline(x0 + 8, x1 - 8, ry + row_h - 1, kRowLine);
         ry += row_h;

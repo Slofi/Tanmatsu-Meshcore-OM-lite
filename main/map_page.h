@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+#include "mc_store.h"
 #include "screen.h"
 
 namespace om {
@@ -24,6 +25,13 @@ struct MapView {
 
     // Why the map cannot be drawn, when it cannot: stated on screen instead of an empty page.
     const char* problem = "";
+
+    // S515/EST-466: the nodes ON the map. ONE table holds the radio's nodes and the SD archive's alike, so this is
+    // the same store the Nodes page reads and both stores are drawn. Null = no marker layer at all.
+    const mc::ContactStore* store = nullptr;
+    // The node the node menu's Map item centred on: a gold ring around its marker until the user pans or zooms
+    // (main.cpp owns that state, so a key press anywhere clears it the same way).
+    const uint8_t* highlight_pub = nullptr;
 };
 
 void drawMap(Screen& s, const MapView& v);

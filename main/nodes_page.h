@@ -70,5 +70,10 @@ void drawTextClipped(Screen& s, Face face, int x, int baseline, int max_w, const
 void drawTextRightClipped(Screen& s, Face face, int x_right, int baseline, int max_w, const char* utf8,
                           uint16_t colour);
 
+// S515/EST-466: the type colour of a node's dot/marker — client blue, repeater green, room amber, sensor dim.
+// ONE home: the Nodes list's dot and the Map's marker must never drift apart, so the switch lives here and both
+// pages call it.
+uint16_t nodeTypeColour(uint8_t advType);
+
 }  // namespace ui
 }  // namespace om

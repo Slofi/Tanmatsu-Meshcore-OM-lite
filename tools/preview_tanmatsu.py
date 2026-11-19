@@ -2724,7 +2724,119 @@ def node_menu_radio():
     return save(img, '2026-11-19-node-menu-radio.png')
 
 
-RENDERERS = dict(nodes_views=nodes_views, node_menu_radio=node_menu_radio, launcher=launcher, nodes_fresh=nodes_fresh, hint_dots=hint_dots, menu=menu, nodes=nodes, nodes_search=nodes_search,
+
+# ------------------------------------------------------------------------------------ map nodes (S515/EST-466)
+# Invented nodes on invented ground (rule 9): the same fake family the Nodes preview uses. The markers are the
+# ones main/map_page.cpp draws — a 4 px disc in the Nodes list's own type colour over a 5 px near-black disc, a
+# 1 px gold ring for a favourite, a 2 px gold ring for the node the menu centred on — and the plates are the
+# core/map_nodes.h geometry (7 px right of the marker, 15 px tall, 4 px of air each side).
+MAP_NODE_INK = '#1a1a18'   # main/map_page.cpp kMapVoid: the plate and the marker's outline
+
+
+def _map_base(z):
+    """The Map page's chrome and an invented tile area: the panel is 800x386 under the head (main/map_page.h)."""
+    img, d = new_screen()
+    W, pad = TM['W'], TM['pad']
+    status_bar(d)
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Map', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    text(d, (W - pad, y + TM['head_h'] // 2), 'z%d' % z, font(FONT_MONO, TM['f_meta']), P['Dim'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+
+    mx0, my0 = 0, y + TM['head_h']
+    mx1, my1 = W, TM['H'] - TM['hint_h']
+    d.rectangle([mx0, my0, mx1 - 1, my1 - 1], fill='#2b3126')          # land
+    d.rectangle([mx0, my0, mx1 - 1, my1 - 1], outline=P['Line'], width=1)
+    # fields, a lake and two roads: the invented grid the old map preview used, at the real page's full width
+    for bx, by, bw, bh, col in ((0.06, 0.10, 0.16, 0.20, '#3a4433'), (0.30, 0.55, 0.14, 0.22, '#333a2c'),
+                                (0.62, 0.62, 0.20, 0.20, '#3a4433'), (0.70, 0.08, 0.18, 0.24, '#333a2c')):
+        d.rectangle([mx0 + (mx1 - mx0) * bx, my0 + (my1 - my0) * by,
+                     mx0 + (mx1 - mx0) * (bx + bw), my0 + (my1 - my0) * (by + bh)], fill=col)
+    d.ellipse([mx0 + 0.44 * (mx1 - mx0), my0 + 0.20 * (my1 - my0),
+               mx0 + 0.56 * (mx1 - mx0), my0 + 0.34 * (my1 - my0)], fill='#2b3f4a')   # a lake
+    d.line([(mx0 + 0.02 * (mx1 - mx0), my0 + 0.72 * (my1 - my0)),
+            (mx0 + 0.40 * (mx1 - mx0), my0 + 0.52 * (my1 - my0)),
+            (mx0 + 0.78 * (mx1 - mx0), my0 + 0.44 * (my1 - my0)),
+            (mx1 - 10, my0 + 0.50 * (my1 - my0))], fill='#6c7360', width=3, joint='curve')
+    d.line([(mx0 + 0.24 * (mx1 - mx0), my0 + 4),
+            (mx0 + 0.34 * (mx1 - mx0), my0 + 0.40 * (my1 - my0)),
+            (mx0 + 0.30 * (mx1 - mx0), my1 - 4)], fill='#6c7360', width=2, joint='curve')
+    return img, d, (mx0, my0, mx1, my1)
+
+
+def _map_markers(d, area, nodes, labels=False, highlight=None):
+    """The markers (and, from z13, the names), in the real order: discs first, then the plates on top."""
+    mx0, my0, mx1, my1 = area
+    w, h = mx1 - mx0, my1 - my0
+    fhint = font(FONT_MONO, TM['f_hint'])
+    placed = []
+    for name, fx, fy, kind, fav, _heard in nodes:
+        px, py = int(mx0 + w * fx), int(my0 + h * fy)
+        if highlight == name:
+            d.ellipse([px - 10, py - 10, px + 10, py + 10], outline=P['Acc'], width=2)
+        d.ellipse([px - 5, py - 5, px + 5, py + 5], fill=MAP_NODE_INK)          # the 1 px outline
+        d.ellipse([px - 4, py - 4, px + 4, py + 4],
+                  fill=P['Client'] if kind == 'client' else (P['Green'] if kind == 'repeater' else P['Warn']))
+        if fav:
+            d.ellipse([px - 6, py - 6, px + 6, py + 6], outline=P['Acc'], width=1)
+        nodes_name = name
+        if labels:
+            tw_ = tw(fhint, nodes_name)
+            box = [px + 7, py - 7, px + 7 + tw_ + 8, py + 8]
+            # the greedy: a plate that overlaps one already drawn is skipped, the marker is not
+            if any(not (box[2] <= b[0] or b[2] <= box[0] or box[3] <= b[1] or b[3] <= box[1]) for b in placed):
+                continue
+            if box[2] > mx1 or box[3] > my1:
+                continue
+            placed.append(box)
+            d.rectangle(box, fill=MAP_NODE_INK)
+            text(d, (box[0] + 4, box[1] + 2), nodes_name, fhint, P['Ink'])
+
+
+def map_nodes_z12():
+    """S515/EST-466, item 6: z12 — MARKERS, no labels (the names start at z13). Six positioned nodes: clients,
+    a repeater, a room, and one favourite with its gold ring. Nothing here waits for a tile: this is the layer
+    that is drawn over decoded tiles, stand-ins and the void alike."""
+    img, d, area = _map_base(12)
+    _map_markers(d, area, MAP_NODES_Z12)
+    text(d, (area[0] + 12, area[3] - 26), 'Esri, HERE, Garmin, OSM', font(FONT_MONO, TM['f_label']),
+         P['Dim'])
+    hint_bar(d, 'map', [(',', 'settings'), ('dpad', 'pan'), ('+/-', 'zoom'), ('esc', 'back')])
+    return save(img, '2026-11-19-map-nodes.png')
+
+
+def map_nodes_z14():
+    """S515/EST-466, item 6: z14 — labels from z13 up, and the node menu's Map item's highlight. Two clients sit
+    almost on top of each other (TEST-B2 and TEST-C3): the favourite's plate wins and the other name is SKIPPED
+    while its marker is still drawn. TEST-A1 carries the menu's 10 px gold ring (until the user pans or zooms)."""
+    img, d, area = _map_base(14)
+    _map_markers(d, area, MAP_NODES_Z14, labels=True, highlight='TEST-A1')
+    text(d, (area[0] + 12, area[3] - 26), 'Esri, HERE, Garmin, OSM', font(FONT_MONO, TM['f_label']),
+         P['Dim'])
+    hint_bar(d, 'map', [(',', 'settings'), ('dpad', 'pan'), ('+/-', 'zoom'), ('esc', 'back')])
+    return save(img, '2026-11-19-map-nodes-z14.png')
+
+
+MAP_NODES_Z12 = [
+    ('TEST-A1', 0.30, 0.30, 'client', True, 40),
+    ('TEST-B2', 0.52, 0.62, 'client', False, 300),
+    ('TEST-C3', 0.72, 0.26, 'client', False, 900),
+    ('RPT-Sever', 0.20, 0.66, 'repeater', False, 120),
+    ('RPT-Jug', 0.64, 0.44, 'repeater', False, 2400),
+    ('ROOM-Test', 0.44, 0.14, 'room', False, 5000),
+]
+
+# z14: the same family, closer in. TEST-B2 and TEST-C3 are 3 px apart so their plates collide.
+MAP_NODES_Z14 = [
+    ('TEST-A1', 0.33, 0.34, 'client', True, 40),
+    ('TEST-B2', 0.50, 0.62, 'client', False, 300),
+    ('TEST-C3', 0.51, 0.63, 'client', False, 900),
+    ('RPT-Sever', 0.22, 0.70, 'repeater', False, 120),
+    ('RPT-Jug', 0.66, 0.46, 'repeater', False, 2400),
+    ('ROOM-Test', 0.46, 0.14, 'room', False, 5000),
+]
+
+RENDERERS = dict(map_nodes_z12=map_nodes_z12, map_nodes_z14=map_nodes_z14, nodes_views=nodes_views, node_menu_radio=node_menu_radio, launcher=launcher, nodes_fresh=nodes_fresh, hint_dots=hint_dots, menu=menu, nodes=nodes, nodes_search=nodes_search,
                  nodes_favourites=nodes_favourites, node_trace=node_trace, chat=chat, chat2=chat_cards,
                  chat_emoji=chat_emoji,
                  chat_dm=chat_dm_column, chat_meta=chat_meta, dm_enter=dm_enter, map=map_page, rptr=rptr, rptr_list=rptr_list, rptr_status=rptr_status, settings=settings,

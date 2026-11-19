@@ -30,6 +30,9 @@ idf_component_register(
          "map_pack.cpp"
          # The Map page arithmetic (S503): view tiles, panning, zooming, and the decoded-tile cache.
          "map_view.cpp"
+         # S515/EST-466: the nodes ON the map — lat/lon -> screen pixel (the pack's own slippy maths), the view
+         # culling, the label greedy and the node menu's centre-on-node view. Pure, host-tested.
+         "map_nodes.cpp"
          # S513: the send queue's rules (four request slots, FIFO, refuse when full) — the code the radio task
          # pushes to and pops from, and the code the host tests cover.
          "tx_queue.cpp"

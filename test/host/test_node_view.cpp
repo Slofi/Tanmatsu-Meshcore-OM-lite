@@ -130,9 +130,9 @@ void testViewCountsAndOrder() {
 // ---- 2. the menu's rows per state ----------------------------------------------------------------
 void testMenuRowsPerState() {
   om::ui::NodeMenuRow rows[om::ui::kMaxNodeMenuRows];
-  CHECK_EQ(om::ui::kMaxNodeMenuRows, 7);
+  CHECK_EQ(om::ui::kMaxNodeMenuRows, 8);   // S515/EST-466 added Map
 
-  // A client in the ARCHIVE with a known route: DM, Info, Ping, Trace, Add to radio, Favourite, Delete.
+  // A client in the ARCHIVE with a known route: DM, Info, Ping, Trace, Map, Add to radio, Favourite, Delete.
   om::ui::NodeMenuContext c;
   c.advType = 1;
   c.hasKey = true;
@@ -140,22 +140,23 @@ void testMenuRowsPerState() {
   c.in_radio = false;
   c.favourite = true;
   int n = om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows);
-  CHECK_EQ(n, 7);
-  CHECK(rows[4].action == om::ui::NodeAction::AddToRadio);
-  CHECK(strcmp(rows[4].label, "Add to radio") == 0);
-  CHECK(rows[5].action == om::ui::NodeAction::Favourite);
-  CHECK(strcmp(rows[5].value, "on") == 0);
-  CHECK(rows[5].valueAccent);
-  CHECK(rows[6].action == om::ui::NodeAction::DeleteEverywhere);
-  CHECK(strcmp(rows[6].label, "Delete everywhere") == 0);
+  CHECK_EQ(n, 8);
+  CHECK(rows[4].action == om::ui::NodeAction::Map);   // S515/EST-466, right after Trace
+  CHECK(rows[5].action == om::ui::NodeAction::AddToRadio);
+  CHECK(strcmp(rows[5].label, "Add to radio") == 0);
+  CHECK(rows[6].action == om::ui::NodeAction::Favourite);
+  CHECK(strcmp(rows[6].value, "on") == 0);
+  CHECK(rows[6].valueAccent);
+  CHECK(rows[7].action == om::ui::NodeAction::DeleteEverywhere);
+  CHECK(strcmp(rows[7].label, "Delete everywhere") == 0);
   for (int i = 0; i < n; i++) CHECK(rows[i].action != om::ui::NodeAction::MoveToArchive);
 
   // The same node in the RADIO: the store row flips, nothing else appears twice.
   c.in_radio = true;
   n = om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows);
-  CHECK_EQ(n, 7);
-  CHECK(rows[4].action == om::ui::NodeAction::MoveToArchive);
-  CHECK(strcmp(rows[4].label, "Move to archive") == 0);
+  CHECK_EQ(n, 8);
+  CHECK(rows[5].action == om::ui::NodeAction::MoveToArchive);
+  CHECK(strcmp(rows[5].label, "Move to archive") == 0);
   for (int i = 0; i < n; i++) CHECK(rows[i].action != om::ui::NodeAction::AddToRadio);
 
   // A repeater without a route: no DM, no Trace, but the store row, favourite and delete are there.
@@ -164,19 +165,22 @@ void testMenuRowsPerState() {
   r.hasKey = true;
   r.in_radio = false;
   n = om::ui::nodeMenuRows(r, rows, om::ui::kMaxNodeMenuRows);
-  CHECK_EQ(n, 5);   // Info, Ping, Add to radio, Favourite, Delete
+  CHECK_EQ(n, 6);   // Info, Ping, Map, Add to radio, Favourite, Delete
   CHECK(rows[0].action == om::ui::NodeAction::Info);
-  CHECK(rows[2].action == om::ui::NodeAction::AddToRadio);
-  CHECK(rows[4].action == om::ui::NodeAction::DeleteEverywhere);
+  CHECK(rows[2].action == om::ui::NodeAction::Map);
+  CHECK(rows[3].action == om::ui::NodeAction::AddToRadio);
+  CHECK(rows[5].action == om::ui::NodeAction::DeleteEverywhere);
 
-  // A prefix-only row has no key: only Info, as before (no DM/Ping/Favourite/delete on a maybe-node).
+  // A prefix-only row has no key: Info and the dim Map row as before (no DM/Ping/Favourite/delete on a
+  // maybe-node; a map position needs no key).
   om::ui::NodeMenuContext p;
   p.advType = 1;
   p.hasKey = false;
   p.in_radio = false;
   n = om::ui::nodeMenuRows(p, rows, om::ui::kMaxNodeMenuRows);
-  CHECK_EQ(n, 1);
+  CHECK_EQ(n, 2);
   CHECK(rows[0].action == om::ui::NodeAction::Info);
+  CHECK(rows[1].action == om::ui::NodeAction::Map);
 
   // Enter runs the row under the focus, and a focus outside the list runs nothing.
   CHECK(om::ui::nodeMenuActionAt(rows, n, 0) == om::ui::NodeAction::Info);

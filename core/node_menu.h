@@ -3,15 +3,17 @@
 //
 // Ported from the L2's `firmware/src/ui/node_menu.h` / `.cpp`: one list of actions per node, built from what the
 // node actually is, in the L2's order. The rule stays: ONLY actions that work on the Tanmatsu today are offered.
-// S514/EST-456 brings Ping and Trace in (core/node_ops.*); Map and Reset path still exist in the L2's list and
-// are left out here until their code exists — a row that does nothing would be a lie on a screen this honest
-// about its state.
+// S514/EST-456 brought Ping and Trace in (core/node_ops.*); S515/EST-466 brings Map in. Reset path still exists
+// in the L2's list and is left out here until its code exists — a row that does nothing would be a lie on a
+// screen this honest about its state.
 //
 // The rows that are offered today:
 //   Direct message  a client with a full key (a repeater or a room cannot take a text DM)
 //   Info            always; the Nodes page's own detail pane is the info view
 //   Ping            a contact with a full key (a status request works over a path or as a flood)
 //   Trace           a contact with a full key AND a stored route: the packet is aimed down out_path
+//   Map             S515/EST-466: ALWAYS, because the map can show where a node is even when we cannot write to it.
+//                   Without a position the row is DIM and says "no position"; Enter then only says so.
 //   Favourite       a contact with a full key; value "on"/"off", toggled by Enter
 //   Remove contact  a contact with a full key; the EST-447 confirm and removal
 //
@@ -43,6 +45,7 @@ enum class NodeAction : uint8_t {
     Info,
     Ping,
     Trace,
+    Map,             // S515/EST-466: centre the Map page on this node
     AddToRadio,      // S515/EST-465: the row is not in the radio
     MoveToArchive,   // S515/EST-465: the row is in the radio (clears the mark; the node stays usable)
     Favourite,
@@ -50,15 +53,19 @@ enum class NodeAction : uint8_t {
     RemoveContact,      // kept for the Settings › NODES list's own confirm path (EST-447)
 };
 
-// Seven is the real maximum (a client with a route: DM, Info, Ping, Trace, the store row, Favourite,
+// Eight is the real maximum (a client with a route: DM, Info, Ping, Trace, Map, the store row, Favourite,
 // Delete everywhere). Kept as a bound so a future action cannot silently overrun a caller's array.
-constexpr int kMaxNodeMenuRows = 7;
+constexpr int kMaxNodeMenuRows = 8;
 
 struct NodeMenuRow {
     NodeAction  action      = NodeAction::None;
     const char* label       = "";
     const char* value       = "";      // the right-hand text (favourite state), "" = none
     bool        valueAccent = false;   // the value is a state that is ON (gold), never inferred from "on"
+    // S515/EST-466: offered but not usable right now (the Map row of a node without a position). Drawn dim, and
+    // Enter runs nothing but the reason — the row is not hidden, because "this node has told us no position" is
+    // information, while a missing row looks like a forgotten feature.
+    bool        dim         = false;
 };
 
 // One node's facts, filled by the shell from the contact table.
@@ -70,6 +77,8 @@ struct NodeMenuContext {
     bool    in_radio  = false;
     // S514/EST-456: ContactInfo::out_path_len != OUT_PATH_UNKNOWN (core/mc_store.h contactHasOutPath).
     bool    pathKnown = false;
+    // S515/EST-466: the advert carried a drawable position (core/map_nodes.h positionDrawable).
+    bool    hasPosition = false;
     // A ping/trace to THIS node is in flight: the row says "waiting..." and Esc stops waiting.
     bool    pingPending  = false;
     bool    tracePending = false;
@@ -79,12 +88,14 @@ struct NodeMenuContext {
 inline int nodeMenuRows(const NodeMenuContext& c, NodeMenuRow* out, int max) {
     if (out == nullptr || max <= 0) return 0;
     int n = 0;
-    auto add = [&](NodeAction action, const char* label, const char* value = "", bool accent = false) {
+    auto add = [&](NodeAction action, const char* label, const char* value = "", bool accent = false,
+                   bool dim = false) {
         if (n >= max) return;
         out[n].action      = action;
         out[n].label       = label != nullptr ? label : "";
         out[n].value       = value != nullptr ? value : "";
         out[n].valueAccent = accent;
+        out[n].dim         = dim;
         ++n;
     };
 
@@ -94,6 +105,9 @@ inline int nodeMenuRows(const NodeMenuContext& c, NodeMenuRow* out, int max) {
     add(NodeAction::Info, "Info");
     if (c.hasKey) add(NodeAction::Ping, "Ping", c.pingPending ? "waiting..." : "");
     if (c.hasKey && c.pathKnown) add(NodeAction::Trace, "Trace", c.tracePending ? "waiting..." : "");
+    // S515/EST-466: the Map row. Not behind `hasKey`: a room or a sensor can carry a position too, and a repeater
+    // we only know by hash is still somewhere. Without a position it is dim and says so.
+    add(NodeAction::Map, "Map", c.hasPosition ? "" : "no position", false, !c.hasPosition);
     if (c.hasKey) {
         // S515/EST-465: one store row, worded by where the node is now. The action is never both.
         if (c.in_radio) add(NodeAction::MoveToArchive, "Move to archive");
@@ -117,6 +131,9 @@ inline int nodeMenuFocusMove(int focus, int delta, int count) {
     if (focus >= count) focus = count - 1;
     return focus;
 }
+
+// The notice a dim Map row answers Enter with (S515/EST-466), in the ticket's exact words.
+inline const char* nodeNoPositionNotice() { return "No position from this node yet"; }
 
 // The action Enter would run, or NodeAction::None for an index outside the list.
 inline NodeAction nodeMenuActionAt(const NodeMenuRow* rows, int count, int focus) {

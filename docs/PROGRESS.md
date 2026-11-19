@@ -15,6 +15,96 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S515 (EST-466) · nodes on the map, names from z13, and the node menu's Map item
+
+> Written by **DeepSeek** for ticket **EST-466**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed, pushed or committed. Starting point **v60 `1d553cd`** (tree clean). **Version: 61**
+> (`core/settings.h` kAppVersion). `firmware/` was read only and is unchanged.
+>
+> **ITEMS DONE: 1, 2, 3, 4, 5, 6.** `sh test/host/run.sh` **exit 0** (33,092 checks reported across the suites,
+> the new one 172), `make build` **exit 0**, `application.bin` **0x1A1550 = 1,709,392 B** (18 % of the app
+> partition free; **+6,304 B** over v60's 1,703,088 B). Two previews. Nothing is installed.
+
+### 1. Markers (item 1)
+
+Positions were already stored (EST-461's `has_position` / `lat_e6` / `lon_e6`, EST-463's one table), so this
+ticket only draws them. **`core/map_nodes.h` / `.cpp`** are new and pure:
+
+- `positionDrawable()` — the refusal rule: no flag, lat outside ±90, lon outside ±180, **and (0,0)** (the shape of a
+  wiped field; a node would sit in the Gulf of Guinea for it). A zero on ONE axis is a real place and is NOT refused.
+- `projectForView()` — lat/lon → **view-local pixel**, using the pack's OWN `worldPxXForLon` / `worldPxYForLat`
+  (core/map_pack.h), not a second copy of the Web-Mercator formula. Culling is half-open: a point on the left/top
+  edge is in, one on the right/bottom edge belongs to the next view.
+- The page (`main/map_page.cpp::drawMapNodes`) draws, for every such node: a **5 px near-black disc** (the 1 px
+  outline) under a **4 px disc** (~8 px) in **`ui::nodeTypeColour()`** — the Nodes list's own switch, **moved** out
+  of nodes_page.cpp's anonymous namespace into `main/nodes_page.h` so both pages share one home — plus a **1 px gold
+  ring** for a favourite. Drawn AFTER the tile loop, so a marker lands on a decoded tile, on a stand-in and on the
+  void alike; the tile path is untouched (no new call inside the blit).
+
+### 2. Labels from z13 (item 2)
+
+`collectLabelCandidates()` ranks the nodes **in view** (favourite first, then most recently heard, then the lower
+row index) and keeps the best 32; `placeLabels()` offers each plate (7 px right of the marker, 15 px tall, 4 px of
+air each side) and **SKIPS** one that overlaps a plate already placed or that would leave the view. Markers are
+never skipped. The text is clipped to **16 characters** UTF-8-safely with an ellipsis (`mapLabelText`).
+
+### 3. The node menu's Map item (item 3)
+
+`core/node_menu.h`: `NodeAction::Map`, `NodeMenuContext::hasPosition`, `kMaxNodeMenuRows` 7 → **8**, and a `dim`
+flag per row. The Map row sits **after Trace, before the store row**, for every node type (a repeater or a sensor can
+carry a position too). **Without a position** the row is **dim** with the value **"no position"** and Enter only
+shows the notice **"No position from this node yet"**. With one, Enter calls `centreOnNode()` at **z15**, which
+clamps to the map's own zooms **9..17** — z15 is inside them and lives in the **`slo` pack (z9-15)** — sets the
+view, copies the node's KEY into `map_highlight_pub` and goes to the Map page. The highlighted marker carries a
+**2 px gold ring at r10** until the user **pans or zooms** (both clear it in main.cpp).
+
+### 4. Cost (item 4)
+
+ONE line per compose that drew markers, rate limited to **3 s** (and immediately on the first draw after a view with
+none): `map: N nodes in view, M labels, X us`, timed with `esp_timer_get_time` around the marker+label pass only.
+**Measured on the host** (test/host/test_map_nodes.cpp, -O2, best of three, 2,000-row table packed into one screen
+so nearly every row is in view): **300 rows → 56-157 us (223 markers, 9 labels); 2,000 rows → 322-823 us (1,450
+markers, 16 labels)** — the spread is TestBox's own scheduling noise over six runs. The budget (2 ms for 300) is
+met with 13x of headroom at the worst reading, and the test FAILS if the best-of-three passes 2 ms.
+
+### 5. Host tests (item 5)
+
+`test/host/test_map_nodes.cpp`, **172 checks**: the tile-corner identity at **every zoom 9..17** (the node's pixel
+IS `worldPx − tileCorner`, i.e. 0..2 away because of the micro-degree rounding), the centre, all four quadrants with
+lon moving only x and lat only y, the four view edges, the refused positions, the label text (16 chars, UTF-8, blank
+names), the collision (two plates → one label, **the favourite wins**), the candidate cap keeping the favourites and
+the most recent, the Map row with/without a position (and on a keyless repeater), the centre-on-node view + its zoom
+clamp + its world-edge clamp, and the timing above.
+
+### 6. Previews (item 6)
+
+`shots/2026-11-19-map-nodes.png` (z12: six markers, one favourite ring, no labels) and
+`shots/2026-11-19-map-nodes-z14.png` (z14: names, TEST-C3's plate SKIPPED because it collides with TEST-B2's while
+its marker stays, the favourite ring and the menu's highlight ring both on TEST-A1). Both rendered by
+`tools/preview_tanmatsu.py` (`map_nodes_z12`, `map_nodes_z14`), aimed at the real page geometry (800x386 area under
+a 44 px head, four hint chips).
+
+### Files
+
+New: `core/map_nodes.h`, `core/map_nodes.cpp`, `test/host/test_map_nodes.cpp`, the two PNGs. Changed:
+`core/CMakeLists.txt` (map_nodes.cpp), `core/node_menu.h` (Map action, hasPosition, dim, 8 rows, the notice),
+`core/settings.h` (version 61), `main/map_page.h` (store + highlight), `main/map_page.cpp` (drawMapNodes + the
+cost line), `main/nodes_page.h` / `.cpp` (nodeTypeColour's one home, the dim row, hasPosition),
+`main/main.cpp` (the Map action, the highlight state and its two clears, the store hand-over),
+`test/host/run.sh`, `tools/preview_tanmatsu.py`, `test/host/test_node_menu.cpp` and `test_node_ops.cpp` and
+`test_node_view.cpp` (their row counts and indices moved by exactly the new Map row — the ROW LIST is a pinned
+interface, so the three tests had to learn it; no expectation was weakened).
+
+### What is NOT proven, and the next step
+
+Everything here is host-only: no install, no flash, no card. **To prove on the device:** a node with a position
+appears as a dot at its place (the advert's position is already parsed, so any positioned contact will do), a
+favourite shows its gold ring, z13+ shows names without overlaps, the node menu's Map row centres and rings the
+node, and panning clears the ring. The `map: N nodes in view, M labels, X us` line gives the on-device cost — the
+number to compare with the 54 us above is the same line at z16 with the archive full.
+
+
+**Claude's review of EST-466 (S515, 2026-11-19 19:3x):** one fix before the commit: the Map page read the node table with NO lock while the radio task inserts rows (`advertInArchive`); the marker pass now runs under `StoreLock` (recursive, so no deadlock), only the marker pass, never the tile compose. The report had no armed failure, so Claude armed one: accepting an exact 0,0 position fails `test_map_nodes.cpp:193` and `:354` (2 FAIL). Preview z14 checked.
 ## 2026-11-19 · S515 (EST-465) · node storage UI: All / Radio / Archive, the node menu's store rows, Settings › NODES
 
 > Written by **DeepSeek** for ticket **EST-465**: fenced Paperclip run, no session start/end, nothing installed,
