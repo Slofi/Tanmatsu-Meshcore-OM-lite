@@ -35,11 +35,14 @@ NODEMENU="$(mktemp /tmp/tm-node-menu.XXXXXX)"
 SOUND="$(mktemp /tmp/tm-sound-events.XXXXXX)"
 RPTR="$(mktemp /tmp/tm-rptr.XXXXXX)"
 RPTRASAN="$(mktemp /tmp/tm-rptr-asan.XXXXXX)"
+NODEOPS="$(mktemp /tmp/tm-node-ops.XXXXXX)"
+NODEOPSASAN="$(mktemp /tmp/tm-node-ops-asan.XXXXXX)"
+EMOJI="$(mktemp /tmp/tm-emoji.XXXXXX)"
 RPTRED="$(mktemp -d /tmp/tm-rptr-ed.XXXXXX)"
 CHANORACLE="$(mktemp -d /tmp/tm-chan-oracle.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -333,6 +336,29 @@ done
     -o "$RPTRASAN"
 ASAN_OPTIONS=detect_leaks=1 "$RPTRASAN"
 
+# PING + TRACE (S514/EST-456): the L2's two node actions. The TRACE frame's expected bytes are upstream's
+# createTrace()/sendDirect() (Mesh.cpp:605-620, 692-714), the ping's frame is checked to BE the EST-453 status
+# request; the trace answer parser then runs under ASan/UBSan with a junk pass, because every length it reads
+# came off the air.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core -I ../../core/ed25519 \
+    test_node_ops.cpp \
+    ../../core/node_ops.cpp ../../core/rptr_model.cpp ../../core/rptr_wire.cpp \
+    ../../core/mc_wire.cpp ../../core/mc_crypto_psa.cpp ../../core/mc_identity.cpp \
+    "$ED"/*.o \
+    -lmbedcrypto \
+    -o "$NODEOPS"
+"$NODEOPS"
+
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I ../../core -I ../../core/ed25519 \
+    test_node_ops.cpp \
+    ../../core/node_ops.cpp ../../core/rptr_model.cpp ../../core/rptr_wire.cpp \
+    ../../core/mc_wire.cpp ../../core/mc_crypto_psa.cpp ../../core/mc_identity.cpp \
+    "$RPTRED"/*.o \
+    -lmbedcrypto \
+    -o "$NODEOPSASAN"
+ASAN_OPTIONS=detect_leaks=1 "$NODEOPSASAN"
+
 # SOUNDS (S514/EST-450): the event -> L2 default mapping (including Boot Off here vs the L2's Bell
 # TK-TK), the 400 ms rate gate at exact instants and across the 32-bit wrap, the echo/duplicate/restored
 # refusal, the settings byte round trip and the L2's kRedirect for a retired/unknown id. It links the
@@ -344,3 +370,19 @@ ASAN_OPTIONS=detect_leaks=1 "$RPTRASAN"
     ../../../firmware/src/sound_synth.cpp \
     -o "$SOUND"
 "$SOUND"
+
+# EMOJI (S514/EST-457): the SUBSET blob read by the L2's OWN parser (firmware/src/ui/emoji_table.h) and the L2's
+# OWN UTF-8/emoji walker (firmware/src/ui/text_wrap.cpp, compiled here and into the core component). Pins: the blob
+# under the 120 KiB cap, sorted/4-aligned/in-range/with-ink entries, lookups in and out of the subset, the walker on
+# ZWJ / variation selector / skin tone / keycap, and the chat wrap with emoji at their DRAWN 26 px — no line wider
+# than its width, and a code point the subset lacks keeping today's half-em advance.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core -I ../../../firmware/src \
+    test_emoji.cpp \
+    ../../core/emoji.cpp ../../core/chat_layout.cpp \
+    ../../../firmware/src/ui/text_wrap.cpp \
+    -o "$EMOJI"
+"$EMOJI"
+
+# The subset blob must be exactly what tools/mkemoji_subset.py builds from the L2's table: a stale .bin (edited by
+# hand, or left behind after the L2's blob changed) fails here, not on the glass.
+python3 ../../tools/mkemoji_subset.py --check

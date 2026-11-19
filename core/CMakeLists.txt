@@ -50,6 +50,14 @@ idf_component_register(
          "channel_admin.cpp"
          # S514/EST-453: RPTR part 1 — the found list / login / status rules and the four upstream packets.
          "rptr_model.cpp" "rptr_wire.cpp"
+         # S514/EST-457: the emoji SUBSET table — the L2's own blob layout and parser
+         # (firmware/src/ui/emoji_table.h) and the L2's own UTF-8/emoji unit walker
+         # (firmware/src/ui/text_wrap.cpp, compiled from that tree like sound_synth.cpp). The one
+         # width rule the draw and the chat wrap share lives in emoji.cpp.
+         "emoji.cpp" "../../firmware/src/ui/text_wrap.cpp"
+         # S514/EST-456: the node menu's Ping and Trace — the L2's status request reused, and upstream's
+         # createTrace()/sendDirect() frame + its answer parser. Pure and bounds-checked, host-tested.
+         "node_ops.cpp"
          # S514/EST-450: the L2's shared phrase library, compiled from ITS OWN source (never copied or
          # forked), exactly as mc_history uses the L2's history format. core/sound_events.h is the policy;
          # this one file is the synth both devices play.
@@ -59,6 +67,6 @@ idf_component_register(
          "ed25519/add_scalar.c" "ed25519/fe.c" "ed25519/ge.c" "ed25519/key_exchange.c"
          "ed25519/keypair.c" "ed25519/sc.c" "ed25519/seed.c" "ed25519/sha512.c"
          "ed25519/sign.c" "ed25519/verify.c"
-    INCLUDE_DIRS "." "ed25519"
+    INCLUDE_DIRS "." "ed25519" "${CMAKE_CURRENT_LIST_DIR}/../../firmware/src"
     REQUIRES mbedtls
 )

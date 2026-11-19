@@ -38,6 +38,7 @@ extern "C" {
 #include "own_top.h"             // S514/EST-454: the own key at the top -> first row (pure, host-tested)
 #include "menu_cards.h"          // S513/EST-432: the start menu's pure key decisions
 #include "font.h"
+#include "emoji_blob.h"
 #include "launcher_page.h"
 #include "chat_page.h"           // step 4: the Chat page
 #include "chrome.h"               // status bar, page head, hint bar: one home
@@ -1128,6 +1129,9 @@ extern "C" void app_main(void) {
     hostedConnectC6();
 
     loadFonts();
+    // S514/EST-457: the emoji subset, parsed once with the L2's own table reader. A rejected blob logs
+    // FAILED and leaves every emoji at today's behaviour; it must never take the app down.
+    loadEmoji();
     if (!g_screen.begin()) {
         ESP_LOGE(TAG, "screen allocation failed — stopping here rather than drawing garbage");
         vTaskDelay(pdMS_TO_TICKS(5000));
@@ -1261,6 +1265,8 @@ extern "C" void app_main(void) {
     // row after a favourite toggle (core/node_menu.h::nodeMenuFocusFollow).
     static bool node_menu_open  = false;
     static int  node_menu_focus = 0;
+    // S514/EST-456: the last trace's hop list stays up until Esc or another node is traced.
+    static bool node_trace_shown = false;
     static int  node_menu_index = -1;
     // S513/EST-430: the Chat list is two columns of cards, so the selection is a (column, row) pair like the model
     // in core/chat_cards.h. `chat_focus` is the row in the Channels column (and therefore the channel index);
@@ -1689,6 +1695,16 @@ extern "C" void app_main(void) {
 
     // Both page views are BUILT and DRAWN under the store lock; the lock is released before the panel blit, so
     // the radio task never waits for an 800x480 push, and a draw never sees a half-refreshed node.
+    // S514/EST-456: the captured menu row's public key, copied under the store lock. False for a stale index, so
+    // no action and no pending read can touch a row that moved or vanished.
+    auto nodeMenuPub = [&](uint8_t pub[32]) -> bool {
+        om::mc::StoreLock l;
+        om::mc::ContactStore& cs = om::mc::contacts();
+        if (node_menu_index < 0 || (size_t)node_menu_index >= cs.count) return false;
+        memcpy(pub, cs.c[node_menu_index].pub, 32);
+        return true;
+    };
+
     auto drawNodesPage = [&]() {
         om::ui::NodesView nv;
         nv.clock       = clockText();
@@ -1720,6 +1736,17 @@ extern "C" void app_main(void) {
             nv.search_focused = nodes_bar;
             nv.menu_open      = menu_shown;
             nv.menu_focus     = node_menu_focus;
+            // S514/EST-456: a ping/trace in flight says so in the row; the trace result gets its own sheet.
+            if (menu_shown) {
+                uint8_t pub[32];
+                if (nodeMenuPub(pub)) {
+                    nv.menu_ping_pending  = om::mc::nodePingPendingFor(pub);
+                    nv.menu_trace_pending = om::mc::nodeTracePendingFor(pub);
+                }
+            }
+            static om::ops::TraceView trace_view;
+            nv.trace = nullptr;
+            if (node_trace_shown && om::mc::nodeTraceResult(&trace_view)) nv.trace = &trace_view;
             const uint32_t now = om::time_source::epochNow();
             nv.focused         = nodes_focus;
             nv.now             = now;
@@ -1848,9 +1875,12 @@ extern "C" void app_main(void) {
         om::mc::ContactStore& cs = om::mc::contacts();
         if ((size_t)store_index >= cs.count) return 0;
         om::ui::NodeMenuContext ctx;
-        ctx.advType   = cs.c[store_index].type;
-        ctx.hasKey    = !om::mc::contactKeyIncomplete(cs.c[store_index].pub);
-        ctx.favourite = cs.c[store_index].favourite;
+        ctx.advType      = cs.c[store_index].type;
+        ctx.hasKey       = !om::mc::contactKeyIncomplete(cs.c[store_index].pub);
+        ctx.favourite    = cs.c[store_index].favourite;
+        ctx.pathKnown    = om::mc::contactHasOutPath(cs.c[store_index]);
+        ctx.pingPending  = om::mc::nodePingPendingFor(cs.c[store_index].pub);
+        ctx.tracePending = om::mc::nodeTracePendingFor(cs.c[store_index].pub);
         return om::ui::nodeMenuRows(ctx, out, max);
     };
 
@@ -2957,6 +2987,12 @@ extern "C" void app_main(void) {
 
                     if (tm::is_symbol(k)) {
                         handled = false;   // the core's page switch wins
+                    } else if (node_trace_shown && k == tm::Key::Esc) {
+                        // S514/EST-456: the trace result is a sheet of its own; Esc closes it before anything
+                        // else on the page sees the key.
+                        node_trace_shown = false;
+                        handled          = true;
+                        dirty            = true;
                     } else if (settings_frame.confirmOpen() &&
                                g_confirm_target == ConfirmTarget::RemoveContact) {
                         // S514/EST-455: Remove's EST-447 question, raised on THIS page. The shared sheet owns
@@ -2992,6 +3028,14 @@ extern "C" void app_main(void) {
                         const int             row_count =
                             nodeMenuRowCount(node_menu_index, rows, om::ui::kMaxNodeMenuRows);
                         if (k == tm::Key::Esc) {
+                            // S514/EST-456: Esc stops WAITING first; the packet already queued is not recalled.
+                            uint8_t pub[32];
+                            if (nodeMenuPub(pub)) {
+                                const bool waiting = om::mc::nodePingPendingFor(pub) ||
+                                                     om::mc::nodeTracePendingFor(pub);
+                                om::mc::nodeOpsCancel();
+                                if (waiting) om::ui::noticeSet("Cancelled; the packet stays sent", 2500);
+                            }
                             node_menu_open  = false;
                             node_menu_index = -1;
                         } else if (k == tm::Key::Up) {
@@ -3011,6 +3055,28 @@ extern "C" void app_main(void) {
                                     node_menu_open  = false;
                                     node_menu_index = -1;
                                     break;
+                                case om::ui::NodeAction::Ping: {
+                                    // S514/EST-456: the sheet STAYS UP so the row can say "waiting..."; the
+                                    // notice carries the L2's words and the packet goes through the radio task.
+                                    uint8_t pub[32];
+                                    if (nodeMenuPub(pub)) {
+                                        const bool ok = om::mc::nodePing(pub);
+                                        om::ops::PingJob pj;
+                                        om::mc::nodePingJob(&pj);
+                                        char text[64];
+                                        om::ops::pingText(text, sizeof(text), pj);
+                                        om::ui::noticeSet(ok ? text : "Ping: send failed", 3000);
+                                    }
+                                    break;
+                                }
+                                case om::ui::NodeAction::Trace: {
+                                    uint8_t pub[32];
+                                    if (nodeMenuPub(pub)) {
+                                        const bool ok = om::mc::nodeTrace(pub);
+                                        om::ui::noticeSet(ok ? "Trace: waiting..." : "Trace: not sent", 3000);
+                                    }
+                                    break;
+                                }
                                 case om::ui::NodeAction::Favourite:
                                     // The list re-sorts at once; the focus follows. The sheet stays up so a
                                     // second press can undo it.
@@ -3245,6 +3311,20 @@ extern "C" void app_main(void) {
         // S513/EST-439: the DM retry rule, on the MAIN task — it composes the next attempt and QUEUES it, and
         // marks "no confirmation" when the attempts are spent. True = a message's state moved, so repaint.
         if (om::mc::dmTick()) dirty = true;
+        // S514/EST-456: a ping's reply/timeout and a trace's result arrive from the radio task. The trace result
+        // closes the menu (its own sheet takes over); a ping only raises its notice.
+        if (om::mc::nodeOpsPoll()) {
+            om::ops::TraceView tv;
+            if (om::mc::nodeTraceResult(&tv)) {
+                node_trace_shown = true;
+                node_menu_open   = false;
+                node_menu_index  = -1;
+            } else {
+                node_trace_shown = false;
+                om::ui::noticeSet("Trace: no data back", 3000);
+            }
+            dirty = true;
+        }
         // S514/EST-453: the scan window and the login/status deadlines. Also a repaint when a login answer
         // moved the state, so the page cannot sit on "sending" after it was answered.
         {

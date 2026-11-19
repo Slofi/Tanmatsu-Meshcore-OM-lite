@@ -25,6 +25,7 @@ Usage:
 import functools
 import os
 import re
+import struct
 import sys
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
@@ -135,6 +136,151 @@ def sigil(d, kind, cx, cy, r, colour, width=2):
 
 def text(d, xy, s, f, colour, anchor='la'):
     d.text(xy, s, font=f, fill=colour, anchor=anchor)
+
+
+# ------------------------------------------------------------------------------------------------- emoji
+# S514/EST-457: the SAME subset blob the app embeds (tools/mkemoji_subset.py), read with the L2's layout
+# ("OMEM" v1, 13x13 RGB565 + 4-bit alpha) and drawn at 2x nearest neighbour, its coverage blended over what is
+# already there — the app's rule in main/font.cpp, so the preview cannot show a placement the device lacks.
+EMOJI_BIN   = os.path.join(ROOT, 'main', 'emoji', 'emoji_subset.bin')
+EMOJI_SCALE = 2
+EMOJI_PX    = 13 * EMOJI_SCALE
+EMOJI_MISSING_W = 6            # the app's half-em advance for a code point the subset does not hold
+_EMOJI = None
+
+
+def emoji_table():
+    """{code point: (rgb bytes, alpha bytes[, w, h])} from the app's own subset blob."""
+    global _EMOJI
+    if _EMOJI is None:
+        _EMOJI = {}
+        try:
+            with open(EMOJI_BIN, 'rb') as fh:
+                blob = fh.read()
+        except OSError:
+            return _EMOJI
+        _magic, _ver, w, h, count, _data_off = struct.unpack('<IHHHHI', blob[:16])
+        cell = (w * h * 2 + h * ((w + 1) // 2) + 3) & ~3
+        for i in range(count):
+            cp, off = struct.unpack('<II', blob[16 + i * 8:24 + i * 8])
+            _EMOJI[cp] = (blob[off:off + w * h * 2], blob[off + w * h * 2:off + cell], w, h)
+    return _EMOJI
+
+
+def emoji_cell(cp):
+    return emoji_table().get(cp)
+
+
+_EMOJI_MODS = (0x200D, 0xFE0E, 0xFE0F, 0x20E3)
+
+
+def emoji_units(s):
+    """The L2's unit walk in Python: a selector/keycap/skin tone belongs to its base, a ZWJ to the part before
+    it. Yields ('t', text-run) and ('e', code-point); a lone modifier is dropped (zero width, as on the device)."""
+    runs, buf = [], ''
+    i, n = 0, len(s)
+    while i < n:
+        cp = ord(s[i])
+        if cp in _EMOJI_MODS or 0x1F3FB <= cp <= 0x1F3FF:
+            i += 1
+            continue
+        if cp < 0x2000 or cp > 0x1FAFF:
+            buf += s[i]
+            i += 1
+            continue
+        j = i + 1
+        while j < n and (ord(s[j]) in _EMOJI_MODS or 0x1F3FB <= ord(s[j]) <= 0x1F3FF):
+            j += 1
+        if j < n and ord(s[j]) == 0x200D:
+            j += 1
+        if buf:
+            runs.append(('t', buf))
+            buf = ''
+        runs.append(('e', cp))
+        i = j
+    if buf:
+        runs.append(('t', buf))
+    return runs
+
+
+def mixed_width(s, f):
+    w = 0
+    for kind, chunk in emoji_units(s):
+        if kind == 't':
+            w += tw(f, chunk)
+        else:
+            w += EMOJI_PX if emoji_cell(chunk) else EMOJI_MISSING_W
+    return w
+
+
+def draw_emoji(d, x, cy, cp):
+    """One 13x13 cell at 2x, over the pixels already drawn. Vertical centre = the text line's centre."""
+    cell = emoji_cell(cp)
+    if cell is None:
+        return 0
+    rgb, alpha, w, h = cell
+    img = getattr(d, '_image', None) or getattr(d, 'im')
+    stride = (w + 1) // 2
+    top = int(round(cy - (h * EMOJI_SCALE) / 2.0))
+    for sy in range(h):
+        for sx in range(w):
+            packed = alpha[sy * stride + sx // 2]
+            nib = (packed & 0x0F) if (sx & 1) else (packed >> 4)
+            if not nib:
+                continue
+            at = (sy * w + sx) * 2
+            v = rgb[at] | (rgb[at + 1] << 8)
+            r = (((v >> 11) & 0x1F) * 255 + 15) // 31
+            g = (((v >> 5) & 0x3F) * 255 + 31) // 63
+            b = ((v & 0x1F) * 255 + 15) // 31
+            a = nib / 15.0
+            for dy in range(EMOJI_SCALE):
+                for dx in range(EMOJI_SCALE):
+                    px, py = x + sx * EMOJI_SCALE + dx, top + sy * EMOJI_SCALE + dy
+                    if not (0 <= px < img.width and 0 <= py < img.height):
+                        continue
+                    dr, dg, db = img.getpixel((px, py))[:3]
+                    img.putpixel((px, py), (int(round(r * a + dr * (1 - a))),
+                                            int(round(g * a + dg * (1 - a))),
+                                            int(round(b * a + db * (1 - a)))))
+    return EMOJI_PX
+
+
+def text_mixed(d, xy, s, f, colour, anchor='la'):
+    """A string with emoji in it. `anchor` keeps the PIL meaning for the text runs ('la'/'lm'/'ra'/'rm')."""
+    x, y = xy
+    total = mixed_width(s, f)
+    if anchor[0] == 'r':
+        x -= total
+    elif anchor[0] == 'm':
+        x -= total // 2
+    line_cy = y if anchor[1] == 'm' else y + f.size * 0.62
+    for kind, chunk in emoji_units(s):
+        if kind == 't':
+            d.text((x, y), chunk, font=f, fill=colour, anchor=anchor)
+            x += tw(f, chunk)
+        else:
+            if emoji_cell(chunk):
+                draw_emoji(d, x, line_cy, chunk)
+                x += EMOJI_PX
+            else:
+                x += EMOJI_MISSING_W   # not in the subset: today's gap, exactly as the app leaves it
+
+
+def wrap_mixed(s, f, maxw):
+    """The same greedy wrap as wrap(), but measuring emoji at their drawn 26 px."""
+    words, lines, cur = s.split(), [], ''
+    for w in words:
+        t = (cur + ' ' + w).strip()
+        if mixed_width(t, f) <= maxw:
+            cur = t
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines or ['']
 
 
 def spaced(d, xy, s, f, colour, gap=1.2):
@@ -763,6 +909,106 @@ def nodes_favourites():
     return save(img, '2026-11-19-nodes-favourites.png')
 
 
+# S514/EST-456: the trace result, 3 hops. One line per hop with the 2-byte hop hash (or the repeater's name)
+# and its SNR, then the SNR at this node, then the total — the L2's TraceView shape.
+NODE_TRACE_HOPS = [
+    ('RPT-Kamera', '7.0'),
+    ('2e33', '11.5'),
+    ('RPT-Vzhod', '2.0'),
+]
+
+
+def node_trace():
+    """OM Lite > Nodes, S514/EST-456: a 3-hop trace's result.
+
+    The list and the detail pane are the Nodes page behind the sheet; the sheet is the trace result (the L2's
+    TraceView): every hop's name (or its 2-byte hash when no repeater matches) with its SNR x 4 / 4, the SNR at
+    this node, and the total with the round trip. Fixtures invented (rule 9).
+    """
+    img, d = new_screen()
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    status_bar(d)
+
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Nodes', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    fm = font(FONT_MONO, TM['f_meta'])
+    text(d, (W - pad, y + TM['head_h'] // 2), '6 nodes heard · 2 in the last hour', fm, P['Dim'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+    work_top = y + TM['head_h'] + 1
+
+    list_x0, list_x1 = pad, pad + TM['list_w']
+    bar_x1 = list_x1 - TM['ring_inset']
+    bar_y, bar_h = work_top + 4, 30
+    d.rectangle([list_x0, bar_y, bar_x1, bar_y + bar_h], fill=P['FieldBg'])
+    d.rectangle([list_x0, bar_y, bar_x1, bar_y + bar_h], outline=P['Line'], width=1)
+    text(d, (list_x0 + 12, bar_y + bar_h // 2), 'search nodes', font(FONT_SANS, TM['f_body']),
+         P['Dimmer'], anchor='lm')
+    text(d, (bar_x1 - 12, bar_y + bar_h // 2), '6 of 6', font(FONT_MONO, TM['f_hint']), P['Dim'],
+         anchor='rm')
+
+    rows_top = bar_y + bar_h + 6
+    row_h = 46
+    row_right = list_x1 - TM['ring_inset']
+    for i, (kind, name, hops, age, snr, fav) in enumerate(NODES_FAV):
+        y0 = rows_top + i * row_h
+        y1 = y0 + row_h
+        hline(d, list_x0, row_right, y1, P['RowLine'])
+        col = P['Client'] if kind == 'client' else P['Green']
+        d.ellipse([list_x0 + 6, y0 + row_h // 2 - 4, list_x0 + 14, y0 + row_h // 2 + 4], fill=col)
+        text(d, (list_x0 + 24, y0 + 10), name, font(FONT_SANS, 16), P['Ink'])
+        text(d, (list_x0 + 24, y0 + 29), hops, fm, P['Dimmer'])
+        text(d, (row_right - 6, y0 + 11), age, fm, P['Dim'], anchor='ra')
+        text(d, (row_right - 6, y0 + 29), snr + ' dB', fm, P['Dim'], anchor='ra')
+        if fav:
+            d.ellipse([row_right - 77, y0 + 13, row_right - 71, y0 + 19], fill=P['Acc'])
+
+    vline(d, list_x1 + 8, work_top, H - TM['hint_h'] - 8, P['Line'])
+    x = list_x1 + 8 + 24
+    yy = work_top + 18
+    text(d, (x, yy), 'RPT-Zahod', font(FONT_SANS, 26), P['Ink'])
+    yy += 34
+    text(d, (x, yy), 'repeater · key 4b 91 2e … c7', fm, P['Dim'])
+    yy += 26
+    fk = font(FONT_MONO, TM['f_kv'])
+    for label, value in (('TYPE', 'repeater'), ('HOPS', '3 bytes of path'), ('SNR / RSSI', '0.2 dB / -96 dBm'),
+                         ('LAST HEARD', '9h ago'), ('PUBLIC KEY', '4b 91 2e … c7'), ('PATH', 'via a repeater')):
+        text(d, (x, yy), label, fk, P['Dimmer'])
+        text(d, (x + 130, yy), value, fk, P['Ink'])
+        yy += 28
+    yy += 8
+    text(d, (x, yy), 'Enter: actions for this node.', font(FONT_SANS, TM['f_body']), P['Dimmer'])
+    text(d, (x, yy + 22), 'f: favourite. DM from the menu or the Chat page.',
+         font(FONT_SANS, TM['f_body']), P['Dimmer'])
+
+    # ---- the trace result sheet, over the page ----
+    img = Image.blend(img, Image.new('RGB', img.size, '#000000'), 0.62)
+    d = ImageDraw.Draw(img)
+    sheet_w, row_h, head_h, spad = 560, 42, 64, 16
+    rows = [(name, 'SNR ' + snr) for name, snr in NODE_TRACE_HOPS]
+    rows.append(('at this node', 'SNR -6.2'))
+    rows.append(('3 hops · RTT 2.4 s', ''))
+    sheet_h = 2 * spad + head_h + len(rows) * row_h
+    x0 = (W - sheet_w) // 2
+    x1 = x0 + sheet_w
+    y0 = H - TM['hint_h'] - 8 - sheet_h
+    plate(d, [x0, y0, x1, y0 + sheet_h], P['Panel'], P['Acc'], r=0, w=2)
+    text(d, (x0 + 20, y0 + spad), 'RPT-Zahod', font(FONT_SANS, 22), P['Ink'])
+    text(d, (x0 + 20, y0 + spad + 34), '3 hops · RTT 2.4 s', fm, P['Dim'])
+    hline(d, x0 + 1, x1 - 1, y0 + spad + head_h - 1, P['Line'])
+    ry = y0 + spad + head_h
+    for i, (label, value) in enumerate(rows):
+        col = P['Dimmer'] if i == len(rows) - 1 else P['Ink']
+        text(d, (x0 + 24, ry + row_h // 2), label, font(FONT_SANS, 17), col, anchor='lm')
+        if value:
+            text(d, (x1 - 24, ry + row_h // 2), value, font(FONT_MONO, TM['f_hint']), P['Dim'], anchor='rm')
+        if i + 1 < len(rows):
+            hline(d, x0 + 8, x1 - 8, ry + row_h - 1, P['RowLine'])
+        ry += row_h
+
+    hint_bar(d, 'nodes', [('ret', 'menu'), ('f', 'favourite'), ('esc', 'close')])
+    return save(img, '2026-11-19-node-trace.png')
+
+
 CHATS = [
     ('#', 'test-a', 'TEST-A1: morning, radio check', '3m', 2),
     ('#', 'test-b', 'LOCAL-KB: history save check', '12m', 0),
@@ -861,6 +1107,102 @@ def chat():
 
     hint_bar(d, 'chat', [('↑↓', 'move'), ('↵', 'open'), ('r', 'reply'), ('esc', 'back')])
     return save(img, '2026-11-13-chat.png')
+
+
+# --------------------------------------------------------------------------------------- chat + emoji
+def chat_emoji():
+    """S514/EST-457: the open chat with emoji from the app's SUBSET (shots/2026-11-19-chat-emoji.png).
+
+    `Radio check 👍🔥🗿` is the ticket's line: two glyphs the subset holds (drawn at 2x from the same .bin the
+    app embeds) and the moai, which it does not — that one keeps today's behaviour and leaves its half-em gap.
+    Emoji also appear in a card preview and in the composer echo, the other two surfaces the ticket names.
+    """
+    img, d = new_screen()
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    status_bar(d)
+
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Chat', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    text(d, (W - pad, y + TM['head_h'] // 2), '2 channels · 1 DM · 3 unread', font(FONT_MONO, TM['f_meta']),
+         P['Dim'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+    work_top = y + TM['head_h'] + 1
+
+    list_x0, list_x1 = pad, pad + TM['list_w']
+    fl = font(FONT_MONO, TM['f_label'])
+    spaced(d, (list_x0, work_top + 16), 'CHANNELS', fl, P['Dim'])
+    text(d, (list_x1 - 12, work_top + 16), '4 chats', font(FONT_MONO, TM['f_label']), P['Dimmer'], anchor='ra')
+
+    rows_top = work_top + 38
+    row_h = 62
+    preview_font = font(FONT_MONO, TM['f_meta'])
+    chats = [
+        ('# ', 'test-a', 'TEST-A1: radio check 👍', '09:38', 2),
+        ('# ', 'test-b', 'LOCAL-KB: history save check', '09:41', 0),
+        ('# ', 'public', 'no messages yet', '', 0),
+        ('@ ', 'Don\'t Panic', 'see you on the trail 🔥', '08:12', 1),
+    ]
+    for i, (mark, name, preview, age, unread) in enumerate(chats):
+        y0 = rows_top + i * row_h
+        y1 = y0 + row_h
+        if i == 0:
+            focus_band(d, list_x0 - 8, list_x1, y0, y1)
+        else:
+            hline(d, list_x0, list_x1 - TM['ring_inset'], y1, P['RowLine'])
+        nc = P['AccInk'] if i == 0 else P['Ink']
+        right = list_x1 - TM['ring_inset']
+        text(d, (list_x0 + 4, y0 + 12), mark + name, font(FONT_SANS, 16), nc)
+        text(d, (right, y0 + 13), age, font(FONT_MONO, TM['f_meta']), P['Dim'], anchor='ra')
+        text_mixed(d, (list_x0 + 4, y0 + 34), preview, preview_font, P['Dim'] if unread else P['Dimmer'])
+        if unread:
+            fb = font(FONT_MONO, 11)
+            bw = tw(fb, str(unread)) + 12
+            plate(d, [right - bw, y0 + 36, right, y0 + 54], P['Bad'], None, r=8)
+            text(d, (right - bw / 2, y0 + 45), str(unread), fb, '#ffffff', anchor='mm')
+
+    vline(d, list_x1 + 8, work_top, H - TM['hint_h'] - 8, P['Line'])
+
+    x = list_x1 + 8 + 24
+    rw = W - pad - x
+    yy = work_top + 16
+    text(d, (x, yy), '# test-a', font(FONT_SANS, 20), P['Ink'])
+    text(d, (x + rw, yy + 4), 'ADVERT', font(FONT_MONO, TM['f_label']), P['Acc'], anchor='ra')
+    yy += 34
+    hline(d, x - 24, W - pad, yy, P['Line'])
+    yy += 14
+
+    msgs = [
+        ('09:12', 'TEST-A1', 'Morning all, the north repeater is back up 👍', False),
+        ('09:20', 'TEST-A1', 'Morning! Coffee is on ☕ š č ž', False),
+        ('09:38', 'TEST-A1', 'Radio check 👍🔥🗿', False),
+        ('09:41', 'you', 'Testing from the Tanmatsu keyboard ❤️', True),
+    ]
+    fname = font(FONT_SANS, TM['f_body'])
+    fbody = font(FONT_SANS, TM['f_body'])
+    fstamp = font(FONT_MONO, TM['f_meta'])
+    for stamp, who, body, mine in msgs:
+        text(d, (x, yy), stamp, fstamp, P['Dimmer'])
+        text(d, (x + 60, yy), who, fname, P['Acc'] if mine else P['Ink'])
+        text(d, (x + rw, yy), 'now' if mine else '2h', fstamp, P['Dimmer'], anchor='ra')
+        yy += 20
+        for line in wrap_mixed(body, fbody, rw - 60):
+            text_mixed(d, (x + 60, yy), line, fbody, P['Ink'])
+            yy += 20
+        yy += 14
+
+    # composer at the pane's floor, holding text with an emoji: the echo draws it too
+    ch = H - TM['hint_h'] - 64
+    hline(d, x - 24, W - pad, ch - 12, P['Line'])
+    plate(d, [x, ch, x + rw - 64, ch + 40], P['FieldBg'], P['Line'], r=4)
+    draft = 'nice one 🔥'
+    text_mixed(d, (x + 12, ch + 20), draft, fbody, P['Ink'], anchor='lm')
+    d.rectangle([x + 12 + mixed_width(draft, fbody) + 3, ch + 12,
+                 x + 13 + mixed_width(draft, fbody) + 3, ch + 28], fill=P['Acc'])
+    key_cap(d, [x + rw - 84, ch + 6, x + rw - 8, ch + 34], '↵ Enter', P['Ink'],
+            font(FONT_SANS, TM['f_hint']))
+
+    hint_bar(d, 'chat', [('↑↓', 'move'), ('↵', 'open'), ('r', 'reply'), ('esc', 'back')])
+    return save(img, '2026-11-19-chat-emoji.png')
 
 
 # ------------------------------------------------------------------------------------------- chat cards
@@ -2019,7 +2361,8 @@ def rptr_status():
 
 
 RENDERERS = dict(launcher=launcher, menu=menu, nodes=nodes, nodes_search=nodes_search,
-                 nodes_favourites=nodes_favourites, chat=chat, chat2=chat_cards,
+                 nodes_favourites=nodes_favourites, node_trace=node_trace, chat=chat, chat2=chat_cards,
+                 chat_emoji=chat_emoji,
                  chat_dm=chat_dm_column, dm_enter=dm_enter, map=map_page, rptr=rptr, rptr_list=rptr_list, rptr_status=rptr_status, settings=settings,
                  settings_general=settings_general, settings_omlite=settings_omlite,
                  settings_opstoc=settings_opstoc, settings_chat=settings_chat,

@@ -11,6 +11,7 @@
 
 #include "font.h"
 #include "mc_store.h"
+#include "node_ops.h"   // S514/EST-456: the node menu's Ping/Trace result view
 #include "screen.h"
 
 namespace om {
@@ -33,6 +34,11 @@ struct NodesView {
     // list; main.cpp owns it and the side effects, this view only says whether the sheet is up.
     bool menu_open  = false;
     int  menu_focus = 0;
+    // S514/EST-456: a ping/trace to the menu's node is in flight ("waiting..." in that row), and the last trace
+    // result is drawn as the L2's hop list when `trace` is not null.
+    bool menu_ping_pending  = false;
+    bool menu_trace_pending = false;
+    const ops::TraceView* trace = nullptr;
 
     // chrome
     const char* clock = "--:--";
@@ -45,7 +51,8 @@ void drawNodes(Screen& s, const NodesView& v);
 // The node menu sheet (S514/EST-455): a bottom sheet in the confirm sheet's house style, drawn OVER the page.
 // The rows come from core/node_menu.h so what is offered and what is drawn cannot disagree. `focus` is the
 // focused row; the favourite row's value is "on"/"off" from the contact itself.
-void drawNodeMenu(Screen& s, const mc::Contact& c, int focus, uint32_t now);
+void drawNodeMenu(Screen& s, const mc::Contact& c, int focus, uint32_t now, bool ping_pending,
+                  bool trace_pending, const ops::TraceView* trace);
 
 // UTF-8 aware truncation to a pixel width, with an ellipsis — shared with Chat so long names and messages end
 // the same way on both pages. The right-aligned form exists for the chat's own messages (Filip, S502: mine on

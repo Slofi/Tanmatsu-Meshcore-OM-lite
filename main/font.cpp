@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "../../firmware/src/ui/text_wrap.h"   // the L2's UTF-8/emoji unit walker (textUnitAt): one owner
+#include "emoji.h"                             // the subset table + the one width rule (core/emoji.cpp)
+
 extern "C" {
 // Embedded by main/CMakeLists.txt (EMBED_FILES). IDF names the symbols after the file.
 extern const uint8_t sans_title22_bin_start[] asm("_binary_sans_title22_bin_start");
@@ -34,22 +37,8 @@ inline uint16_t be16(const uint8_t* p) { return (uint16_t)(((uint16_t)p[0] << 8)
 constexpr uint32_t kRecordBytes = 28;
 
 // Minimal UTF-8: enough for ASCII + Latin-1/Extended-A, which is what the faces carry.
-uint32_t nextUtf8(const char*& s) {
-    const uint8_t c = (uint8_t)*s;
-    if (c < 0x80) {
-        s++;
-        return c;
-    }
-    int      extra = (c & 0xE0) == 0xC0 ? 1 : (c & 0xF0) == 0xE0 ? 2 : (c & 0xF8) == 0xF0 ? 3 : 0;
-    uint32_t cp    = extra == 1 ? (c & 0x1F) : extra == 2 ? (c & 0x0F) : extra == 3 ? (c & 0x07) : 0;
-    if (extra == 0) {          // stray continuation byte: skip it, never loop forever
-        s++;
-        return '?';
-    }
-    s++;
-    for (int i = 0; i < extra && (*s & 0xC0) == 0x80; i++, s++) cp = (cp << 6) | ((uint8_t)*s & 0x3F);
-    return cp;
-}
+// S514/EST-457: textWidth*/draw now walk units with the L2's textUnitAt (which also knows the emoji
+// sequences), so this local decode is gone — one walker, not two that could disagree about an emoji.
 
 // Blend `fg` over the destination pixel with 8-bit coverage. RGB565 in, RGB565 out.
 inline uint16_t blend565(uint16_t dst, uint16_t fg, uint8_t a) {
@@ -117,65 +106,108 @@ bool Font::glyph(uint32_t code, Glyph* out) const {
     return false;
 }
 
+// One face advance for the shared width rule (core/emoji.cpp asks this per code point).
+namespace {
+int faceAdvanceCb(void* ctx, uint32_t cp) {
+    const Font* f = (const Font*)ctx;
+    Glyph       g;
+    return (f != nullptr && f->glyph(cp, &g)) ? (int)g.advance : 0;
+}
+}  // namespace
+
 int Font::textWidth(const char* utf8) const {
     if (!ready_ || utf8 == nullptr) return 0;
-    int      w = 0;
-    const char* s = utf8;
-    while (*s) {
-        const uint32_t cp = nextUtf8(s);
-        Glyph          g;
-        const bool     ok = glyph(cp, &g);
-        w += ok ? g.advance : (int)(ascent_ / 2);   // unknown: a half-em placeholder width
-    }
-    return w;
+    return textWidthRange(utf8, (int)strlen(utf8));
 }
 
 // Width of a BYTE RANGE, not a C string (S503: the wrap code measures candidate line ends that are not
-// NUL-terminated). Same advance rule as textWidth, so a wrapped line is exactly as wide as it draws.
+// NUL-terminated). Walked one drawable unit at a time by the L2's own textUnitAt, so an emoji counts its
+// DRAWN width (26 px), a variation selector / skin tone is free and a wrapped line is exactly as wide as
+// it draws. S514/EST-457: the emoji branch is the one change; every other code point keeps today's rule.
 int Font::textWidthRange(const char* utf8, int len) const {
     if (!ready_ || utf8 == nullptr || len <= 0) return 0;
-    int         w = 0;
-    const char* s = utf8;
-    const char* end = utf8 + len;
-    while (s < end) {
-        const uint32_t cp = nextUtf8(s);
-        if (s > end) break;   // nextUtf8 advanced past the range: the sequence was cut by the range, not the text
-        Glyph      g;
-        const bool ok = glyph(cp, &g);
-        w += ok ? g.advance : (int)(ascent_ / 2);
-    }
-    return w;
+    EmojiFaceMetrics m;
+    m.advance   = faceAdvanceCb;
+    m.ctx       = (void*)this;
+    m.missing_w = (int)(ascent_ / 2);   // unknown: a half-em placeholder width, as before
+    return emojiTextWidth(utf8, len, m);
 }
 
 int Font::textWidthN(const char* utf8, int max_px) const {
     if (!ready_ || utf8 == nullptr) return 0;
-    int      w = 0;
-    const char* s = utf8;
-    while (*s) {
-        const char*   before = s;
-        const uint32_t cp    = nextUtf8(s);
-        Glyph          g;
-        const bool     ok  = glyph(cp, &g);
-        const int      adv = ok ? g.advance : (int)(ascent_ / 2);
-        if (w + adv > max_px) {
-            s = before;
-            break;
+    int w = 0;
+    const int len = (int)strlen(utf8);
+    for (int i = 0; i < len;) {
+        TextUnit u;
+        const int next = textUnitAt(utf8, len, i, &u);
+        if (next <= i) break;
+        i = next;
+        if (u.zero) continue;
+        int adv = emojiAdvance(u.cp);
+        if (adv == 0) {
+            Glyph g;
+            adv = glyph(u.cp, &g) ? (int)g.advance : (int)(ascent_ / 2);
         }
+        if (w + adv > max_px) break;
         w += adv;
     }
     return w;
 }
 
+// S514/EST-457: one 13x13 Noto cell, drawn at kEmojiScale (26x26, nearest neighbour), its 4-bit
+// coverage blended over whatever is already on the framebuffer (the caller's plate has been drawn by
+// now, and the port is readable, so no background colour has to be guessed). Vertically centred on the
+// text line: the line runs from (baseline - ascent) to (baseline + descent).
+namespace {
+void drawEmojiScaled(uint16_t* px, int fb_w, int fb_h, int x, int y_base, const EmojiGlyph& e, int ascent,
+                     int descent) {
+    if (px == nullptr || e.rgb == nullptr || e.alpha == nullptr || e.w == 0 || e.h == 0) return;
+    const int side = (int)e.w * kEmojiScale;
+    const int top  = y_base - (ascent - descent) / 2 - side / 2;
+    const int stride = (e.w + 1) / 2;
+    for (int dy = 0; dy < side; ++dy) {
+        const int y = top + dy;
+        if (y < 0 || y >= fb_h) continue;
+        const int sy = dy / kEmojiScale;
+        for (int dx = 0; dx < (int)e.w * kEmojiScale; ++dx) {
+            const int sx = dx / kEmojiScale;
+            const uint8_t packed = e.alpha[(size_t)sy * stride + sx / 2];
+            const uint8_t nibble = (sx & 1) ? (uint8_t)(packed & 0x0F) : (uint8_t)(packed >> 4);
+            if (nibble == 0) continue;
+            const int px_x = x + dx;
+            if (px_x < 0 || px_x >= fb_w) continue;
+            const uint16_t rgb = (uint16_t)(e.rgb[((size_t)sy * e.w + sx) * 2] |
+                                            ((uint16_t)e.rgb[((size_t)sy * e.w + sx) * 2 + 1] << 8));
+            uint16_t& dst = px[(size_t)y * fb_w + px_x];
+            dst = blend565(dst, rgb, (uint8_t)(nibble * 17));
+        }
+    }
+}
+}  // namespace
+
 int Font::draw(void* fb, int fb_w, int fb_h, int x, int y_base, const char* utf8, uint16_t colour) const {
     if (!ready_ || utf8 == nullptr || fb == nullptr) return x;
-    uint16_t* px   = (uint16_t*)fb;
-    int       pen  = x;
-    const char* s  = utf8;
-    while (*s) {
-        const uint32_t cp = nextUtf8(s);
-        Glyph          g;
-        if (!glyph(cp, &g) || g.w == 0 || g.h == 0) {
-            pen += glyph(cp, &g) ? g.advance : (int)(ascent_ / 2);
+    uint16_t* px  = (uint16_t*)fb;
+    int       pen = x;
+    const int len = (int)strlen(utf8);
+    // One drawable unit at a time, with the L2's rules (S514/EST-457): a variation selector, a skin tone
+    // and U+20E3 belong to their base; a ZWJ belongs to the part before it; a stray modifier draws
+    // nothing. An emoji the subset holds draws at 2x; a code point it does not hold keeps today's
+    // behaviour (no pixels, half-em advance).
+    for (int i = 0; i < len;) {
+        TextUnit u;
+        const int next = textUnitAt(utf8, len, i, &u);
+        if (next <= i) break;
+        i = next;
+        if (u.zero) continue;
+        if (const EmojiGlyph* e = emojiFind(u.cp)) {
+            drawEmojiScaled(px, fb_w, fb_h, pen, y_base, *e, ascent_, descent_);
+            pen += kEmojiAdvance;
+            continue;
+        }
+        Glyph g;
+        if (!glyph(u.cp, &g) || g.w == 0 || g.h == 0) {
+            pen += glyph(u.cp, &g) ? g.advance : (int)(ascent_ / 2);
             continue;
         }
         const int gx0 = pen + g.dx;

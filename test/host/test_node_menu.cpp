@@ -3,7 +3,7 @@
 //
 // What these pin:
 //   · the rows a node type actually gets — clients get DM, repeaters/rooms/sensors do not, and the actions that
-//     do NOT work yet (Ping, Trace, Map, Reset path) are never offered;
+//     Ping and Trace are offered only under the L2's conditions (EST-456), Map/Reset path are not offered;
 //   · the favourite row's value/accent, the focus clamp and the action Enter would run;
 //   · the favourites-first order against Filip's words: favourites by last heard (newest first), then everyone
 //     else by last heard, TIES STABLE, and the EST-449 search filter keeps that order inside its matches;
@@ -75,36 +75,47 @@ void test_rows_per_type() {
   om::ui::NodeMenuRow  rows[om::ui::kMaxNodeMenuRows];
   om::ui::NodeMenuContext c;
 
-  c.advType = om::ui::kNodeMenuAdvChat;
-  c.hasKey  = true;
-  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 4);
+  c.advType   = om::ui::kNodeMenuAdvChat;
+  c.hasKey    = true;
+  c.pathKnown = true;   // EST-456: a stored route is what makes Trace offerable
+  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 6);
   CHECK(rows[0].action == om::ui::NodeAction::DirectMessage);
   CHECK_STR(rows[0].label, "Direct message");
   CHECK(rows[1].action == om::ui::NodeAction::Info);
-  CHECK(rows[2].action == om::ui::NodeAction::Favourite);
-  CHECK_STR(rows[2].value, "off");
-  CHECK(!rows[2].valueAccent);
-  CHECK(rows[3].action == om::ui::NodeAction::RemoveContact);
+  CHECK(rows[2].action == om::ui::NodeAction::Ping);
+  CHECK(rows[3].action == om::ui::NodeAction::Trace);
+  CHECK(rows[4].action == om::ui::NodeAction::Favourite);
+  CHECK_STR(rows[4].value, "off");
+  CHECK(!rows[4].valueAccent);
+  CHECK(rows[5].action == om::ui::NodeAction::RemoveContact);
   // The actions that do not exist here are never offered.
-  for (int i = 0; i < 4; ++i) {
+  for (int i = 0; i < 6; ++i) {
     CHECK(rows[i].action != om::ui::NodeAction::None);
   }
 
+  // No stored route: the Trace row is ABSENT, not dimmed (EST-456).
+  c.pathKnown = false;
+  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 5);
+  for (int i = 0; i < 5; ++i) CHECK(rows[i].action != om::ui::NodeAction::Trace);
+  c.pathKnown = true;
+
   // Favourite on: the value is "on" AND the accent flag is set (never inferred from the word).
   c.favourite = true;
-  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 4);
-  CHECK_STR(rows[2].value, "on");
-  CHECK(rows[2].valueAccent);
+  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 6);
+  CHECK_STR(rows[4].value, "on");
+  CHECK(rows[4].valueAccent);
 
   // A repeater, room and sensor can each hold a key but cannot take a text DM.
   const uint8_t types[] = {om::ui::kNodeMenuAdvRepeater, om::ui::kNodeMenuAdvRoom, om::ui::kNodeMenuAdvSensor, 0};
   for (uint8_t t : types) {
     c.advType = t;
     c.favourite = false;
-    CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 3);
+    CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 5);
     CHECK(rows[0].action == om::ui::NodeAction::Info);
-    CHECK(rows[1].action == om::ui::NodeAction::Favourite);
-    CHECK(rows[2].action == om::ui::NodeAction::RemoveContact);
+    CHECK(rows[1].action == om::ui::NodeAction::Ping);
+    CHECK(rows[2].action == om::ui::NodeAction::Trace);
+    CHECK(rows[3].action == om::ui::NodeAction::Favourite);
+    CHECK(rows[4].action == om::ui::NodeAction::RemoveContact);
   }
 
   // No full key: only Info is honest.
@@ -130,12 +141,14 @@ void test_focus_and_action() {
 
   om::ui::NodeMenuRow rows[om::ui::kMaxNodeMenuRows];
   om::ui::NodeMenuContext c;
-  c.advType = om::ui::kNodeMenuAdvChat;
-  c.hasKey  = true;
+  c.advType   = om::ui::kNodeMenuAdvChat;
+  c.hasKey    = true;
+  c.pathKnown = true;
   const int n = om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows);
   CHECK(om::ui::nodeMenuActionAt(rows, n, 0) == om::ui::NodeAction::DirectMessage);
-  CHECK(om::ui::nodeMenuActionAt(rows, n, 3) == om::ui::NodeAction::RemoveContact);
-  CHECK(om::ui::nodeMenuActionAt(rows, n, 4) == om::ui::NodeAction::None);
+  CHECK(om::ui::nodeMenuActionAt(rows, n, 2) == om::ui::NodeAction::Ping);
+  CHECK(om::ui::nodeMenuActionAt(rows, n, 5) == om::ui::NodeAction::RemoveContact);
+  CHECK(om::ui::nodeMenuActionAt(rows, n, 6) == om::ui::NodeAction::None);
   CHECK(om::ui::nodeMenuActionAt(rows, n, -1) == om::ui::NodeAction::None);
   CHECK(om::ui::nodeMenuActionAt(nullptr, n, 0) == om::ui::NodeAction::None);
 }

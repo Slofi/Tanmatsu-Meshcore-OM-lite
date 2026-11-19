@@ -9,6 +9,8 @@ idf_component_register(
     SRCS
         "main.cpp"
         "font.cpp"
+        # S514/EST-457: the emoji subset blob (tools/mkemoji_subset.py) handed to core/emoji.cpp.
+        "emoji_blob.cpp"
         "screen.cpp"
         "launcher_page.cpp"
         "radio_link.cpp"
@@ -43,6 +45,9 @@ idf_component_register(
         "fonts/sans_meta12.bin"
         "fonts/sans_hint11.bin"
         "fonts/mono_kv12.bin"
+        # The emoji SUBSET (274 Noto cells, 120,576 B), the L2's own layout: 13x13 RGB565 + 4-bit
+        # alpha, read by firmware/src/ui/emoji_table.h. tools/mkemoji_subset.py writes it.
+        "emoji/emoji_subset.bin"
     PRIV_REQUIRES
         esp_lcd
         fatfs

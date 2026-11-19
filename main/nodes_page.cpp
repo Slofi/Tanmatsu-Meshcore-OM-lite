@@ -239,7 +239,11 @@ void drawNodes(Screen& s, const NodesView& v) {
     // house style). It belongs to the FOCUSED row: a toggle re-sorts the list and moves the focus with the node.
     if (v.menu_open && v.order_count > 0 && v.store != nullptr) {
         const mc::Contact& c = v.store->c[v.order[v.focused >= 0 && v.focused < v.order_count ? v.focused : 0]];
-        drawNodeMenu(s, c, v.menu_focus, v.now);
+        drawNodeMenu(s, c, v.menu_focus, v.now, v.menu_ping_pending, v.menu_trace_pending, v.trace);
+    } else if (v.trace != nullptr) {
+        // S514/EST-456: the trace result outlives the sheet that started it (the L2's TraceView is its own list).
+        drawNodeMenu(s, v.store->c[v.order[v.focused >= 0 && v.focused < v.order_count ? v.focused : 0]],
+                     v.menu_focus, v.now, false, false, v.trace);
     }
 
     // S513/EST-432: the advert key works on this page too, so it is a hint and not only the empty-list line.
@@ -257,16 +261,66 @@ void drawNodes(Screen& s, const NodesView& v) {
         drawHintBar(s, tm::Page::Nodes, hints_list, 6);
 }
 
-void drawNodeMenu(Screen& s, const mc::Contact& c, int focus, uint32_t now) {
+void drawNodeMenu(Screen& s, const mc::Contact& c, int focus, uint32_t now, bool ping_pending,
+                  bool trace_pending, const ops::TraceView* trace) {
     const int W = kTmW, H = kTmH;
 
     NodeMenuContext ctx;
-    ctx.advType   = c.type;
-    ctx.hasKey    = !mc::contactKeyIncomplete(c.pub);
-    ctx.favourite = c.favourite;
+    ctx.advType      = c.type;
+    ctx.hasKey       = !mc::contactKeyIncomplete(c.pub);
+    ctx.favourite    = c.favourite;
+    ctx.pathKnown    = mc::contactHasOutPath(c);
+    ctx.pingPending  = ping_pending;
+    ctx.tracePending = trace_pending;
     NodeMenuRow rows[kMaxNodeMenuRows];
     const int   row_count = nodeMenuRows(ctx, rows, kMaxNodeMenuRows);
     if (row_count <= 0) return;
+
+    // S514/EST-456: the trace result replaces the menu's rows (the L2's TraceView): one line per hop with its SNR,
+    // then the SNR at this node, then the total.
+    if (trace != nullptr) {
+        const int shown = trace->count + 2;
+        for (int y = 0; y < H; y += 2) s.fillRect(0, y, W, 1, kBg);
+        const int sheet_w = 560;
+        const int row_h   = 42;
+        const int head_h  = 64;
+        const int pad     = 16;
+        const int count   = shown > 12 ? 12 : shown;
+        const int sheet_h = 2 * pad + head_h + count * row_h;
+        const int x0      = (W - sheet_w) / 2;
+        const int x1      = x0 + sheet_w;
+        const int y0      = H - kTmHintH - 8 - sheet_h;
+        s.fillRect(x0, y0, sheet_w, sheet_h, kPanel);
+        s.frame(x0, y0, sheet_w, sheet_h, 2, kAcc);
+        drawTextClipped(s, Face::Title, x0 + 20, textBaseline(s, Face::Title, y0 + pad, 34), sheet_w - 40,
+                        trace->node[0] ? trace->node : "Trace", kInk);
+        char total[48];
+        ops::traceTotalText(total, sizeof(total), *trace);
+        drawTextClipped(s, Face::Meta, x0 + 20, textBaseline(s, Face::Meta, y0 + pad + 34, 22), sheet_w - 40,
+                        total, kDim);
+        s.hline(x0 + 1, x1 - 1, y0 + pad + head_h - 1, kLine);
+        int ry = y0 + pad + head_h;
+        for (int i = 0; i < count; ++i) {
+            char label[64] = "";
+            char value[24] = "";
+            if (i < trace->count) {
+                ops::traceHopLabel(label, sizeof(label), trace->hops[i]);
+                snprintf(value, sizeof(value), "SNR %.1f", (double)trace->hops[i].snr4 / 4.0);
+            } else if (i == trace->count) {
+                snprintf(label, sizeof(label), "at this node");
+                snprintf(value, sizeof(value), "SNR %.1f", (double)trace->finalSnr4 / 4.0);
+            } else {
+                snprintf(label, sizeof(label), "%s", total);
+            }
+            drawTextClipped(s, Face::Row, x0 + 24, textBaseline(s, Face::Row, ry, row_h), sheet_w - 48 - 120,
+                            label, kInk);
+            if (value[0] != '\0')
+                drawTextRight(s, Face::Hint, x1 - 24, textBaseline(s, Face::Hint, ry, row_h), value, kDim);
+            if (i + 1 < count) s.hline(x0 + 8, x1 - 8, ry + row_h - 1, kRowLine);
+            ry += row_h;
+        }
+        return;
+    }
     if (focus < 0) focus = 0;
     if (focus >= row_count) focus = row_count - 1;
 

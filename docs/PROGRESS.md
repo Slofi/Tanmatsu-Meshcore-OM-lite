@@ -15,6 +15,136 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S514 (EST-457) · emoji in messages and names (a subset of the L2's set)
+
+> Written by **DeepSeek** for ticket **EST-457**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed or committed. Keeps EST-456's work. **Version: 52** (`core/settings.h` kAppVersion) — the ticket's number.
+
+### What this builds
+
+1. **A SUBSET, not the L2's 623,056 B blob.** `tools/mkemoji_subset.py` reads
+   `firmware/src/ui/emoji_data.bin` **with the L2's own layout** and writes `main/emoji/emoji_subset.bin` in the
+   same format (`"OMEM"` v1, 13x13 cells, RGB565 + 4-bit alpha, 4-byte aligned cells, sorted index):
+   **274 glyphs / 120,576 B** (cap **120 KiB = 122,880 B**, headroom 2,304 B). The selection: **every code
+   point the L2's own picker offers** (parsed out of `firmware/src/ui/emoji_picker.cpp`, so the two lists cannot
+   drift) plus all of **Smileys & Emotion**, the **People & Body hand gestures**, the **hearts**, and the
+   **common symbols** (check/cross, warning, question/exclamation, arrows, stars, fire, sparkles, weather,
+   clocks, refresh, bell, locks). The parser is **the L2's** `firmware/src/ui/emoji_table.h`, included from that
+   tree and compiled unchanged — not forked, and the host test includes the same header.
+2. **Drawing = one place.** `main/font.cpp`'s `draw`/`textWidth`/`textWidthRange`/`textWidthN` now walk
+   **the L2's `textUnitAt`** (`firmware/src/ui/text_wrap.cpp`, also compiled into the core component) instead of
+   a local decode. An emoji the subset holds draws at **2x (26x26, nearest neighbour)**, its 4-bit coverage
+   blended over the framebuffer pixel already there (so no background colour has to be guessed, unlike the L2's
+   `drawEmoji`), **vertically centred on the text line** (`baseline - (ascent-descent)/2 - 13`), and advances
+   **26 px = 2 x 13, the scaled width** (the ticket's word; the L2 adds 1 px of air at 13 px, none is added
+   here). Because every text path in the app ends in `Font::draw`, this reaches **chat messages, the composer
+   echo, channel/DM card previews and node names** in one edit. A code point the subset lacks draws nothing and
+   keeps today's **half-em advance** (`ascent/2`).
+3. **The wrap measures the real width.** `core/emoji.cpp::emojiTextWidth` is the ONE width rule; `Font`'s
+   measuring functions and `main.cpp`'s `measureBody` callback (the `core/chat_layout.cpp` wrap's measure) both
+   use it, so a line can never be measured narrower than it draws. The L2's walker rules are kept exactly: a
+   variation selector / keycap / skin tone belongs to its base, a ZWJ belongs to the part before it, a stray
+   modifier takes no room.
+4. **Tests.** `test/host/test_emoji.cpp` (+ a `mkemoji_subset.py --check` stage that fails on a stale blob):
+   the subset parses with the L2 parser under the cap with sorted/4-aligned/in-range/inked entries; lookups in
+   and out (`0x1F44D` yes, `'A'`/ZWJ/VS16/skin tone/regional indicator/`0x1F5FF` no); the walker on heart+VS16,
+   thumb+skin tone, a three-part ZWJ family and a keycap; widths (emoji 26, selectors free, ZWJ parts in order,
+   out-of-subset half-em) and **the chat wrap with emoji**: every wrapped line is <= its width, four emoji fit in
+   104 px and five do not.
+5. **Preview.** `tools/preview_tanmatsu.py` reads the same subset blob and draws it at 2x;
+   `shots/2026-11-19-chat-emoji.png` is a chat with `Radio check 👍🔥🗿` — two in the subset, the moai **not** in
+   it (the gap today's behaviour leaves) — plus an emoji in the composer echo and in a card preview.
+
+### Verified (real exit codes, this run)
+
+- `sh test/host/run.sh` → **exit 0** (its last stage is the new emoji suite: `emoji: all checks passed`, and
+  `mkemoji_subset.py --check` printed `matches a fresh build`). No FAIL line anywhere else (the two `FAIL` hits in
+  the log are `test_dm_send: 140 checks, 0 FAILURES`).
+- The L2 suite: `firmware$ sh test/host/run.sh` → **exit 0** (the shared `emoji_table.h` / `text_wrap.cpp` are
+  unchanged by this ticket — the L2 tree was only READ).
+- `make build` → **exit 0**; `application.bin` **0x19aec0 = 1,683,136 B** vs the **2 MB (0x200000)** build
+  check → **0x65140 = 413,504 B free (20 %)**; vs the **3,200 KiB** per-app ceiling → **51.4 %**. Previous
+  (EST-456): 0x17d080 = 1,558,656 B, so this ticket costs **+124,480 B** (the 120,576 B blob + ~3.9 KB of code).
+  The map has `esp-idf/main/libmain.a(emoji_subset.bin.S.obj)`, so the blob is really in the image.
+- Two ARMs, both red and restored: **arm 1** `kEmojiAdvance = 13` (the 2x scale forgotten) →
+  `FAIL test_emoji.cpp:125 emojiAdvance(0x1F44D) == 26` plus 7 width/wrap FAILs; **arm 2**
+  `emojiTextWidth` blind to emoji (`if (false && e > 0)`) → 7 FAILs incl. `fakeMeasure(four) == 104` and
+  `tighter.count == 2`. Logs: `sweep/est457-arm1.log`, `est457-arm2.log`.
+- Licence: `main/emoji/emoji_data.LICENSE.txt` copied next to the subset blob (SIL OFL 1.1 / Noto, the same file
+  the L2 ships).
+- **Nothing installed, flashed or committed.** No server touched.
+
+## 2026-11-19 · S514 (EST-456) · node menu: Ping + Trace
+
+> Written by **DeepSeek** for ticket **EST-456**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed or committed. Keeps EST-455's work. **Version: 52** (`core/settings.h` kAppVersion).
+
+### What this builds
+
+1. **PING** is the L2's, exactly — `BaseChatMesh::sendRequest(REQ_TYPE_GET_STATUS)`
+   (`firmware/lib/meshcore/helpers/BaseChatMesh.cpp:690-715`) and its RESPONSE through
+   `Listener::onUnhandledResponse` (`firmware/src/mesh_link.cpp:757-779`). The request frame is **reused, not
+   rewritten**: `core/node_ops.cpp::buildPingFrame` calls the EST-453 `rptr::buildStatusRequest`, and the answer is
+   opened by `rptr::openResponse` + the 4-byte timestamp check. The L2's states are kept
+   (`Idle/Sent/Replied/Timeout/Failed`), the deadline is the L2's status floor **8 s**
+   (`rptr_link.cpp` kEstimateMs), and the reply's notice is the ticket's words **"Ping <name>: 1.8 s"** (seconds,
+   one decimal). Offered for **every contact whose full key we hold** — the L2's own rule, `if (c.hasKey)`
+   (`firmware/src/ui/node_menu.cpp:32-35`), a flood when no route is stored.
+2. **TRACE** is upstream `Mesh::createTrace()` + `sendDirect()`
+   (`firmware/lib/meshcore/Mesh.cpp:605-620`; `:692-714` appends the path **to the payload** and leaves header
+   `path_len = 0`): header `(0x09 << 2) | DIRECT`, payload `tag(4 LE) | auth(4 LE) | flags | path hash bytes`,
+   `flags & 3` = `hash_size - 1`. It is offered **only when the contact has a stored route**
+   (`contactHasOutPath`, `out_path_len != 0xFF` — the L2's `c.hasKey && c.pathKnown`,
+   `firmware/src/ui/node_menu.cpp:36-38`); with no route the row is **absent, not dimmed**. The answer is parsed
+   like upstream `Mesh::onRecvPacket` (`Mesh.cpp:42-57`) and the L2's `onTraceRecv`
+   (`firmware/src/mesh_link.cpp:784-818`): one SNR byte per hop from the frame's path, hop hashes from the payload
+   after the 9-byte head, `hash_bytes = 1 << (flags & 3)`. The result is the L2's **TraceView**: one line per hop
+   with the **2-byte hop hash** (a known repeater's name when the leading key bytes match, else hex) and its SNR,
+   then "at this node", then the total ("3 hops · RTT 2.4 s"). Every length is bounds-checked and the parser is in
+   the ASan/UBSan stage.
+3. **One radio owner.** Both frames are built with the contact row under the store lock and pushed into the SAME
+   four-slot `TxQueue` a DM/advert uses (`TxKind::Frame` via `queueFrame`), so the **radio task** is the only place
+   that transmits (`mc_link.cpp::serviceRequests`). Nothing is sent from the receive path: `onPacket` only records
+   the ping's reply and the trace's hops. While a job runs the row says **"waiting..."**; **Esc cancels the wait**
+   (not the packet — it may already be on the air) and a deadline on the radio task's clock turns an unanswered
+   ping into `Timeout` and a silent trace into "no data back".
+4. **The menu** (`core/node_menu.h`) gains `NodeAction::Ping` and `NodeAction::Trace` in the L2's order
+   (DM, Info, Ping, Trace, Favourite, Remove; max rows 6). `NodeMenuContext` gains `pathKnown` and the two
+   pending flags (the value "waiting...").
+
+### Results (real exit codes, 2026-11-19)
+
+- **Host tests: `sh test/host/run.sh` exit 0** — **26 compiled suite summaries, 16,426 checks, 0 failures**
+  (`sweep/est456-host-final.log`; the ASan/UBSan repeats are included, as in earlier entries). The new stage
+  `test_node_ops` is **98 checks, 0 failure(s)**, run twice (plain and ASan/UBSan). It pins the TRACE frame to
+  `26 00 44 33 22 11 00 00 00 00 01 ab cd ef 01 23 45` (from upstream, not from this code), the 3-hop answer's
+  names/hashes/SNRs and the total, the ping frame to *be* the EST-453 status request, the state machine and
+  "Ping RPT-Kamera: 1.8 s", and the menu rules (Trace absent without a route; Ping on `hasKey`; both on a
+  repeater with a key, neither without one).
+- **ARMED — two mutations, both red, run from throwaway copies (`sweep/est456-arm/`), the tree untouched:**
+  - `core/node_menu.h` Trace condition `hasKey && pathKnown` → `hasKey` →
+    `FAIL test_node_menu.cpp:98  om::ui::nodeMenuRows(...) == 5 (got 6, want 5)`.
+  - `core/node_ops.cpp` `if (hops > count) hops = count;` removed →
+    `FAIL test_node_ops.cpp:236  tv.count == 2 (got 4, want 2)`.
+- **Build: `make build` exit 0.** `application.bin` **0x17d100 = 1,560,832 B**; `make size`: **Flash
+  1,450,336 B used**, total image **1,560,434 B**, app partition **0x200000** with **0x82f00 (26 %) free**;
+  the **3,200 KiB (3,276,800 B)** budget leaves **1,715,968 B free (52.4 %)**. Versus EST-455's 1,552,784 B
+  (0x17b190): **+8,048 B**.
+- **Preview:** `shots/2026-11-19-node-trace.png`, **800×480**, rendered by the one tool
+  (`python3 tools/preview_tanmatsu.py node_trace`): the Nodes page behind a **3-hop** trace result — RPT-Kamera
+  7.0, `2e33` 11.5 (the unmatched hop as its 2-byte hash), RPT-Vzhod 2.0, "at this node" −6.2, total
+  "3 hops · RTT 2.4 s". Fixtures invented (rule 9).
+- **Files (new):** `core/node_ops.{h,cpp}`, `test/host/test_node_ops.cpp`,
+  `shots/2026-11-19-node-trace.png`.
+  **Files (edited):** `core/node_menu.h` (the two actions, `pathKnown`, pending values, max 6),
+  `main/mc_link.{h,cpp}` (the jobs, the two builders, the RX hooks, the deadlines, the cancel/poll),
+  `main/nodes_page.{h,cpp}` (the trace-result sheet, the pending values),
+  `main/main.cpp` (menu wiring, Esc = cancel the wait, the trace sheet, the poll),
+  `core/settings.h` (version 52), `core/CMakeLists.txt`, `test/host/run.sh`,
+  `test/host/test_node_menu.cpp`, `tools/preview_tanmatsu.py`, this file.
+- **NOT done (by the ticket):** nothing installed or flashed (the device waits in BadgeLink for one install),
+  nothing committed. **Not checked on the glass:** the live reply/SNR path needs an install.
+
 ## 2026-11-19 · S514 (EST-455) · node menu + favourites
 
 > Written by **DeepSeek** for ticket **EST-455**: fenced Paperclip run, no session start/end, nothing installed,

@@ -2,16 +2,21 @@
 // The Nodes page's NODE MENU and its favourite rule (S514/EST-455).
 //
 // Ported from the L2's `firmware/src/ui/node_menu.h` / `.cpp`: one list of actions per node, built from what the
-// node actually is, in the L2's order. The difference is deliberate and is the ticket's first rule: ONLY actions
-// that work on the Tanmatsu today are offered. Ping, Trace, Map and Reset path exist in the L2's list and are
-// left out here until their code exists — a row that does nothing would be a lie on a screen this honest about
-// its state.
+// node actually is, in the L2's order. The rule stays: ONLY actions that work on the Tanmatsu today are offered.
+// S514/EST-456 brings Ping and Trace in (core/node_ops.*); Map and Reset path still exist in the L2's list and
+// are left out here until their code exists — a row that does nothing would be a lie on a screen this honest
+// about its state.
 //
 // The rows that are offered today:
 //   Direct message  a client with a full key (a repeater or a room cannot take a text DM)
 //   Info            always; the Nodes page's own detail pane is the info view
+//   Ping            a contact with a full key (a status request works over a path or as a flood)
+//   Trace           a contact with a full key AND a stored route: the packet is aimed down out_path
 //   Favourite       a contact with a full key; value "on"/"off", toggled by Enter
 //   Remove contact  a contact with a full key; the EST-447 confirm and removal
+//
+// S514/EST-456: Ping/Trace are the L2's conditions exactly (firmware/src/ui/node_menu.cpp:32-38): Ping on
+// hasKey, Trace on hasKey && pathKnown. With no route the Trace row is ABSENT, never dimmed.
 //
 // Everything here is plain C++17 and pure: no display, no NVS, no radio. `main/main.cpp` performs the side
 // effects (open the DM thread, remove, persist); the host tests drive the same decisions through this header.
@@ -34,13 +39,15 @@ enum class NodeAction : uint8_t {
     None = 0,
     DirectMessage,
     Info,
+    Ping,
+    Trace,
     Favourite,
     RemoveContact,
 };
 
-// Four is the real maximum today (a client: DM, Info, Favourite, Remove). Kept as a bound so a future action
-// cannot silently overrun a caller's array.
-constexpr int kMaxNodeMenuRows = 4;
+// Six is the real maximum (a client with a route: DM, Info, Ping, Trace, Favourite, Remove). Kept as a bound so
+// a future action cannot silently overrun a caller's array.
+constexpr int kMaxNodeMenuRows = 6;
 
 struct NodeMenuRow {
     NodeAction  action      = NodeAction::None;
@@ -54,6 +61,11 @@ struct NodeMenuContext {
     uint8_t advType   = 0;
     bool    hasKey    = false;   // a real contact, so its public key is known
     bool    favourite = false;
+    // S514/EST-456: ContactInfo::out_path_len != OUT_PATH_UNKNOWN (core/mc_store.h contactHasOutPath).
+    bool    pathKnown = false;
+    // A ping/trace to THIS node is in flight: the row says "waiting..." and Esc stops waiting.
+    bool    pingPending  = false;
+    bool    tracePending = false;
 };
 
 // The rows in the L2's order, restricted to what works here. Returns 0..kMaxNodeMenuRows.
@@ -73,6 +85,8 @@ inline int nodeMenuRows(const NodeMenuContext& c, NodeMenuRow* out, int max) {
     // rather than offered and refused.
     if (c.hasKey && c.advType == kNodeMenuAdvChat) add(NodeAction::DirectMessage, "Direct message");
     add(NodeAction::Info, "Info");
+    if (c.hasKey) add(NodeAction::Ping, "Ping", c.pingPending ? "waiting..." : "");
+    if (c.hasKey && c.pathKnown) add(NodeAction::Trace, "Trace", c.tracePending ? "waiting..." : "");
     if (c.hasKey) {
         add(NodeAction::Favourite, "Favourite", c.favourite ? "on" : "off", c.favourite);
         add(NodeAction::RemoveContact, "Remove contact");

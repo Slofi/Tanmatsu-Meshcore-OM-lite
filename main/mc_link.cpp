@@ -159,6 +159,18 @@ char               g_pub_hex[17] = {0};   // first 8 bytes of the public key, fo
 // transmission. The ring is the pure rule rather than an xQueueCreate() so the host tests exercise the code the
 // device runs; the copy-by-value and "refuse when full" semantics are the FreeRTOS queue's.
 TxQueue            g_txq;
+
+// S514/EST-456: the two node actions' jobs. Written by the radio task (an answer, a deadline) and read by the
+// MAIN task (the sheet, the notice), so every access goes through the store lock like the contact table.
+ops::PingJob  g_ping;
+ops::TraceView g_trace;
+bool          g_trace_pending = false;
+uint8_t       g_trace_key[meshcore::kPubKeyBytes] = {0};
+uint32_t      g_trace_tag = 0;
+ops::TraceJob g_trace_job;
+uint32_t      g_trace_serial = 0;
+uint32_t      g_ping_seen_state = 0;   // main-task poll: the last state it reported
+uint32_t      g_tag_counter = 0;
 SemaphoreHandle_t  g_tx_lock = nullptr;   // created once in begin()
 
 // S513/EST-439: the DMs we sent and the ACK each one expects. The RADIO task matches an arriving ACK (it must not
@@ -193,6 +205,10 @@ bool queueFrame(const uint8_t* frame, size_t len) {
 om::mc::AdvertGate g_advert_gate;
 
 uint32_t monotonicMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
+
+// S514/EST-456: MeshCore's getCurrentTimeUnique() role — a value that must not repeat within a session, because
+// the answer is matched by key and tag. Seconds plus a per-send counter is unique here.
+uint32_t uniqueTag() { return (uint32_t)((esp_timer_get_time() / 1000000) << 2) | (g_tag_counter++ & 0x03); }
 
 // S513/EST-441: the seen-ring, so a frame WE transmitted that comes back over the mesh is not processed as
 // incoming. The rule and the ring are core/mc_wire.* (host-tested); this is only the instance the device uses.
@@ -825,6 +841,20 @@ void rebindRestoredDmPeer(const uint8_t pub[32], const char* name) {
     }
 }
 
+// S514/EST-456: a hop hash -> a known repeater's name, the L2's meshPathHopName rule (2-byte hash mode compares
+// that many leading key bytes). An unknown hop stays unnamed and is drawn as hex.
+bool traceHopName(const uint8_t* hash, uint8_t len, void* ctx, char* out, size_t cap) {
+    ContactStore* cs = static_cast<ContactStore*>(ctx);
+    if (cs == nullptr || hash == nullptr || len < 1 || len > 3) return false;
+    for (size_t i = 0; i < cs->count; ++i) {
+        if (contactKeyIncomplete(cs->c[i].pub)) continue;
+        if (memcmp(cs->c[i].pub, hash, len) != 0) continue;
+        snprintf(out, cap, "%s", cs->c[i].name);
+        return out[0] != '\0';
+    }
+    return false;
+}
+
 void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
     meshcore::View v;
     if (!meshcore::decode(buf, len, &v)) {
@@ -860,6 +890,39 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
     if (v.type() == meshcore::kTypeResponse) {
         if (om::rptrlink::onResponse(v)) return;
         // Not one of ours: fall through to the old "unhandled" log at the bottom.
+    }
+
+    // S514/EST-456: the PING's answer. rptrlink::onResponse above only consumes its OWN answers, so this sees
+    // every other RESPONSE. Only the contact we pinged opens it, and only while its ping is waiting.
+    if (v.type() == meshcore::kTypeResponse && g_has_id) {
+        StoreLock l;
+        if (g_ping.state == ops::PingState::Sent) {
+            uint8_t secret[meshcore::kSecretBytes];
+            if (identitySharedSecret(g_id, g_ping.key, secret) &&
+                ops::openPingResponse(g_id, g_ping.key, secret, v)) {
+                ops::pingReplied(g_ping, monotonicMs());
+                ESP_LOGI(TAG, "ping: reply in %lu ms", (unsigned long)g_ping.rtt_ms);
+                return;
+            }
+        }
+    }
+
+    // S514/EST-456: the TRACE's answer — a DIRECT TRACE packet whose path holds one SNR per hop and whose payload
+    // carries the hop hashes (Mesh.cpp:42-57). Names come from the contact table; an unmatched hop is its hash.
+    if (v.type() == 0x09 && v.route() == meshcore::kRouteDirect) {
+        StoreLock l;
+        if (g_trace_pending && v.payload_len >= 4 && memcmp(v.payload, &g_trace_tag, 4) == 0) {
+            ops::TraceView tv;
+            if (ops::parseTraceResponse(v, (int8_t)(snr_db * 4), &traceHopName, &g_contacts, &tv)) {
+                snprintf(tv.node, sizeof(tv.node), "%s", g_trace_job.node);
+                tv.rttMs  = monotonicMs() - g_trace_job.sent_ms;
+                g_trace         = tv;
+                g_trace_pending = false;
+                ++g_trace_serial;
+                ESP_LOGI(TAG, "trace: %d hop(s) back", tv.count);
+                return;
+            }
+        }
     }
 
     // ------------------------------------------------- S513/EST-439: the PATH answer and the delivered ACK
@@ -1595,6 +1658,22 @@ void serviceRequests() {
         }
     }
 
+    // S514/EST-456: the two deadlines (the L2's 8 s ping / 12 s trace) expire on the radio task's own clock.
+    {
+        StoreLock l;
+        const ops::PingState before = g_ping.state;
+        ops::pingTick(g_ping, monotonicMs());
+        if (before == ops::PingState::Sent && g_ping.state == ops::PingState::Timeout)
+            ESP_LOGI(TAG, "ping: no reply");
+        const bool was_pending = g_trace_job.pending;
+        ops::traceTick(g_trace_job, monotonicMs());
+        if (was_pending && !g_trace_job.pending) {
+            g_trace_pending = false;
+            ++g_trace_serial;
+            ESP_LOGI(TAG, "trace: no data back");
+        }
+    }
+
     // One request per loop, so a burst cannot hold the radio task away from receiving.
     TxRequest req;
     xSemaphoreTake(g_tx_lock, portMAX_DELAY);
@@ -1841,6 +1920,130 @@ bool selfIdentity(meshcore::Identity* out) {
 }
 
 bool queueRptrFrame(const uint8_t* frame, size_t len) { return queueFrame(frame, len); }
+
+// ------------------------------------------------------- S514/EST-456: Ping and Trace (see mc_link.h)
+// A copy of the contact under the lock: the frame is built from the SAME row the sheet named.
+namespace {
+bool contactByPub(const uint8_t pub[meshcore::kPubKeyBytes], Contact* out) {
+    if (pub == nullptr || out == nullptr) return false;
+    StoreLock l;
+    const int i = contactsFind(g_contacts, pub);
+    if (i < 0) return false;
+    *out = g_contacts.c[i];
+    return true;
+}
+}  // namespace
+
+bool nodePing(const uint8_t pub[meshcore::kPubKeyBytes]) {
+    if (!g_has_id || pub == nullptr) return false;
+    Contact c;
+    if (!contactByPub(pub, &c) || contactKeyIncomplete(c.pub)) return false;
+    uint8_t secret[meshcore::kSecretBytes];
+    if (!identitySharedSecret(g_id, c.pub, secret)) return false;
+    uint8_t frame[kTxFrameBytes];
+    const bool    known = contactHasOutPath(c);
+    const uint8_t hops   = (uint8_t)(c.out_path_len & 63);
+    const size_t  bytes  = known ? (size_t)hops * (size_t)((c.out_path_len >> 6) + 1) : 0;
+    const uint32_t tag   = uniqueTag();
+    const size_t   n = ops::buildPingFrame(g_id, c.pub, secret, tag, esp_random(), known ? c.out_path : nullptr,
+                                           known ? c.out_path_len : kOutPathUnknown, frame, sizeof(frame));
+    if (n == 0) return false;
+    {
+        StoreLock l;
+        ops::pingStarted(g_ping, c.pub, c.name, tag, monotonicMs());
+    }
+    if (!queueFrame(frame, n)) {
+        StoreLock l;
+        ops::pingFailed(g_ping);
+        return false;
+    }
+    ESP_LOGI(TAG, "ping \"%s\": status request queued (%u B, %s, tag %08lx)", c.name, (unsigned)n,
+             known ? "direct" : "flood", (unsigned long)tag);
+    (void)bytes;
+    return true;
+}
+
+bool nodeTrace(const uint8_t pub[meshcore::kPubKeyBytes]) {
+    if (!g_has_id || pub == nullptr) return false;
+    Contact c;
+    if (!contactByPub(pub, &c) || contactKeyIncomplete(c.pub)) return false;
+    if (!contactHasOutPath(c)) return false;   // the row is absent on screen; a stale caller sends nothing
+    const uint8_t hops      = (uint8_t)(c.out_path_len & 63);
+    const uint8_t hash_size = (uint8_t)((c.out_path_len >> 6) + 1);
+    const uint8_t path_bytes = (uint8_t)(hops * hash_size);
+    uint8_t frame[kTxFrameBytes];
+    const uint32_t tag = uniqueTag();
+    const size_t   n = ops::buildTraceFrame(tag, 0, hash_size, c.out_path, path_bytes, frame, sizeof(frame));
+    if (n == 0) return false;
+    {
+        StoreLock l;
+        traceStarted(g_trace_job, c.name, monotonicMs());
+        memcpy(g_trace_key, c.pub, sizeof(g_trace_key));
+        g_trace_tag     = tag;
+        g_trace_pending = true;
+    }
+    if (!queueFrame(frame, n)) {
+        StoreLock l;
+        ops::traceCancel(g_trace_job);
+        g_trace_pending = false;
+        g_trace_serial++;
+        return false;
+    }
+    ESP_LOGI(TAG, "trace \"%s\": %u hop(s), %u B queued", c.name, (unsigned)hops, (unsigned)n);
+    return true;
+}
+
+void nodePingJob(ops::PingJob* out) {
+    if (out == nullptr) return;
+    StoreLock l;
+    *out = g_ping;
+}
+
+bool nodeTraceResult(ops::TraceView* out) {
+    if (out == nullptr) return false;
+    StoreLock l;
+    *out = g_trace;
+    return g_trace.haveRtt;
+}
+
+bool nodePingPendingFor(const uint8_t pub[meshcore::kPubKeyBytes]) {
+    StoreLock l;
+    return g_ping.state == ops::PingState::Sent && memcmp(g_ping.key, pub, meshcore::kPubKeyBytes) == 0;
+}
+
+bool nodeTracePendingFor(const uint8_t pub[meshcore::kPubKeyBytes]) {
+    StoreLock l;
+    return g_trace_pending && memcmp(g_trace_key, pub, meshcore::kPubKeyBytes) == 0;
+}
+
+void nodeOpsCancel() {
+    StoreLock l;
+    ops::pingCancel(g_ping);
+    if (g_trace_pending) {
+        g_trace_pending = false;
+        g_trace_serial++;
+    }
+}
+
+bool nodeOpsPoll() {
+    StoreLock l;
+    const uint8_t st = (uint8_t)g_ping.state;
+    if (st != g_ping_seen_state) {
+        g_ping_seen_state = st;
+        if (g_ping.state == ops::PingState::Replied || g_ping.state == ops::PingState::Timeout ||
+            g_ping.state == ops::PingState::Failed) {
+            char text[64];
+            ops::pingText(text, sizeof(text), g_ping);
+            if (text[0] != '\0') om::ui::noticeSet(text, 3000);
+        }
+    }
+    static uint32_t seen_serial = 0;
+    if (g_trace_serial != seen_serial) {
+        seen_serial = g_trace_serial;
+        return true;
+    }
+    return false;
+}
 
 }  // namespace mc
 }  // namespace om

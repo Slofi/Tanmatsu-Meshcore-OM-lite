@@ -16,6 +16,7 @@
 
 #include "advert_rule.h"
 #include "mc_identity.h"
+#include "node_ops.h"   // S514/EST-456: Ping/Trace jobs (the L2's node actions)
 #include "mc_store.h"
 
 namespace om {
@@ -159,6 +160,23 @@ size_t contactsClear();                // returns how many rows were removed; 0 
 // record in the `mcct` blob — so it raises the same dirty flag and contactsPersistTick() rewrites NVS on this
 // loop's pass, exactly like remove/clear. False for an out-of-range index (a stale row must mark nobody).
 bool contactsSetFavourite(size_t index, bool on);
+
+// ------------------------------------------------- S514/EST-456: the NODE MENU's Ping and Trace
+// Both are the L2's: Ping is the EST-453 status request (REQ_TYPE_GET_STATUS) and measures the reply's round trip;
+// Trace is upstream Mesh::createTrace() + sendDirect() down the contact's stored out_path. Neither transmits here:
+// the complete frame goes into the SAME four-slot queue a DM uses (TxKind::Frame), so the radio task remains the
+// one owner. False when no frame could be built or the queue was full (nothing went out).
+bool nodePing(const uint8_t pub[meshcore::kPubKeyBytes]);
+bool nodeTrace(const uint8_t pub[meshcore::kPubKeyBytes]);
+// Copies the last job/result under the store lock. The trace result is the L2's TraceView.
+void nodePingJob(ops::PingJob* out);
+bool nodeTraceResult(ops::TraceView* out);
+bool nodePingPendingFor(const uint8_t pub[meshcore::kPubKeyBytes]);
+bool nodeTracePendingFor(const uint8_t pub[meshcore::kPubKeyBytes]);
+// Esc: stop waiting. The packet already queued is NOT recalled (it may already be on the air).
+void nodeOpsCancel();
+// Called by the MAIN task every loop: notices for a reply/timeout and true when the screen should repaint.
+bool nodeOpsPoll();
 
 // The "New node: ..." notice (NVS "mcset"/"newnode", default On). The radio task reads the cached value when it
 // raises the notice; the MAIN task flips it. A corrupt stored byte reads as On.
