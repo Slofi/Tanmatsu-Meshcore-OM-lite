@@ -80,6 +80,7 @@ void encodeRecord(const Contact& c, uint8_t* p) {
     o += 4;
     put32(p + o, (uint32_t)c.lon_e6);
     o += 4;
+    p[o++] = c.in_radio ? 1 : 0;   // S515/EST-463 (version 4)
 }
 
 // `stride` is the record width the header claims: 148 for versions 1-2, 158 for version 3. The tail is read only
@@ -124,8 +125,8 @@ void decodeRecord(const uint8_t* p, uint8_t version, size_t stride, Contact& c) 
     }
     // Version 3's tail: the new-contact flag and the advert's position, at the record's own width (stride - 10).
     // A version-1/2 record has no tail, so both stay false (and `Contact{}` already zeroed them).
-    if (version >= 3 && stride >= kContactBlobRecordBytes) {
-        size_t t = stride - 10;
+    if (version >= 3 && stride >= kContactBlobRecordBytesV3) {
+        size_t t = (version >= kContactBlobVersion) ? stride - 11 : stride - 10;
         c.fresh        = p[t++] != 0;
         c.has_position = p[t++] != 0;
         c.lat_e6       = (int32_t)get32(p + t);
@@ -135,6 +136,7 @@ void decodeRecord(const uint8_t* p, uint8_t version, size_t stride, Contact& c) 
             c.lat_e6 = 0;
             c.lon_e6 = 0;
         }
+        if (version >= kContactBlobVersion) c.in_radio = p[stride - 1] != 0;
     }
 }
 
@@ -154,13 +156,14 @@ const char* contactDecodeText(ContactDecode r) {
 }
 
 size_t contactsEncode(const ContactStore& s, uint8_t* out, size_t cap) {
-    if (out == nullptr || s.count > kMaxContacts) return 0;
+    if (out == nullptr || s.count > kMaxContacts || s.c == nullptr) return 0;
     const size_t need = kContactBlobHeaderBytes + s.count * kContactBlobRecordBytes;
     if (cap < need) return 0;
 
     out[0] = kContactBlobVersion;
-    out[1] = (uint8_t)s.count;
-    put16(out + 2, (uint16_t)kContactBlobRecordBytes);
+    out[1] = 0;                                   // reserved (was the u8 count in versions 1-3)
+    put16(out + 2, (uint16_t)s.count);
+    put16(out + 4, (uint16_t)kContactBlobRecordBytes);
     size_t o = kContactBlobHeaderBytes;
     for (size_t i = 0; i < s.count; i++) {
         encodeRecord(s.c[i], out + o);
@@ -169,32 +172,71 @@ size_t contactsEncode(const ContactStore& s, uint8_t* out, size_t cap) {
     return need;
 }
 
+// S515/EST-464: only the radio rows, capped. This is the NVS fallback encoder; /int and the SD card use
+// node_store.cpp, which wraps the same record bytes with a magic/version/CRC header.
+size_t contactsEncodeRadio(const ContactStore& s, uint8_t* out, size_t cap, size_t max_rows) {
+    if (out == nullptr || s.c == nullptr) return 0;
+    size_t count = 0;
+    for (size_t i = 0; i < s.count && i < s.cap; i++) {
+        if (s.c[i].in_radio && count < max_rows) count++;
+    }
+    const size_t need = kContactBlobHeaderBytes + count * kContactBlobRecordBytes;
+    if (cap < need) return 0;
+
+    out[0] = kContactBlobVersion;
+    out[1] = 0;
+    put16(out + 2, (uint16_t)count);
+    put16(out + 4, (uint16_t)kContactBlobRecordBytes);
+    size_t o = kContactBlobHeaderBytes;
+    size_t written = 0;
+    for (size_t i = 0; i < s.count && i < s.cap && written < count; i++) {
+        if (!s.c[i].in_radio) continue;
+        encodeRecord(s.c[i], out + o);
+        o += kContactBlobRecordBytes;
+        written++;
+    }
+    return need;
+}
+
+void contactEncodeRecord(const Contact& c, uint8_t* out) { encodeRecord(c, out); }
+
+bool contactDecodeRecord(const uint8_t* in, size_t stride, Contact& out) {
+    if (in == nullptr || stride != kContactBlobRecordBytes) return false;
+    decodeRecord(in, kContactBlobVersion, stride, out);
+    return true;
+}
+
 ContactDecode contactsDecode(const uint8_t* in, size_t len, ContactStore& out) {
     if (len == 0) {
-        out = ContactStore{};
+        out.count = 0;   // keep the table's own PSRAM allocation: constructing a new one would take another 312 KB
         return ContactDecode::Empty;
     }
-    if (in == nullptr || len < kContactBlobHeaderBytes) return ContactDecode::Truncated;
+    if (in == nullptr || len < kContactBlobHeaderBytesLegacy) return ContactDecode::Truncated;
     const uint8_t version = in[0];
     // Version 1 is the EST-437 blob whose route slot was reserved (every route unknown); version 2 filled it;
-    // version 3 appends fresh + position. An older record is 148 bytes, this build's is 158.
-    if (version != 1 && version != 2 && version != kContactBlobVersion) return ContactDecode::BadVersion;
-    const size_t count    = in[1];
-    const size_t stride   = get16(in + 2);
-    const size_t expected = (version >= 3) ? kContactBlobRecordBytes : kContactBlobRecordBytesV2;
+    // version 3 appends fresh + position; version 4 (S515/EST-463) widens the count to u16 and adds in_radio.
+    // A v1/v2 record is 148 bytes, v3 158, v4 159, and the header is 4 bytes before v4 and 6 from v4.
+    if (version != 1 && version != 2 && version != 3 && version != 4) return ContactDecode::BadVersion;
+    const size_t hdr = (version >= kContactBlobVersion) ? kContactBlobHeaderBytes : kContactBlobHeaderBytesLegacy;
+    if (len < hdr) return ContactDecode::Truncated;
+    const size_t count  = (version >= kContactBlobVersion) ? (size_t)get16(in + 2) : (size_t)in[1];
+    const size_t stride = (version >= kContactBlobVersion) ? (size_t)get16(in + 4) : (size_t)get16(in + 2);
+    const size_t expected = (version >= kContactBlobVersion)  ? kContactBlobRecordBytes
+                            : (version == 3)                  ? kContactBlobRecordBytesV3
+                                                              : kContactBlobRecordBytesV2;
     if (stride != expected) return ContactDecode::BadRecordSize;
     if (count > kMaxContacts) return ContactDecode::BadCount;
 
-    const size_t need = kContactBlobHeaderBytes + count * stride;
+    const size_t need = hdr + count * stride;
     if (len < need) return ContactDecode::Truncated;
     if (len > need) return ContactDecode::BadSize;
 
     // Every check is above this line, so nothing can fail after the first write: a wrong blob leaves `out` alone
     // without needing a second 2.7 KB table on the boot stack.
-    out       = ContactStore{};
+    if (out.c == nullptr || count > out.cap) return ContactDecode::BadCount;
     out.count = count;
     for (size_t i = 0; i < count; i++) {
-        decodeRecord(in + kContactBlobHeaderBytes + i * stride, version, stride, out.c[i]);
+        decodeRecord(in + hdr + i * stride, version, stride, out.c[i]);
     }
     return ContactDecode::Ok;
 }

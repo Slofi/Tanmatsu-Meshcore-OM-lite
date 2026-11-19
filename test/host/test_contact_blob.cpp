@@ -103,8 +103,9 @@ void emptyTable() {
   uint8_t out[8] = {0};
   CHECK_EQ(om::mc::contactsEncode(s, out, sizeof(out)), om::mc::kContactBlobHeaderBytes);
   CHECK_EQ(out[0], om::mc::kContactBlobVersion);
-  CHECK_EQ(out[1], 0);
-  CHECK_EQ((unsigned)out[2] | ((unsigned)out[3] << 8), om::mc::kContactBlobRecordBytes);
+  CHECK_EQ(out[1], 0);   // S515/EST-463: reserved from v4 (the u8 count could not say 2,000)
+  CHECK_EQ((unsigned)out[2] | ((unsigned)out[3] << 8), 0);   // count u16
+  CHECK_EQ((unsigned)out[4] | ((unsigned)out[5] << 8), om::mc::kContactBlobRecordBytes);
 
   om::mc::ContactStore d;
   d.count = 7;   // must be replaced, not appended
@@ -160,8 +161,8 @@ void wrongRecordSizeIsIgnored() {
   uint8_t buf[om::mc::kContactBlobMaxBytes];
   const size_t n = om::mc::contactsEncode(s, buf, sizeof(buf));
   const uint16_t want = (uint16_t)om::mc::kContactBlobRecordBytes;
-  buf[2] = (uint8_t)((want - 1) & 0xFF);
-  buf[3] = (uint8_t)((want - 1) >> 8);
+  buf[4] = (uint8_t)((want - 1) & 0xFF);
+  buf[5] = (uint8_t)((want - 1) >> 8);
 
   om::mc::ContactStore d;
   CHECK(om::mc::contactsDecode(buf, n, d) == om::mc::ContactDecode::BadRecordSize);
@@ -204,8 +205,10 @@ void extraBytesAreRejected() {
 
 // 7. A count larger than the table is refused before any record is read (a corrupt count cannot write past 32).
 void tooManyContacts() {
+  // S515/EST-463: a v4 header, count u16 = one more than the table can hold.
   uint8_t buf[om::mc::kContactBlobHeaderBytes] = {
-      om::mc::kContactBlobVersion, (uint8_t)(om::mc::kMaxContacts + 1),
+      om::mc::kContactBlobVersion, 0,
+      (uint8_t)((om::mc::kMaxContacts + 1) & 0xFF), (uint8_t)((om::mc::kMaxContacts + 1) >> 8),
       (uint8_t)(om::mc::kContactBlobRecordBytes & 0xFF),
       (uint8_t)(om::mc::kContactBlobRecordBytes >> 8)};
   om::mc::ContactStore d;
@@ -223,7 +226,7 @@ void fullTable() {
   uint8_t buf[om::mc::kContactBlobMaxBytes];
   const size_t n = om::mc::contactsEncode(s, buf, sizeof(buf));
   CHECK_EQ(n, om::mc::kContactBlobMaxBytes);
-  CHECK_EQ(buf[1], om::mc::kMaxContacts);
+  CHECK_EQ((unsigned)buf[2] | ((unsigned)buf[3] << 8), om::mc::kMaxContacts);   // the count is u16 from v4
 
   om::mc::ContactStore d;
   CHECK(om::mc::contactsDecode(buf, n, d) == om::mc::ContactDecode::Ok);
@@ -266,7 +269,7 @@ void routeRoundTrip() {
   const size_t n = om::mc::contactsEncode(s, buf, sizeof(buf));
   CHECK_EQ(n, om::mc::kContactBlobHeaderBytes + 3 * om::mc::kContactBlobRecordBytes);
   CHECK_EQ(buf[0], om::mc::kContactBlobVersion);
-  CHECK_EQ(buf[0], 3);   // S515/EST-461: v3 = the route, plus fresh + has_position + lat/lon
+  CHECK_EQ(buf[0], 4);   // S515/EST-463: v4 = v3 plus in_radio and a u16 count
 
   const size_t route_off = om::mc::kContactBlobHeaderBytes + 83;   // after dm_log_next
   CHECK_EQ(buf[route_off], om::mc::kOutPathUnknown);               // row 0: no route, not a zero-length one
@@ -298,14 +301,19 @@ void oldBlobAndBadRoute() {
   const size_t route_off = om::mc::kContactBlobHeaderBytes + 83;
 
   // A REAL version-1 blob: same record, 148 bytes wide, the route slot zeroed exactly as EST-437 wrote it.
+  // S515/EST-463: the record MOVES to offset 4 for a v1 blob (its header is 4 bytes, v4's is 6), so it is copied
+  // across rather than reinterpreted in place.
   uint8_t v1[om::mc::kContactBlobMaxBytes];
-  memcpy(v1, buf, om::mc::kContactBlobRecordBytesV2);
+  memset(v1, 0, sizeof(v1));
+  memcpy(v1 + om::mc::kContactBlobHeaderBytesLegacy, buf + om::mc::kContactBlobHeaderBytes,
+         om::mc::kContactBlobRecordBytesV2);
   v1[0] = 1;
   v1[1] = 1;
   v1[2] = (uint8_t)(om::mc::kContactBlobRecordBytesV2 & 0xFF);
   v1[3] = (uint8_t)(om::mc::kContactBlobRecordBytesV2 >> 8);
-  memset(v1 + route_off, 0, 1 + om::mc::kContactBlobRouteBytes);   // exactly what EST-437 wrote
-  const size_t n1 = om::mc::kContactBlobHeaderBytes + om::mc::kContactBlobRecordBytesV2;
+  const size_t v1_route = om::mc::kContactBlobHeaderBytesLegacy + 83;
+  memset(v1 + v1_route, 0, 1 + om::mc::kContactBlobRouteBytes);   // exactly what EST-437 wrote
+  const size_t n1 = om::mc::kContactBlobHeaderBytesLegacy + om::mc::kContactBlobRecordBytesV2;
   om::mc::ContactStore d;
   CHECK(om::mc::contactsDecode(v1, n1, d) == om::mc::ContactDecode::Ok);
   CHECK_EQ(d.c[0].fresh, 0);            // S515/EST-461: an old blob knows nothing about new contacts

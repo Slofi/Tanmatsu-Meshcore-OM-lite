@@ -45,6 +45,11 @@ idf_component_register(
          # S513/EST-437: the contact table's one versioned NVS blob — encode/decode only, so the host tests
          # round-trip the exact bytes the device stores and refuse a wrong version, width or length.
          "contact_blob.cpp"
+         # S515/EST-463: ONE node table's rules (advert -> archive, add/remove radio, never evict).
+         "node_table.cpp"
+         # S515/EST-464: the /int radio file and the SD archive share one versioned CRC-checked format; the boot
+         # merge and the one-time NVS migration live beside it so both are host-tested.
+         "node_store.cpp"
          # S513/EST-440: per-channel flood scope (ported from the L2's S509) — the modes, the region name,
          # the sha256 region key, MeshCore's HMAC transport code and the transport-flood frame.
          "channel_scope.cpp"

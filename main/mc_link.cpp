@@ -5,19 +5,27 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <errno.h>
+#include <unistd.h>   // fsync(fileno()): finish a node file before the rename makes it current
 // No <time.h> here: chrome.h -> pages.h defines `namespace tm`, and <time.h> defines `struct tm` — the two cannot
 // live in one translation unit (time_source.h says the same). The radio task asks time_source::epochNow() instead.
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_random.h"
 #include "esp_timer.h"   // esp_timer_get_time(): the advert schedule
+#include "esp_vfs_fat.h" // S515/EST-464: /int (the launcher's locfd partition), mounted exactly as it mounts it
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"   // the store lock
 #include "freertos/task.h"   // uxTaskGetStackHighWaterMark: the stack evidence after each request   // esp_fill_random() for the one-time identity seed
 #include "nvs.h"
+#include "wear_levelling.h"   // wl_handle_t for the /int FAT mount
 
 #include "advert_rule.h"   // S513/EST-435: one advert per 5 s, host-tested
 #include "contact_blob.h"  // S513/EST-437: the contact table as one versioned NVS blob
+#include "node_table.h"   // S515/EST-463: the node table's rules (advert -> archive, add/remove radio)
+#include "node_store.h"   // S515/EST-464: /int radio.bin, SD nodes.bin, the boot merge and the migration
 #include "contact_admin.h"  // S514/EST-447: remove/clear a contact, and the new-node notice's default
 #include "chrome.h"        // S513/EST-435/437: the app's one notice slot, safe from any task
 #include "mc_channels.h"
@@ -104,6 +112,20 @@ bool g_scope_loaded[meshcore::kMaxChannels] = {};
 
 // The store the pages read (S502, step 4). The radio task writes it, the UI reads it; the mutex is created in
 // begin() and the guard below is the ONLY way in.
+void* nodeTableAlloc(size_t bytes) {
+    void* p = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (p == nullptr) p = heap_caps_malloc(bytes, MALLOC_CAP_8BIT);   // last resort, logged by initNodeTable()
+    return p;
+}
+void nodeTableFree(void* p) {
+    if (p != nullptr) heap_caps_free(p);
+}
+
+// Runs before the first ContactStore is constructed (the installer at the bottom of this block, above g_contacts).
+struct NodeTableInstaller {
+    NodeTableInstaller() { setContactAlloc(&nodeTableAlloc, &nodeTableFree); }
+} g_nodeTableInstaller;
+
 ContactStore    g_contacts;
 MessageRing     g_messages;
 ReadState       g_read;
@@ -133,19 +155,71 @@ bool     g_contacts_ack_force    = false;   // "one write on leaving the page", 
 bool     g_contacts_write_failed = false;
 uint32_t g_contacts_last_write_ms  = 0;
 uint32_t g_contacts_last_attempt_ms = 0;
-uint8_t  g_contact_blob[kContactBlobMaxBytes];   // restore reads it, the main task encodes it
+// S515/EST-463: the table is 2,000 rows (~312 KB) and the blob that carries it is ~316 KB, so NEITHER can be a
+// .bss array any more: the app has ~570 KB of internal RAM in total and the screen, the rings and the mesh already
+// live there. Both are PSRAM, taken once, and a failed allocation is reported instead of quietly shrinking the
+// table (the store then behaves as a full table and logs it).
+uint8_t* g_contact_blob = nullptr;   // restore reads it, the main task encodes it
+
+// S515/EST-464: the two node files and the boot merge. The radio list is /int/om-lite/radio.bin (internal flash,
+// the launcher's locfd partition) and the archive is /sdcard/om-lite/nodes.bin. The encoding buffer is PSRAM like
+// the table: an archive of 2,000 rows is ~318 KB, far too much for internal RAM.
+constexpr const char* kIntMountPoint   = "/int";
+constexpr const char* kIntRadioDir     = "/int/om-lite";
+constexpr const char* kRadioFilePath   = "/int/om-lite/radio.bin";
+constexpr const char* kRadioTempPath   = "/int/om-lite/radio.tmp";
+constexpr const char* kArchiveDir      = "/sdcard/om-lite";
+constexpr const char* kArchiveFilePath = "/sdcard/om-lite/nodes.bin";
+constexpr const char* kArchiveTempPath = "/sdcard/om-lite/nodes.tmp";
+constexpr uint32_t    kArchiveWriteMs  = 30u * 1000u;   // the SD archive: at most one write per 30 s (+ forced)
+
+bool          g_int_mounted   = false;
+wl_handle_t   g_int_wl        = WL_INVALID_HANDLE;
+bool          g_sd_ready      = false;   // the card the archive can use (main tells us at boot)
+bool          g_archive_dirty = false;
+bool          g_archive_force = false;
+uint32_t      g_archive_last_write_ms = 0;
+bool          g_archive_write_failed  = false;
+uint32_t      g_radio_signature = 0;      // the bytes last written, so an archive-only change never rewrites flash
+bool          g_radio_have_signature = false;
+uint8_t       g_nvs_blob_version = 0;     // what restoreContacts() saw (0 = no blob); the migration picks the rule
+HeardToRadio  g_heard_to_radio = kHeardToRadioDefault;
+uint8_t*      g_node_file_buf = nullptr;  // the /int and SD files' encode/decode buffer (PSRAM)
+
+void initNodeTable() {
+    if (g_contacts.c == nullptr) {
+        ESP_LOGE(TAG, "node table: allocation of %u B FAILED; every store starts empty and full",
+                 (unsigned)contactsTableBytes());
+        return;
+    }
+    if (g_contact_blob == nullptr) {
+        g_contact_blob = static_cast<uint8_t*>(nodeTableAlloc(kContactBlobMaxBytes));
+        if (g_contact_blob == nullptr) ESP_LOGE(TAG, "contacts: NVS blob scratch allocation FAILED");
+    }
+    if (g_node_file_buf == nullptr) {
+        g_node_file_buf = static_cast<uint8_t*>(nodeTableAlloc(kNodeFileMaxBytes));
+        if (g_node_file_buf == nullptr) ESP_LOGE(TAG, "node storage: file buffer allocation FAILED");
+    }
+    ESP_LOGI(TAG, "node table: %u rows, %u B in PSRAM (%u B/row)", (unsigned)kMaxNodes,
+             (unsigned)contactsTableBytes(), (unsigned)sizeof(Contact));
+}
 
 // Caller holds the store lock (or is the single main-task reader before the radio task exists).
 void markContactsDirty(bool structural) {
     if (structural) g_contacts_dirty_struct = true;
     else g_contacts_dirty_soft = true;
+    g_archive_dirty = true;   // anything that changes the table changes the archive too
 }
 
 // S515/EST-461: an ack clears `fresh` on one row. It rides the same writer, with its own floor: it must not
 // wait the 10-minute soft floor (the dot would come back after a restart) and it must not write per key press.
 void markContactsAck(bool leaving_page) {
     g_contacts_dirty_ack = true;
-    if (leaving_page) g_contacts_ack_force = true;
+    g_archive_dirty      = true;
+    if (leaving_page) {
+        g_contacts_ack_force = true;
+        g_archive_force      = true;   // "on leaving Nodes": the archive is written now, past the 30 s floor
+    }
 }
 
 // Step 5 / S503 — the id each channel's LOG FILE has reached, and the last seen point we appended. Both are per
@@ -465,6 +539,8 @@ void logNvsStats(const char* when) {
 // S513/EST-437: the contact table's one NVS blob. Read at boot before the radio task exists; a wrong blob is
 // ignored whole (decode writes into a scratch table), so a damaged namespace cannot half-fill the Nodes list.
 size_t restoreContacts() {
+    initNodeTable();   // the blob and the table must exist even if begin() has not run yet
+    g_nvs_blob_version = 0;
     logNvsStats("before the contact blob (boot)");
     nvs_handle_t h;
     if (nvs_open(kContactsNvsNamespace, NVS_READONLY, &h) != ESP_OK) {
@@ -491,6 +567,7 @@ size_t restoreContacts() {
                  (unsigned)len);
         return 0;
     }
+    g_nvs_blob_version = g_contact_blob[0];   // the migration reads this: v1-v3 rows were all radio nodes
 
     // Decode straight into the live table: every check in contactsDecode is BEFORE its first write, so a wrong
     // blob leaves the (still empty) table alone, and the boot stack does not carry a second 2.7 KB ContactStore.
@@ -519,78 +596,337 @@ size_t restoreContacts() {
     return g_contacts.count;
 }
 
-// S513/EST-437: the MAIN task's write. The radio task only raises a flag; the encode and the NVS write are here.
+// S515/EST-464: finish a file before the rename makes it current. FATFS has no fsync(), but a 30 s floor and a
+// temp file mean a power cut loses at most this one write, never the old file.
+// S515 (Claude, review): FatFs f_rename REFUSES an existing target (ff.c f_rename: FR_EXIST when the new name is
+// in use; vfs_fat_rename passes that straight through), unlike POSIX. So every write after the first would have
+// failed and the node files would never have changed again. The old file is removed between the finished temp
+// file and the rename; a power cut in that gap leaves only the temp file, and readNodeFileOrTemp() loads it.
+bool writeFileAtomic(const char* path, const char* tmp, const uint8_t* data, size_t len) {
+    FILE* f = fopen(tmp, "wb");
+    if (f == nullptr) {
+        ESP_LOGW(TAG, "node storage: cannot open %s", tmp);
+        return false;
+    }
+    const size_t wrote = fwrite(data, 1, len, f);
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+    if (wrote != len) {
+        ESP_LOGW(TAG, "node storage: short write to %s (%u of %u B)", tmp, (unsigned)wrote, (unsigned)len);
+        remove(tmp);
+        return false;
+    }
+    struct stat st;
+    if (stat(path, &st) == 0 && remove(path) != 0) {
+        ESP_LOGW(TAG, "node storage: cannot remove the old %s (errno %d)", path, errno);
+        remove(tmp);
+        return false;
+    }
+    if (rename(tmp, path) != 0) {
+        ESP_LOGW(TAG, "node storage: rename %s -> %s failed (errno %d)", tmp, path, errno);
+        remove(tmp);
+        return false;
+    }
+    return true;
+}
+
+// Read a whole file into the PSRAM buffer. False when it is absent (not an error) or larger than the format allows.
+bool readNodeFile(const char* path, size_t* out_len) {
+    *out_len = 0;
+    struct stat st;
+    if (stat(path, &st) != 0) return false;
+    if (st.st_size <= 0 || (size_t)st.st_size > kNodeFileMaxBytes) {
+        ESP_LOGW(TAG, "node storage: %s has a bad size (%ld B)", path, (long)st.st_size);
+        return false;
+    }
+    FILE* f = fopen(path, "rb");
+    if (f == nullptr) return false;
+    const size_t got = fread(g_node_file_buf, 1, (size_t)st.st_size, f);
+    fclose(f);
+    if (got != (size_t)st.st_size) {
+        ESP_LOGW(TAG, "node storage: short read from %s (%u of %ld B)", path, (unsigned)got, (long)st.st_size);
+        return false;
+    }
+    *out_len = got;
+    return true;
+}
+
+// S515 (Claude, review): the file, or, when it is absent, the temp file a power cut between writeFileAtomic()'s
+// remove and its rename left behind (the decoder's CRC still decides whether those bytes are used). The temp file
+// is then renamed into place so the next boot finds the real name again.
+bool readNodeFileOrTemp(const char* path, const char* tmp, size_t* out_len) {
+    if (readNodeFile(path, out_len)) return true;
+    struct stat st;
+    if (stat(path, &st) == 0) return false;     // the file is there but unreadable: not a recovery case
+    if (!readNodeFile(tmp, out_len)) return false;
+    ESP_LOGW(TAG, "node storage: %s missing, loading %s (an interrupted write)", path, tmp);
+    if (rename(tmp, path) != 0) ESP_LOGW(TAG, "node storage: rename %s -> %s failed (errno %d)", tmp, path, errno);
+    return true;
+}
+
+// S515/EST-464: /int is the launcher's locfd partition, mounted with the launcher's own config (main/main.c:
+// 481-490): wear levelling, format_if_mount_failed FALSE (NEVER format it: the launcher's app list lives here),
+// 10 open files, one WL sector per allocation unit, one FAT. Our folder is /int/om-lite, never /int/apps.
+bool mountInt() {
+    esp_vfs_fat_mount_config_t cfg = {
+        .format_if_mount_failed   = false,
+        .max_files                = 10,
+        .allocation_unit_size     = CONFIG_WL_SECTOR_SIZE,
+        .disk_status_check_enable = false,
+        .use_one_fat              = false,
+    };
+    const esp_err_t r = esp_vfs_fat_spiflash_mount_rw_wl(kIntMountPoint, "locfd", &cfg, &g_int_wl);
+    if (r != ESP_OK) {
+        g_int_wl      = WL_INVALID_HANDLE;
+        g_int_mounted = false;
+        ESP_LOGW(TAG, "/int not mounted (%s): radio list stays on the NVS fallback (cap %u)",
+                 esp_err_to_name(r), (unsigned)kNodeNvsRadioCap);
+        return false;
+    }
+    g_int_mounted = true;
+    struct stat st;
+    if (mkdir(kIntRadioDir, 0777) != 0 && stat(kIntRadioDir, &st) != 0) {
+        ESP_LOGW(TAG, "/int mounted but %s cannot be created", kIntRadioDir);
+    }
+    uint64_t total = 0, freeb = 0;
+    if (esp_vfs_fat_info(kIntMountPoint, &total, &freeb) == ESP_OK) {
+        ESP_LOGI(TAG, "/int mounted (free %u KB)", (unsigned)(freeb / 1024));
+    } else {
+        ESP_LOGI(TAG, "/int mounted (free unknown)");
+    }
+    return true;
+}
+
+void unmountInt() {
+    if (!g_int_mounted) return;
+    esp_vfs_fat_spiflash_unmount_rw_wl(kIntMountPoint, g_int_wl);
+    g_int_wl      = WL_INVALID_HANDLE;
+    g_int_mounted = false;
+    ESP_LOGI(TAG, "/int unmounted for the launcher");
+}
+
+// Boot: load radio.bin (or the NVS fallback + one-time migration), then merge the SD archive. Returns the
+// number of rows after the merge. Called before the radio task and before restoreDmHistory().
+size_t nodeStorageBegin(bool sd_mounted) {
+    initNodeTable();
+    g_sd_ready = sd_mounted;
+    mountInt();
+
+    bool radio_loaded = false;
+    if (g_int_mounted) {
+        size_t len = 0;
+        if (readNodeFileOrTemp(kRadioFilePath, kRadioTempPath, &len)) {
+            ContactStore radio;   // its rows live in PSRAM; only this small object is on the stack
+            const NodeFileResult r = nodeFileDecode(g_node_file_buf, len, radio);
+            if (r == NodeFileResult::Ok) {
+                g_contacts = radio;
+                const size_t marked = markAllInRadio(g_contacts);
+                // The bytes we just read are the bytes the writer would produce, so the first archive-only advert
+                // does not cause a needless rewrite of internal flash.
+                g_radio_signature      = nodeFileCrc32(g_node_file_buf, len);
+                g_radio_have_signature = true;
+                ESP_LOGI(TAG, "radio: %u nodes from %s", (unsigned)marked, kRadioFilePath);
+                radio_loaded = true;
+            } else {
+                ESP_LOGW(TAG, "radio: %s ignored (%s); trying the NVS fallback", kRadioFilePath,
+                         nodeFileResultText(r));
+            }
+        }
+    }
+    if (!radio_loaded) {
+        restoreContacts();   // the fallback (or the migration source); logs its own lines and the NVS stats
+        if (g_int_mounted) {
+            // One-time migration: no radio.bin yet, so the NVS rows become the radio list. The NVS blob itself is
+            // left UNTOUCHED (a fallback; never erased), exactly as EST-463 asks.
+            const size_t n = migrateNvsToRadio(g_contacts, g_nvs_blob_version);
+            // Write the file even when it is empty: a fresh device then has a valid radio.bin, and a corrupt one
+            // is REPLACED instead of being retried and rejected on every boot. The NVS blob is not touched.
+            const size_t bytes = nodeFileEncode(g_contacts, true, kMaxRadio, g_node_file_buf, kNodeFileMaxBytes);
+            if (bytes > 0 && writeFileAtomic(kRadioFilePath, kRadioTempPath, g_node_file_buf, bytes)) {
+                g_radio_signature      = nodeFileCrc32(g_node_file_buf, bytes);
+                g_radio_have_signature = true;
+                if (n > 0) ESP_LOGI(TAG, "migrated %u nodes from NVS", (unsigned)n);
+                else       ESP_LOGI(TAG, "radio: 0 nodes from %s (empty file written)", kRadioFilePath);
+            } else {
+                ESP_LOGW(TAG, "migration: could not write %s", kRadioFilePath);
+            }
+        } else {
+            // No /int: the NVS blob is the store, so the rows it holds keep their radio mark. A v1-v3 blob had no
+            // mark and every row in it WAS a radio node.
+            migrateNvsToRadio(g_contacts, g_nvs_blob_version);
+        }
+    }
+
+    if (g_sd_ready) {
+        size_t len = 0;
+        if (readNodeFileOrTemp(kArchiveFilePath, kArchiveTempPath, &len)) {
+            ContactStore archive;
+            const NodeFileResult r = nodeFileDecode(g_node_file_buf, len, archive);
+            if (r == NodeFileResult::Ok) {
+                const MergeResult m = mergeArchive(g_contacts, archive);
+                ESP_LOGI(TAG, "archive: %u nodes from %s", (unsigned)m.archive_rows, kArchiveFilePath);
+                if (m.added + m.updated != m.archive_rows || m.dropped > 0) {
+                    ESP_LOGW(TAG, "archive merge: %u added, %u updated, %u dropped",
+                             (unsigned)m.added, (unsigned)m.updated, (unsigned)m.dropped);
+                }
+            } else {
+                ESP_LOGW(TAG, "archive: %s ignored (%s)", kArchiveFilePath, nodeFileResultText(r));
+            }
+        } else {
+            ESP_LOGI(TAG, "archive: 0 nodes from %s (no file yet)", kArchiveFilePath);
+        }
+    } else {
+        ESP_LOGW(TAG, "archive: no SD card; nodes heard this boot stay in RAM only");
+    }
+    ESP_LOGI(TAG, "node table: %u rows in PSRAM (%u B), %u in the radio",
+             (unsigned)g_contacts.count, (unsigned)contactsTableBytes(), (unsigned)radioCount(g_contacts));
+    if (radio_loaded) logNvsStats("after the node files (boot)");   // restoreContacts() logged its own pair
+    return g_contacts.count;
+}
+
+// S513/EST-437 + S515/EST-464: the MAIN task's writer. The radio task only raises a flag. The radio list goes to
+// /int/om-lite/radio.bin (or, with no /int, to the NVS blob capped at 32); the archive goes to the SD card at most
+// once per 30 s (+ on leaving Nodes and on Esc). Both encode under the store lock, then write outside it.
 void contactsPersistTick() {
     if (g_store_mutex == nullptr) return;   // begin() has not run yet
     const uint32_t now = monotonicMs();
 
-    bool     structural = false;
-    bool     soft       = false;
-    bool     ack        = false;
-    bool     force      = false;
-    size_t   bytes      = 0;
-    uint32_t count      = 0;
+    bool   structural = false, soft = false, ack = false, force = false;
+    size_t radio_bytes = 0, radio_rows = 0;
+    uint32_t radio_sig = 0;
     {
         StoreLock l;
         structural = g_contacts_dirty_struct;
         soft       = g_contacts_dirty_soft;
         ack        = g_contacts_dirty_ack;
         force      = g_contacts_ack_force;
-        if (!structural && !soft && !ack) return;
-        // A soft-only change waits for the 10-minute floor; a structural one goes on this pass; an ack waits 5 s
-        // (or goes at once when the page was left). The failure retry is its own 10 s clock, so a broken NVS does
-        // not turn into a write storm from the UI task.
-        if (!structural && !force) {
-            uint32_t floor_ms = 0;
-            if (soft) floor_ms = kContactsSoftWriteMs;
-            if (ack && (floor_ms == 0 || kContactsAckWriteMs < floor_ms)) floor_ms = kContactsAckWriteMs;
-            if (floor_ms != 0 && g_contacts_last_write_ms != 0 &&
-                (uint32_t)(now - g_contacts_last_write_ms) < floor_ms) {
-                return;
+        if (structural || soft || ack) {
+            // A soft-only change waits for the 10-minute floor; a structural one goes on this pass; an ack waits
+            // 5 s (or at once when the page was left). The failure retry is its own 10 s clock.
+            bool due = structural || force;
+            if (!due) {
+                uint32_t floor_ms = 0;
+                if (soft) floor_ms = kContactsSoftWriteMs;
+                if (ack && (floor_ms == 0 || kContactsAckWriteMs < floor_ms)) floor_ms = kContactsAckWriteMs;
+                due = floor_ms == 0 || g_contacts_last_write_ms == 0 ||
+                      (uint32_t)(now - g_contacts_last_write_ms) >= floor_ms;
+            }
+            if (due && !(g_contacts_write_failed && g_contacts_last_attempt_ms != 0 &&
+                         (uint32_t)(now - g_contacts_last_attempt_ms) < kContactsRetryMs)) {
+                radio_rows = radioCount(g_contacts);
+                if (g_int_mounted) {
+                    radio_bytes = nodeFileEncode(g_contacts, true, kMaxRadio, g_node_file_buf, kNodeFileMaxBytes);
+                    if (radio_bytes > 0) radio_sig = nodeFileCrc32(g_node_file_buf, radio_bytes);
+                } else {
+                    radio_bytes = contactsEncodeRadio(g_contacts, g_contact_blob, kContactBlobMaxBytes,
+                                                      kNodeNvsRadioCap);
+                    if (radio_bytes > 0) radio_sig = nodeFileCrc32(g_contact_blob, radio_bytes);
+                    if (radio_rows > kNodeNvsRadioCap) {
+                        ESP_LOGW(TAG, "radio list over the NVS fallback cap (%u radio, %u stored)",
+                                 (unsigned)radio_rows, (unsigned)kNodeNvsRadioCap);
+                    }
+                }
+                // Cleared BEFORE the lock is released: a mutation that lands during the write sets a flag again.
+                g_contacts_dirty_struct = false;
+                g_contacts_dirty_soft   = false;
+                g_contacts_dirty_ack    = false;
+                g_contacts_ack_force    = false;
             }
         }
-        if (g_contacts_write_failed && g_contacts_last_attempt_ms != 0 &&
-            (uint32_t)(now - g_contacts_last_attempt_ms) < kContactsRetryMs) {
-            return;
-        }
-        bytes = contactsEncode(g_contacts, g_contact_blob, sizeof(g_contact_blob));
-        if (bytes == 0) {
-            // The table is over kMaxContacts or the buffer is wrong; drop the flags rather than retry for ever.
-            ESP_LOGE(TAG, "contacts: encode failed (%u rows), not written", (unsigned)g_contacts.count);
-            g_contacts_dirty_struct = false;
-            g_contacts_dirty_soft   = false;
-            return;
-        }
-        count = (uint32_t)g_contacts.count;
-        // Cleared BEFORE the lock is released: a mutation that lands while NVS is written sets a flag again.
-        g_contacts_dirty_struct = false;
-        g_contacts_dirty_soft   = false;
-        g_contacts_dirty_ack    = false;
-        g_contacts_ack_force    = false;
     }
 
-    nvs_handle_t h;
-    esp_err_t    r = nvs_open(kContactsNvsNamespace, NVS_READWRITE, &h);
-    if (r == ESP_OK) {
-        r = nvs_set_blob(h, kContactsNvsKey, g_contact_blob, bytes);
-        if (r == ESP_OK) r = nvs_commit(h);
-        nvs_close(h);
+    if (radio_bytes > 0 && (!g_radio_have_signature || radio_sig != g_radio_signature)) {
+        bool ok = false;
+        if (g_int_mounted) {
+            ok = writeFileAtomic(kRadioFilePath, kRadioTempPath, g_node_file_buf, radio_bytes);
+            if (ok) ESP_LOGI(TAG, "radio: %u written to %s (%u B)", (unsigned)radio_rows, kRadioFilePath,
+                             (unsigned)radio_bytes);
+        } else {
+            nvs_handle_t h;
+            esp_err_t    r = nvs_open(kContactsNvsNamespace, NVS_READWRITE, &h);
+            if (r == ESP_OK) {
+                r = nvs_set_blob(h, kContactsNvsKey, g_contact_blob, radio_bytes);
+                if (r == ESP_OK) r = nvs_commit(h);
+                nvs_close(h);
+            }
+            ok = r == ESP_OK;
+            if (ok) ESP_LOGI(TAG, "radio: %u stored to the NVS fallback (%u B)", (unsigned)radio_rows,
+                             (unsigned)radio_bytes);
+        }
+        g_contacts_last_attempt_ms = now;
+        if (ok) {
+            g_contacts_last_write_ms = now;
+            g_contacts_write_failed  = false;
+            g_radio_signature        = radio_sig;
+            g_radio_have_signature   = true;
+            if (!g_int_mounted) logNvsStats("after the contact blob (write)");
+        } else {
+            g_contacts_write_failed = true;
+            ESP_LOGE(TAG, "radio: write failed; retrying in %u s", (unsigned)(kContactsRetryMs / 1000));
+            StoreLock l;
+            if (structural) g_contacts_dirty_struct = true;
+            else g_contacts_dirty_soft = true;
+            if (ack) g_contacts_dirty_ack = true;
+        }
     }
-    g_contacts_last_attempt_ms = now;
-    if (r == ESP_OK) {
-        g_contacts_last_write_ms = now;
-        g_contacts_write_failed  = false;
-        ESP_LOGI(TAG, "contacts: %u stored to NVS (%u B)", (unsigned)count, (unsigned)bytes);
-        logNvsStats("after the contact blob (write)");
-    } else {
-        g_contacts_write_failed = true;
-        ESP_LOGE(TAG, "contacts: NVS write failed (%s); retrying in %u s", esp_err_to_name(r),
-                 (unsigned)(kContactsRetryMs / 1000));
+
+    // ---- the SD archive: all nodes, at most once per 30 s, plus leaving Nodes / Esc ---------------------------
+    if (!g_sd_ready) return;
+    bool archive_dirty = false, archive_force = false;
+    {
         StoreLock l;
-        if (structural) g_contacts_dirty_struct = true;
-        else g_contacts_dirty_soft = true;
-        if (ack) g_contacts_dirty_ack = true;   // an ack is never lost to a failed write either
+        archive_dirty = g_archive_dirty;
+        archive_force = g_archive_force;
+        g_archive_force = false;
     }
+    if (!archive_dirty && !archive_force) return;
+    if (!archive_force && g_archive_last_write_ms != 0 &&
+        (uint32_t)(now - g_archive_last_write_ms) < kArchiveWriteMs) {
+        g_archive_force = archive_force;
+        return;
+    }
+    size_t archive_bytes = 0, archive_rows = 0;
+    {
+        StoreLock l;
+        archive_rows  = g_contacts.count;
+        archive_bytes = nodeFileEncode(g_contacts, false, 0, g_node_file_buf, kNodeFileMaxBytes);
+        if (archive_bytes > 0) g_archive_dirty = false;
+    }
+    if (archive_bytes == 0) {
+        ESP_LOGE(TAG, "archive: encode failed (%u rows), not written", (unsigned)archive_rows);
+        return;
+    }
+    // S515 (Claude, review): this runs on the MAIN task, so the time it takes is a UI pause; it is logged so the
+    // device shows it. A failure (e.g. the card pulled) also starts the 30 s floor: before, a failed write was
+    // retried on every loop pass (30-250 ms), each one re-encoding the whole table under the store lock.
+    const int64_t t0 = esp_timer_get_time();
+    const bool    ok = writeFileAtomic(kArchiveFilePath, kArchiveTempPath, g_node_file_buf, archive_bytes);
+    const unsigned ms = (unsigned)((esp_timer_get_time() - t0) / 1000);
+    g_archive_last_write_ms = now;
+    if (ok) {
+        g_archive_write_failed  = false;
+        ESP_LOGI(TAG, "archive: %u written to %s (%u B, %u ms)", (unsigned)archive_rows, kArchiveFilePath,
+                 (unsigned)archive_bytes, ms);
+    } else {
+        g_archive_write_failed = true;
+        StoreLock l;
+        g_archive_dirty = true;
+        ESP_LOGE(TAG, "archive: write failed after %u ms; next try in %u s", ms, (unsigned)(kArchiveWriteMs / 1000));
+    }
+}
+
+// S515/EST-464: Esc to the launcher. Flush both stores past their floors, then unmount /int so the launcher can
+// mount it again. Called before the "Back to the menu" frame, while the app still owns the partition.
+void nodeStorageShutdown() {
+    {
+        StoreLock l;
+        g_contacts_ack_force = true;
+        g_archive_force      = true;
+        g_archive_dirty      = true;
+    }
+    contactsPersistTick();
+    unmountInt();
 }
 
 // S514/EST-447: the NODES section's remove/clear. The table change is under the store lock; the NVS rewrite is
@@ -647,7 +983,10 @@ bool contactsAckFresh(size_t index) {
 void contactsAckLeave() {
     if (g_store_mutex == nullptr) return;
     StoreLock l;
-    if (!g_contacts_dirty_ack) return;   // nothing acked: no write, no flash wear
+    // S515/EST-464: leaving Nodes also flushes the SD archive past its 30 s floor, but only when something
+    // changed — an untouched list must not cost a card write every time the page is left.
+    if (g_archive_dirty) g_archive_force = true;
+    if (!g_contacts_dirty_ack) return;   // nothing acked: no radio write, no flash wear
     markContactsAck(true);
 }
 
@@ -717,7 +1056,21 @@ void loadNewNodeNotice() {
     ESP_LOGI(TAG, "new-node notice: %s (NVS mcset/newnode)", g_new_node_notice ? "on" : "off");
 }
 
+// S515/EST-464 (EST-463 item 2): "Add heard nodes to the radio" — Off / Clients / All, default Off, stored beside
+// the other node settings in NVS mcset/heardto. The Settings ROW is the next ticket; this is only the value.
+void loadHeardToRadio() {
+    g_heard_to_radio = kHeardToRadioDefault;
+    nvs_handle_t h;
+    if (nvs_open("mcset", NVS_READONLY, &h) != ESP_OK) return;
+    uint8_t v = 0;
+    const esp_err_t r = nvs_get_u8(h, "heardto", &v);
+    nvs_close(h);
+    if (r == ESP_OK) g_heard_to_radio = heardToRadioFromByte(v);
+    ESP_LOGI(TAG, "add heard nodes to the radio: %s (NVS mcset/heardto)", heardToRadioText(g_heard_to_radio));
+}
+
 void begin() {
+    initNodeTable();   // S515/EST-463: PSRAM first, before anything can read or restore the table
     if (g_store_mutex == nullptr) g_store_mutex = xSemaphoreCreateRecursiveMutex();
     if (g_tx_lock == nullptr) g_tx_lock = xSemaphoreCreateMutex();   // S513: the send queue, created once
     if (g_dm_lock == nullptr) g_dm_lock = xSemaphoreCreateMutex();   // S513/EST-439: the pending DM table
@@ -728,6 +1081,7 @@ void begin() {
     loadNodeName();          // EST-445: mcid/name, default "TNMT (SI)"
     loadAdvertInterval();    // EST-445: mcid/advint; default Off since S514 (Filip)
     loadNewNodeNotice();     // S514/EST-447: mcset/newnode, default On
+    loadHeardToRadio();      // S515/EST-464: mcset/heardto, default Off (Filip's rule)
     loadChannels();
     g_loaded = true;
     ESP_LOGI(TAG, "channels: %u loaded", (unsigned)g_set.count);
@@ -1064,8 +1418,16 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
             ESP_LOGW(TAG, "rx %u B PATH but this node has no identity yet, dropped", (unsigned)len);
             return;
         }
-        static uint8_t peer_pubs[kMaxContacts * meshcore::kPubKeyBytes];
-        const size_t   peer_count = snapshotContactPubs(peer_pubs, kMaxContacts);
+        // S515/EST-463: 64 KB of peer keys, so PSRAM once (the DM and PATH snapshots share the same buffer).
+        static uint8_t* peer_pubs = nullptr;
+        if (peer_pubs == nullptr) {
+            peer_pubs = static_cast<uint8_t*>(nodeTableAlloc((size_t)kMaxNodes * meshcore::kPubKeyBytes));
+            if (peer_pubs == nullptr) {
+                ESP_LOGE(TAG, "rx PATH: peer snapshot allocation failed, dropped");
+                return;
+            }
+        }
+        const size_t peer_count = snapshotContactPubs(peer_pubs, kMaxNodes);
         if (peer_count == 0) {
             ESP_LOGI(TAG, "rx %u B PATH but no contacts are known yet, dropped", (unsigned)len);
             return;
@@ -1121,15 +1483,24 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
         }
         // A snapshot of the contact table, because dmOpen walks it and two contacts may share pub_key[0]. The
         // arrays are static: the radio task is the only caller, and 32 contacts must not land on its stack.
-        static uint8_t peer_pubs[kMaxContacts * meshcore::kPubKeyBytes];
-        static char    peer_names[kMaxContacts][kNameBytes];
+        // S515/EST-463: 2,000 peers is ~112 KB, so this snapshot is PSRAM, not .bss (see initNodeTable()).
+        static uint8_t* peer_pubs  = nullptr;
+        static char*    peer_names = nullptr;
+        if (peer_pubs == nullptr) {
+            peer_pubs  = static_cast<uint8_t*>(nodeTableAlloc((size_t)kMaxNodes * meshcore::kPubKeyBytes));
+            peer_names = static_cast<char*>(nodeTableAlloc((size_t)kMaxNodes * kNameBytes));
+        }
+        if (peer_pubs == nullptr || peer_names == nullptr) {
+            ESP_LOGE(TAG, "rx TXT_MSG: peer snapshot allocation failed, dropped");
+            return;
+        }
         size_t         peer_count = 0;
         {
             StoreLock l;
             peer_count = g_contacts.count;
             for (size_t i = 0; i < peer_count; i++) {
                 memcpy(&peer_pubs[i * meshcore::kPubKeyBytes], g_contacts.c[i].pub, meshcore::kPubKeyBytes);
-                snprintf(peer_names[i], sizeof(peer_names[i]), "%s", g_contacts.c[i].name);
+                snprintf(&peer_names[i * kNameBytes], kNameBytes, "%s", g_contacts.c[i].name);
             }
         }
         if (peer_count == 0) {
@@ -1149,7 +1520,7 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
 
         const uint8_t* peer_pub = &peer_pubs[(size_t)dm.peer * meshcore::kPubKeyBytes];
         char           peer_name[kNameBytes];
-        snprintf(peer_name, sizeof(peer_name), "%s", peer_names[dm.peer]);
+        snprintf(peer_name, sizeof(peer_name), "%s", &peer_names[(size_t)dm.peer * kNameBytes]);
         if (peer_name[0] == '\0') {
             // A contact row with no name yet: the 8-hex prefix of its public key is a stable, honest label.
             snprintf(peer_name, sizeof(peer_name), "%02x%02x%02x%02x", peer_pub[0], peer_pub[1], peer_pub[2],
@@ -1279,12 +1650,16 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
                 old_type = g_contacts.c[before].type;
             }
             const uint32_t heard = om::time_source::epochNow();
+            // S515/EST-464 (the EST-463 blocker): a verified advert goes through the table's RULE, never straight to
+            // contactsUpsert. With the setting Off (the default) that means archive-only; nothing enters the radio
+            // automatically. The rule also keeps a hand-chosen radio node in the radio on a refresh.
             const int      idx =
-                contactsUpsert(g_contacts, pub, name, type, v.path_bytes, ts, heard, rssi_dbm, snr_db * 10,
-                               pos.has_position, pos.lat_e6, pos.lon_e6);
+                advertInArchive(g_contacts, g_heard_to_radio, pub, name, type, v.path_bytes, ts, heard, rssi_dbm,
+                                snr_db * 10, pos.has_position, pos.lat_e6, pos.lon_e6);
             if (idx >= 0) {
-                // Add / rename / route change is worth an immediate NVS write; a repeat advert that only moves
-                // last-heard and SNR waits for the 10-minute floor.
+                // Add / rename / route change is worth an immediate write; a repeat advert that only moves
+                // last-heard and SNR waits for the 10-minute floor. The radio file's signature check means an
+                // archive-only change writes no internal flash at all.
                 const bool structural = before < 0 || strcmp(old_name, g_contacts.c[idx].name) != 0 ||
                                         old_path != g_contacts.c[idx].path_len ||
                                         old_type != g_contacts.c[idx].type;

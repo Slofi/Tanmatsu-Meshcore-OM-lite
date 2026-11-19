@@ -61,6 +61,7 @@ idf_component_register(
         esp_driver_sdmmc
         sdmmc
         vfs
+        wear_levelling   # S515/EST-464: /int is the launcher's locfd partition mounted with wear levelling
         core
         ${extra_requires}
 )

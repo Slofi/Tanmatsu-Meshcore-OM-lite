@@ -143,10 +143,22 @@ size_t restoreDmHistory();
 // "contacts: N restored from NVS"; a wrong version/size is ignored with one warning line.
 size_t restoreContacts();
 
-// S513/EST-437: called by the MAIN task in its loop. Writes the contact blob when the radio task has marked it
-// dirty: an add/rename/route change on the next pass, last-heard/SNR at most once per 10 minutes. Never writes NVS
-// from the radio task; does nothing when there is nothing to write.
+// S515/EST-464 (EST-463 item 3): the boot order for the two node stores. Mounts /int exactly as the launcher does,
+// loads /int/om-lite/radio.bin (or the NVS fallback + one-time migration, NVS left untouched), then merges
+// /sdcard/om-lite/nodes.bin. `sd_mounted` is main.cpp's mountSd() answer. Call BEFORE the radio task and before
+// restoreDmHistory(); `restoreContacts()` is only called by this function at boot.
+size_t nodeStorageBegin(bool sd_mounted);
+
+// S513/EST-437 + S515/EST-464: called by the MAIN task in its loop. Writes the radio list when the radio task has
+// marked it dirty (add/rename/route on the next pass, last-heard/SNR at most once per 10 minutes, an ack 5 s) and
+// the SD archive at most once per 30 s (plus a forced write from contactsAckLeave()). The radio file is written
+// only when its bytes actually changed, so an archive-only node never causes internal-flash wear. With no /int,
+// the NVS blob is the fallback and carries only in_radio rows, capped at 32.
 void contactsPersistTick();
+
+// S515/EST-464: Esc to the launcher. Forces both stores out past their floors, then unmounts /int so the launcher
+// can mount locfd again. Call it before the "Back to the menu" frame.
+void nodeStorageShutdown();
 
 // ------------------------------------------------- S514/EST-447: the NODES section's two destructive actions
 // The MAIN task calls both. They take the store lock, change the RAM table through core/contact_admin.h and

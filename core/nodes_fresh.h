@@ -46,7 +46,7 @@ inline void nodesFrozenBegin(NodesFrozen& f, const int* live, int live_count) {
 // the picture changed and the page must repaint.
 inline bool nodesFrozenSync(NodesFrozen& f, const om::mc::ContactStore& s) {
     bool changed = false;
-    int  kept[om::mc::kMaxContacts];
+    // S515/EST-463: compact IN PLACE. The old second array was 2,000 ints on the caller's stack.
     int  n = 0;
     for (int i = 0; i < f.count; ++i) {
         const int ci = f.order[i];
@@ -54,22 +54,22 @@ inline bool nodesFrozenSync(NodesFrozen& f, const om::mc::ContactStore& s) {
             changed = true;   // the row is gone
             continue;
         }
-        kept[n++] = ci;
+        if (n != i) f.order[n] = ci;
+        n++;
     }
     // New rows are appended in store order, which is the order they were created in (the newest last).
     for (int ci = 0; ci < (int)s.count && n < (int)om::mc::kMaxContacts; ++ci) {
         bool have = false;
         for (int i = 0; i < n; ++i)
-            if (kept[i] == ci) {
+            if (f.order[i] == ci) {
                 have = true;
                 break;
             }
         if (!have) {
-            kept[n++] = ci;
-            changed   = true;
+            f.order[n++] = ci;
+            changed      = true;
         }
     }
-    for (int i = 0; i < n; ++i) f.order[i] = kept[i];
     f.count = n;
     return changed;
 }

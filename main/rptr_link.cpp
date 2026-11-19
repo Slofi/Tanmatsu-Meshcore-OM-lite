@@ -166,12 +166,15 @@ void mergeContacts() {
         uint8_t pub[meshcore::kPubKeyBytes];
         char    name[rptr::kNameMax + 1];
     };
-    static Row rows[om::mc::kMaxContacts];
+    // S515/EST-463: only REPEATERS are merged, and the radio may hold 300 of them (kMaxRadio). This used to be
+    // sized by the contact table, which is now 2,000 rows and would have cost ~130 KB of .bss for a list that
+    // can never be longer than the repeaters in the table.
+    static Row rows[om::mc::kMaxRadio];
     size_t n = 0;
     {
         mc::StoreLock l;
         mc::ContactStore& cs = mc::contacts();
-        for (size_t i = 0; i < cs.count && n < om::mc::kMaxContacts; ++i) {
+        for (size_t i = 0; i < cs.count && n < om::mc::kMaxRadio; ++i) {
             if (cs.c[i].type != 2) continue;   // ADV_TYPE_REPEATER only
             memcpy(rows[n].pub, cs.c[i].pub, meshcore::kPubKeyBytes);
             snprintf(rows[n].name, sizeof(rows[n].name), "%s", cs.c[i].name);

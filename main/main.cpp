@@ -214,6 +214,9 @@ static void leaveToLauncher() {
         screenLightsOn();
         ESP_LOGI(TAG, "[screen] on (launcher)");
     }
+    // S515/EST-464: flush radio.bin and the SD archive past their floors, then unmount /int — the launcher mounts
+    // locfd again on the other side of the restart, and it must not find a second writer or a busy mount.
+    om::mc::nodeStorageShutdown();
 #if CONFIG_BOOTLOADER_RESERVE_RTC_MEM
     if (rtc_retain_mem_t* mem = bootloader_common_get_rtc_retain_mem()) {
         memset(mem->custom, 0, sizeof(mem->custom));
@@ -379,8 +382,9 @@ const char* gsetContacts(tm::Core&) {
         om::mc::StoreLock l;
         contact_count = om::mc::contacts().count;
     }
+    // S515/EST-463: "nodes / table", and the radio's own cap beside it (the Settings row is EST-464).
     snprintf(gset_contacts, sizeof(gset_contacts), "%u / %u", (unsigned)contact_count,
-             (unsigned)om::mc::kMaxContacts);
+             (unsigned)om::mc::kMaxNodes);
     return gset_contacts;
 }
 const char* gsetVersion(tm::Core&) {
@@ -726,9 +730,18 @@ tm::SettingsSection  g_chat_sub_sections[1];
 bool                g_nodes_list        = false;
 int                 g_nodes_sub_focus   = -1;
 int                 g_nodes_sub_scroll  = 0;
-char                g_nodes_names[om::mc::kMaxContacts][om::mc::kNameBytes];
-char                g_nodes_meta[om::mc::kMaxContacts][32];
-tm::SettingRow      g_nodes_sub_rows[om::mc::kMaxContacts];
+// S515/EST-463: the table is 2,000 rows now, and these three are the Settings › NODES sub-list — a page-sized
+// list, not the node table. Keeping them at kMaxContacts would have put ~250 KB of .bss in internal RAM for rows
+// nobody can reach; the real list is the Nodes page (EST-464 gives it the filter).
+constexpr size_t    kNodesSettingsRows = 64;
+char                g_nodes_names[kNodesSettingsRows][om::mc::kNameBytes];
+char                g_nodes_meta[kNodesSettingsRows][32];
+tm::SettingRow      g_nodes_sub_rows[kNodesSettingsRows];
+
+// S515/EST-463: the order buffers the Nodes page sorts into. File scope, never a task stack frame: 2,000 ints is
+// 8 KB, and the loop task has 16 KB. The store lock is held across each use.
+int                 g_nodes_order[om::mc::kMaxNodes];
+int                 g_nodes_shown[om::mc::kMaxNodes];
 tm::SettingsSection g_nodes_sub_sections[1];
 int                 g_confirm_contact = -1;
 
@@ -849,14 +862,14 @@ int buildNodesSubRows() {
     int n = 0;
     om::mc::StoreLock l;
     om::mc::ContactStore& cs = om::mc::contacts();
-    int order[om::mc::kMaxContacts];
-    const int count = (int)om::mc::contactsOrder(cs, order, om::mc::kMaxContacts);
+    int* order = g_nodes_order;
+    const int count = (int)om::mc::contactsOrder(cs, order, om::mc::kMaxNodes);
     if (count == 0) {
         g_nodes_sub_rows[n++] = tm::SettingRow(tm::SettingKind::Info, 0, "No contacts yet");
         return n;
     }
     const uint32_t now = om::time_source::epochNow();
-    for (int i = 0; i < count && n < (int)om::mc::kMaxContacts; ++i) {
+    for (int i = 0; i < count && n < (int)kNodesSettingsRows; ++i) {
         const int idx = order[i];
         const om::mc::Contact& c = cs.c[idx];
         snprintf(g_nodes_names[n], sizeof(g_nodes_names[n]), "%s", c.name);
@@ -1228,7 +1241,9 @@ extern "C" void app_main(void) {
     // S513/EST-437: the contacts come back BEFORE the DM logs and before the radio task. That ordering matters:
     // the DM restore then finds its peer already in the table by its full key (instead of adding a prefix-only
     // row), and a DM from a node heard before the restart can be opened without waiting for its next advert.
-    om::mc::restoreContacts();
+    // S515/EST-464: the table now comes from the two node stores — radio.bin on /int (or the NVS fallback, with a
+    // one-time migration) first, then the SD archive merged in by key.
+    om::mc::nodeStorageBegin(g_sd_mounted);
     // S513/EST-434 item 4: restore the per-contact DM logs before the radio task exists, so nothing races it.
     om::mc::restoreDmHistory();
     // Step 6 slice 1: prove the pack path (index search, tile read, JPEG decode) with real tiles. central Slovenia,
@@ -1776,7 +1791,7 @@ extern "C" void app_main(void) {
             for (int i = 0; i < n; ++i) out[i] = nodes_frozen.order[i];
             return n;
         }
-        return (int)om::mc::contactsOrder(cs, out, om::mc::kMaxContacts);
+        return (int)om::mc::contactsOrder(cs, out, om::mc::kMaxNodes);
     };
 
     auto drawNodesPage = [&]() {
@@ -1784,8 +1799,8 @@ extern "C" void app_main(void) {
         nv.clock       = clockText();
         nv.battery_pct = view.battery_pct;
         nv.charging    = view.charging;
-        int order[om::mc::kMaxContacts];
-        int shown[om::mc::kMaxContacts];
+        int* order = g_nodes_order;
+        int* shown = g_nodes_shown;
         {
             om::mc::StoreLock l;
             nv.store       = &om::mc::contacts();
@@ -1843,8 +1858,8 @@ extern "C" void app_main(void) {
     // S514/EST-449: how many rows the current query keeps. The key handler needs the count for Down from
     // the bar (the first MATCH) and the list's clamp; it is the SAME filter the draw uses, not a second one.
     auto nodesShownCount = [&]() -> int {
-        int order[om::mc::kMaxContacts];
-        int shown[om::mc::kMaxContacts];
+        int* order = g_nodes_order;
+        int* shown = g_nodes_shown;
         om::mc::StoreLock l;
         const int total = nodesOrderForPage(order);   // S515/EST-461: the frozen order on the page
         return om::ui::nodeSearchFilter(&om::mc::contacts(), order, total, nodes_query, shown);
@@ -1854,15 +1869,15 @@ extern "C" void app_main(void) {
     // The rows and their order are core/node_menu.h (host-tested); these lambdas only perform what a chosen row
     // does, and every read of the contact table is under the store lock.
     auto nodesShownOrder = [&](int* shown) -> int {
-        int order[om::mc::kMaxContacts];
+        int* order = g_nodes_order;   // S515/EST-463: file scope, not 8 KB of the loop task's stack
         om::mc::StoreLock l;
         const int total = nodesOrderForPage(order);   // S515/EST-461: the frozen order on the page
         return om::ui::nodeSearchFilter(&om::mc::contacts(), order, total, nodes_query, shown);
     };
 
     auto nodesFocusedStoreIndex = [&]() -> int {
-        int       shown[om::mc::kMaxContacts];
-        const int n = nodesShownOrder(shown);
+        int*      shown = g_nodes_shown;
+        const int n     = nodesShownOrder(shown);
         if (nodes_focus < 0 || nodes_focus >= n) return -1;
         return shown[nodes_focus];
     };
@@ -1888,8 +1903,8 @@ extern "C" void app_main(void) {
         om::ui::nodeFavouriteNotice(note, sizeof(note), name, on);
         om::ui::noticeSet(note, 3000);
 
-        int       shown[om::mc::kMaxContacts];
-        const int n   = nodesShownOrder(shown);
+        int*      shown = g_nodes_shown;
+        const int n     = nodesShownOrder(shown);
         const int pos = om::ui::nodeMenuFocusFollow(shown, n, store_index);
         if (pos >= 0) nodes_focus = pos;
         ESP_LOGI(TAG, "nodes: favourite %s -> %s", name, on ? "on" : "off");
@@ -3498,11 +3513,11 @@ extern "C" void app_main(void) {
                 if (pnow == tm::Page::Nodes) {
                     // Entering: RE-SORT (a fresh snapshot of the live order) and start the dwell. Entry alone
                     // acks nothing — the top row is acked after 1.5 s of rest, or by the first key press.
-                    int live[om::mc::kMaxContacts];
-                    int n;
+                    int* live = g_nodes_order;
+                    int  n;
                     {
                         om::mc::StoreLock l;
-                        n = (int)om::mc::contactsOrder(om::mc::contacts(), live, om::mc::kMaxContacts);
+                        n = (int)om::mc::contactsOrder(om::mc::contacts(), live, om::mc::kMaxNodes);
                     }
                     om::ui::nodesFrozenBegin(nodes_frozen, live, n);
                     om::ui::nodesAckEnter(nodes_ack, nodes_focus, now_ms);
@@ -3519,8 +3534,8 @@ extern "C" void app_main(void) {
                 } else {
                     const int row = om::ui::nodesAckTick(nodes_ack, now_ms);
                     if (row >= 0) {
-                        int       shown[om::mc::kMaxContacts];
-                        const int n  = nodesShownOrder(shown);
+                        int*      shown = g_nodes_shown;
+                        const int n     = nodesShownOrder(shown);
                         const int si = (row >= 0 && row < n) ? shown[row] : -1;
                         if (si >= 0 && om::mc::contactsAckFresh((size_t)si)) dirty = true;
                     }

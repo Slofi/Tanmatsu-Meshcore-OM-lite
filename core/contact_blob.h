@@ -30,14 +30,20 @@
 namespace om {
 namespace mc {
 
-constexpr uint8_t kContactBlobVersion     = 3;   // 3 = fresh + position; 2 = out_path; 1 still loads
-constexpr size_t  kContactBlobHeaderBytes = 4;
+// S515/EST-463: version 4. The count had to widen — a u8 cannot say 2,000 — and the record grew one byte for
+// `in_radio`. The header carries a u16 count from version 4 on; versions 1-3 are read with their old u8 count and
+// their old header width, so a blob already on a device still loads.
+constexpr uint8_t kContactBlobVersion     = 4;   // 4 = u16 count + in_radio; 3 = fresh + position; 2 = route; 1 loads
+constexpr size_t  kContactBlobHeaderBytes = 6;   // version u8 | 0 u8 | count u16 | record_size u16 (version 4+)
+constexpr size_t  kContactBlobHeaderBytesLegacy = 4;   // version u8 | count u8 | record_size u16 (versions 1-3)
 constexpr size_t  kContactBlobRouteBytes  = meshcore::kMaxPath;   // one out_path_len byte + the path
 
 // 32 + 24 + 1 + 1 + 4 + 4 + 2 + 2 + 1 + 4 + 4 + 4 + 1 + 64 = 148, the width of a version-1/2 record.
 constexpr size_t kContactBlobRecordBytesV2 = 148;
-// …plus fresh u8 + has_position u8 + lat_e6 i32 + lon_e6 i32 = 158 for a version-3 record.
-constexpr size_t kContactBlobRecordBytes = kContactBlobRecordBytesV2 + 10;
+// …plus fresh u8 + has_position u8 + lat_e6 i32 + lon_e6 i32 = 158 for a version-3 record…
+constexpr size_t kContactBlobRecordBytesV3 = kContactBlobRecordBytesV2 + 10;
+// …plus in_radio u8 = 159 for a version-4 record (S515/EST-463).
+constexpr size_t kContactBlobRecordBytes = kContactBlobRecordBytesV3 + 1;
 constexpr size_t kContactBlobMaxBytes    = kContactBlobHeaderBytes + kMaxContacts * kContactBlobRecordBytes;
 
 enum class ContactDecode : uint8_t {
@@ -56,6 +62,18 @@ const char* contactDecodeText(ContactDecode r);
 // Encode `s` into `out`. Returns the number of bytes written, or 0 when `out` is null or `cap` is too small.
 // The size depends on s.count, so a caller can ask with cap 0 to learn the requirement first.
 size_t contactsEncode(const ContactStore& s, uint8_t* out, size_t cap);
+
+// S515/EST-464 (EST-463 item 3): the NVS blob is now only the FALLBACK used when /int does not mount. It must
+// never carry an archive-only node (Filip: nothing enters the radio automatically), and the old 32-row NVS
+// budget still applies to that partition. So this encoder writes ONLY rows with in_radio, at most `max_rows`
+// (32 on the device); returns 0 when out is null, the table is null, or cap is too small. The caller learns
+// whether it had to drop radio rows by comparing the count it wrote with radioCount().
+size_t contactsEncodeRadio(const ContactStore& s, uint8_t* out, size_t cap, size_t max_rows);
+
+// S515/EST-464: one version-4 record, for the /int and SD node files, which share this exact record layout.
+// `out` must have kContactBlobRecordBytes room; `contactRecordDecode` refuses any other stride.
+void contactEncodeRecord(const Contact& c, uint8_t* out);
+bool contactDecodeRecord(const uint8_t* in, size_t stride, Contact& out);
 
 // Decode a blob into `out`. `out` is left UNTOUCHED unless the answer is Ok (or Empty, which clears it): a
 // wrong blob must never half-replace a table that is already in RAM.

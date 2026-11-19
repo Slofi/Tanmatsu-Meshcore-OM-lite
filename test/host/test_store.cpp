@@ -88,13 +88,18 @@ void test_contact_upsert_by_key() {
 void test_contact_store_limits() {
     om::mc::ContactStore s;
     uint8_t             pub[32];
+    // S515/EST-463: the table is 2,000 rows now, so a one-byte seed would collide at 256. Spread the index over
+    // the first two bytes instead (everything below stays byte-sized and unaffected).
     for (size_t i = 0; i < om::mc::kMaxContacts; i++) {
         pubOf(pub, (uint8_t)i);
+        pub[1] = (uint8_t)(i >> 8);
         CHECK_EQ(om::mc::contactsUpsert(s, pub, "node", 1, 0, (uint32_t)i, (uint32_t)i, 0, 0), (long)i);
     }
     CHECK_EQ(s.count, om::mc::kMaxContacts);
     // Full: a NEW node is refused (and nothing is evicted), an EXISTING one still updates.
     pubOf(pub, 0xEE);
+    pub[1] = 0x77;   // a key that is NOT one of the 2,000 (a one-byte seed would match row 238)
+    pub[2] = 0xAA;
     CHECK_EQ(om::mc::contactsUpsert(s, pub, "late", 1, 0, 9, 9, 0, 0), -1);
     CHECK_EQ(s.count, om::mc::kMaxContacts);
     pubOf(pub, 3);
@@ -121,7 +126,7 @@ void test_contact_order_and_counts() {
     om::mc::contactsUpsert(s, pub, "fav-old", 2, 0, 0, 50, 0, 0);
     s.c[2].favourite = true;
 
-    int    order[om::mc::kMaxContacts];
+    static int order[om::mc::kMaxContacts];   // 2,000 ints: never a task stack frame (S515/EST-463)
     size_t n = om::mc::contactsOrder(s, order, om::mc::kMaxContacts);
     CHECK_EQ(n, 3);
     // Favourites first even when older, then newest heard.

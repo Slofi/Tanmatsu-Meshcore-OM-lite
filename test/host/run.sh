@@ -41,11 +41,14 @@ NODEOPSASAN="$(mktemp /tmp/tm-node-ops-asan.XXXXXX)"
 EMOJI="$(mktemp /tmp/tm-emoji.XXXXXX)"
 NODESFRESH="$(mktemp /tmp/tm-nodes-fresh.XXXXXX)"
 NODESFRESHASAN="$(mktemp /tmp/tm-nodes-fresh-asan.XXXXXX)"
+NODETABLE="$(mktemp /tmp/tm-node-table.XXXXXX)"
+NODESTORE="$(mktemp /tmp/tm-node-store.XXXXXX)"
+NODESTOREASAN="$(mktemp /tmp/tm-node-store-asan.XXXXXX)"
 RPTRED="$(mktemp -d /tmp/tm-rptr-ed.XXXXXX)"
 CHANORACLE="$(mktemp -d /tmp/tm-chan-oracle.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -258,7 +261,7 @@ PYORACLE
 # device writes and reads this exact codec, so a lost field here is a contact that comes back subtly wrong.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
     test_contact_blob.cpp \
-    ../../core/contact_blob.cpp \
+    ../../core/contact_blob.cpp ../../core/mc_store.cpp \
     -o "$CONTACT"
 "$CONTACT"
 
@@ -418,3 +421,31 @@ ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$NODESFRESHASAN"
 # The subset blob must be exactly what tools/mkemoji_subset.py builds from the L2's table: a stale .bin (edited by
 # hand, or left behind after the L2's blob changed) fails here, not on the glass.
 python3 ../../tools/mkemoji_subset.py --check
+
+# S515/EST-463: ONE node table at 2,000 rows, the in_radio mark and Filip's two rules (nothing enters the radio
+# automatically; a full radio refuses). Also the order at 2,000 rows, with its time printed.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_node_table.cpp \
+    ../../core/mc_store.cpp ../../core/node_table.cpp \
+    -o "$NODETABLE"
+"$NODETABLE"
+
+# S515/EST-464 (EST-463 items 3 and 5): the /int radio.bin and SD nodes.bin codec (magic, version, record size,
+# u16 count, CRC-32), every refusal (bad magic/version/record size/count/size/CRC/truncated), the boot merge rules
+# (radio wins in_radio + route, newer heard_at wins last-heard, fresh from the archive), the one-time migration
+# from v2/v3/v4 NVS blobs, and the step-0 rule: the NVS fallback encoder writes ONLY in_radio rows, never more than
+# 32, and an all-archive table writes an EMPTY blob.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_node_store.cpp \
+    ../../core/mc_store.cpp ../../core/contact_blob.cpp ../../core/node_store.cpp ../../core/node_table.cpp \
+    -o "$NODESTORE"
+"$NODESTORE"
+
+# …and the codecs + merge + migration under ASan/UBSan: every length and offset in these files comes from flash
+# or the card, so a bad header must be a red test, not a device fault.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I ../../core \
+    test_node_store.cpp \
+    ../../core/mc_store.cpp ../../core/contact_blob.cpp ../../core/node_store.cpp ../../core/node_table.cpp \
+    -o "$NODESTOREASAN"
+ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$NODESTOREASAN"

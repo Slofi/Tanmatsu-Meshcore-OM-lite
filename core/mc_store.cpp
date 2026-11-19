@@ -2,6 +2,7 @@
 #include "mc_store.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 namespace om {
@@ -17,10 +18,83 @@ void copyTrunc(char* dst, size_t n, const char* src) {
     dst[i] = '\0';
 }
 
+// The default is the host's malloc: the device replaces both with the PSRAM pair in main/mc_link.cpp BEFORE the
+// long-lived store is constructed. Nothing else in core/ allocates (the counted allocator is the app's, this is
+// the core's one fixed table).
+ContactMemAlloc g_alloc = nullptr;
+ContactMemFree  g_free  = nullptr;
+
+void* defaultAlloc(size_t bytes) { return malloc(bytes); }
+
+// S515/EST-463: the merge sort's own scratch. A file-scope array, never a stack frame: 8 KB of .bss is cheap and
+// a 2,000-entry array on a task stack is not. contactsOrder() is not re-entrant, and it is called under the
+// store lock by the one page that draws the list.
+int g_order_scratch[kMaxNodes];
+
+// 0 = favourites, 1 = fresh, 2 = the rest — the three passes v58 ran, as one key.
+int orderGroup(const Contact& c) { return c.favourite ? 0 : (c.fresh ? 1 : 2); }
+
+bool orderComesFirst(const ContactStore& s, int a, int b) {
+    const int ga = orderGroup(s.c[a]);
+    const int gb = orderGroup(s.c[b]);
+    if (ga != gb) return ga < gb;
+    if (s.c[a].heard_at != s.c[b].heard_at) return s.c[a].heard_at > s.c[b].heard_at;
+    return a < b;   // stable: the store order breaks a tie, so two equal rows never swap
+}
+
 }  // namespace
 
+void setContactAlloc(ContactMemAlloc alloc_fn, ContactMemFree free_fn) {
+    g_alloc = alloc_fn;
+    g_free  = free_fn;
+}
+
+size_t contactsTableBytes() { return kMaxNodes * sizeof(Contact); }
+
+namespace {
+
+void releaseTable(Contact* p) {
+    if (p == nullptr) return;
+    if (g_free != nullptr) g_free(p);
+    else free(p);
+}
+
+}  // namespace
+
+ContactStore::ContactStore() {
+    ContactMemAlloc fn = g_alloc != nullptr ? g_alloc : &defaultAlloc;
+    c   = static_cast<Contact*>(fn(kMaxNodes * sizeof(Contact)));
+    cap = (c != nullptr) ? kMaxNodes : 0;
+    count = 0;
+}
+
+ContactStore::ContactStore(const ContactStore& o) : ContactStore() {
+    const size_t n = (o.count < cap) ? o.count : cap;
+    if (c != nullptr && o.c != nullptr) {
+        for (size_t i = 0; i < n; i++) c[i] = o.c[i];
+    }
+    count = n;
+}
+
+ContactStore& ContactStore::operator=(const ContactStore& o) {
+    if (this == &o) return *this;
+    const size_t n = (o.count < cap) ? o.count : cap;
+    if (c != nullptr && o.c != nullptr) {
+        for (size_t i = 0; i < n; i++) c[i] = o.c[i];
+    }
+    count = n;
+    return *this;
+}
+
+ContactStore::~ContactStore() {
+    releaseTable(c);
+    c     = nullptr;
+    cap   = 0;
+    count = 0;
+}
+
 int contactsFind(const ContactStore& s, const uint8_t pub[32]) {
-    if (pub == nullptr) return -1;
+    if (pub == nullptr || s.c == nullptr) return -1;
     for (size_t i = 0; i < s.count; i++) {
         if (memcmp(s.c[i].pub, pub, sizeof(s.c[i].pub)) == 0) return (int)i;
     }
@@ -30,17 +104,24 @@ int contactsFind(const ContactStore& s, const uint8_t pub[32]) {
 int contactsUpsert(ContactStore& s, const uint8_t pub[32], const char* name, uint8_t type, uint8_t path_len,
                    uint32_t remote_ts, uint32_t heard_at, int rssi, int snr_x10, bool has_position,
                    int32_t lat_e6, int32_t lon_e6) {
-    if (pub == nullptr) return -1;
+    if (pub == nullptr || s.c == nullptr) return -1;
     int idx = contactsFind(s, pub);
     if (idx < 0) {
-        if (s.count >= kMaxContacts) return -1;   // full: a new node is dropped, an OLD one is not overwritten
+        if (s.count >= s.cap) return -1;   // full: a new node is dropped, an OLD one is not overwritten
         idx = (int)s.count++;
+        s.c[idx] = Contact{};   // a reused slot must not inherit a stale route or flag
         memcpy(s.c[idx].pub, pub, sizeof(s.c[idx].pub));
+        s.c[idx].out_path_len = kOutPathUnknown;
+        s.c[idx].dm_log_next  = 1;
         s.c[idx].favourite = false;
         // S515/EST-461: NEW. This is the only place a row is born, and every caller of this function is the
         // verified-advert path (mc_link's kTypeAdvert branch), so "inserted here" IS "first verified advert of a
         // key that was not in the table". A restore from NVS/SD decodes the stored flag instead.
         s.c[idx].fresh = true;
+        // S515/EST-463: an advert NEVER promotes a node into the radio by itself (Filip: "nothing goes into the
+        // radio automatically"). node_table.h's advertInArchive() is the only code that may flip this on an
+        // insert, and only when the user set "Add heard nodes to the radio" to Clients/All.
+        s.c[idx].in_radio = false;
     }
     Contact& c = s.c[idx];
     // A name that arrives empty must not erase the one we already have (an app_data without the name mask).
@@ -61,28 +142,49 @@ int contactsUpsert(ContactStore& s, const uint8_t pub[32], const char* name, uin
 }
 
 size_t contactsOrder(const ContactStore& s, int* out, size_t max_out) {
-    if (out == nullptr) return 0;
-    size_t n = 0;
-    // Three passes, no sort call (S515/EST-461): favourites first, then the still-fresh rows newest first,
-    // then everything else by last heard. Each pass is descending heard_at, so equal rows cannot swap places
-    // by an unstable tie-break (O(n^2) on 32 rows is nothing).
-    for (int pass = 0; pass < 3 && n < max_out; pass++) {
-        bool taken[kMaxContacts] = {false};
-        for (;;) {
-            int best = -1;
-            for (size_t i = 0; i < s.count; i++) {
-                if (taken[i]) continue;
-                const bool in_group = (pass == 0) ? s.c[i].favourite
-                                     : (pass == 1) ? (!s.c[i].favourite && s.c[i].fresh)
-                                                   : (!s.c[i].favourite && !s.c[i].fresh);
-                if (!in_group) continue;
-                if (best < 0 || s.c[i].heard_at > s.c[best].heard_at) best = (int)i;
+    if (out == nullptr || s.c == nullptr) return 0;
+    const size_t n = s.count < s.cap ? s.count : s.cap;
+    if (n == 0) return 0;
+    // S515/EST-463: index the live rows, then one stable bottom-up merge sort (O(n log n)).
+    for (size_t i = 0; i < n; i++) g_order_scratch[i] = (int)i;
+    int* a = g_order_scratch;
+    // `out` is the second buffer when it is large enough, so the sort needs no third 8 KB array. A caller that
+    // wants fewer rows than the table holds still needs a globally sorted head, so it is sorted in the scratch
+    // and only the head is copied out.
+    const bool out_is_buffer = max_out >= n;
+    if (!out_is_buffer) {
+        for (size_t i = 1; i < n; i++) {
+            const int key = a[i];
+            size_t    j   = i;
+            while (j > 0 && orderComesFirst(s, key, a[j - 1])) {
+                a[j] = a[j - 1];
+                j--;
             }
-            if (best < 0) break;
-            taken[best] = true;
-            if (n < max_out) out[n++] = best;
-            else return n;
+            a[j] = key;
         }
+        const size_t take = max_out < n ? max_out : n;
+        for (size_t i = 0; i < take; i++) out[i] = a[i];
+        return take;
+    }
+    int* b = out;
+    for (size_t width = 1; width < n; width *= 2) {
+        for (size_t lo = 0; lo < n; lo += 2 * width) {
+            const size_t mid = (lo + width < n) ? lo + width : n;
+            const size_t hi  = (lo + 2 * width < n) ? lo + 2 * width : n;
+            size_t i = lo, j = mid, k = lo;
+            while (i < mid && j < hi) b[k++] = orderComesFirst(s, a[j], a[i]) ? a[j++] : a[i++];
+            while (i < mid) b[k++] = a[i++];
+            while (j < hi) b[k++] = a[j++];
+        }
+        int* t = a;
+        a      = b;
+        b      = t;
+    }
+    // `a` is the sorted run; copy it into the caller's buffer (it is `out` itself when the merge ended there).
+    if (a != out) {
+        const size_t take = max_out < n ? max_out : n;
+        for (size_t i = 0; i < take; i++) out[i] = a[i];
+        return take;
     }
     return n;
 }

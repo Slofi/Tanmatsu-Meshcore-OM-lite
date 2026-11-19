@@ -21,7 +21,15 @@
 namespace om {
 namespace mc {
 
-constexpr size_t kMaxContacts  = 32;
+// S515/EST-463: ONE node table, in PSRAM, holding everything the app has heard (the SD archive) and the nodes
+// chosen for the radio alike. The 32-row limit was never the chip's: it was one NVS blob (148-158 B a row) in a
+// 16 KB partition shared with channels, scopes, sounds and the name. The table now lives in PSRAM and only the
+// `in_radio` rows persist to internal flash (/int/om-lite/radio.bin), so the old cap moves to kMaxRadio.
+constexpr size_t kMaxNodes     = 2000;  // every node, archive + radio, one table
+constexpr size_t kMaxRadio     = 300;   // how many of them may be marked in_radio at once
+// Kept as an alias so every existing user of kMaxContacts keeps working at the new capacity; the name is what
+// the pages and the codecs were written against, and renaming 30 call sites would only add diff noise.
+constexpr size_t kMaxContacts  = kMaxNodes;
 constexpr size_t kMaxMessages  = 64;    // across all channels; the oldest goes when it is full
 constexpr size_t kNameBytes    = 24;    // "TNMT (SI)" plus a NUL, the same width mc_link uses
 constexpr size_t kTextBytes    = 160;   // one MeshCore group text, in bytes
@@ -62,27 +70,56 @@ struct Contact {
     // neighbour heard directly (BaseChatMesh.cpp:481-486 only tests against OUT_PATH_UNKNOWN).
     uint8_t  out_path_len = kOutPathUnknown;
     uint8_t  out_path[meshcore::kMaxPath] = {0};
+    // S515/EST-463: this node is one of the chosen ones, kept in internal flash (/int/om-lite/radio.bin) so it
+    // works without the SD card. EVERY other row is archive-only: it is fully usable (DMs decrypt, ping/trace
+    // work) but it is not in the radio's own store. Nothing ever sets this from the air — only the user's
+    // addToRadio() and the "Add heard nodes to the radio" setting (node_table.h) do, and the setting defaults Off.
+    bool     in_radio = false;
 };
 
 // MeshCore's ONE distinction: only OUT_PATH_UNKNOWN means "no route"; a zero-hop path is a direct neighbour.
 inline bool contactHasOutPath(const Contact& c) { return c.out_path_len != kOutPathUnknown; }
 
+// S515/EST-463: the table is ONE allocation, not an inline array — 2,000 rows are ~312 KB, which is PSRAM money,
+// not internal RAM. `c` stays a plain pointer so every existing `s.c[i]` keeps compiling; the store allocates in
+// its constructor through a hook the device installer points at PSRAM (main/mc_link.cpp) and the host tests
+// leave at malloc. There is deliberately NO destructor: a ContactStore may be copied by value (the tests do),
+// and two copies sharing one array must not free it twice. The device has exactly one long-lived store.
+using ContactMemAlloc = void* (*)(size_t bytes);
+using ContactMemFree  = void (*)(void* p);
+void setContactAlloc(ContactMemAlloc alloc_fn, ContactMemFree free_fn);
+
 struct ContactStore {
-    Contact c[kMaxContacts];
-    size_t  count = 0;
+    Contact* c    = nullptr;   // kMaxNodes rows, PSRAM on the device (see setContactAlloc)
+    size_t   count = 0;
+    size_t   cap   = 0;        // rows `c` can hold; 0 means the allocation failed (every caller must cope)
+
+    ContactStore();
+    // A copy owns its own allocation and copies only the live rows: the tests hand a small store back by value,
+    // and a shared pointer with a destructor would be a double free. 2,000 empty rows cost nothing to copy.
+    ContactStore(const ContactStore& o);
+    ContactStore& operator=(const ContactStore& o);
+    ~ContactStore();
 };
+
+// Bytes one full table costs, for the boot log ("the PSRAM bytes the table took").
+size_t contactsTableBytes();
 
 // Insert or refresh by public key. A repeat advert UPDATES the row (newer timestamp, new name/RSSI) rather
 // than adding a second one — that is the whole point of identifying by key. Returns the index, or -1 when the
-// store is full and the key is new.
+// store is full and the key is new. `s.cap == 0` (the PSRAM allocation failed) behaves like a full store.
 int contactsUpsert(ContactStore& s, const uint8_t pub[32], const char* name, uint8_t type, uint8_t path_len,
                    uint32_t remote_ts, uint32_t heard_at, int rssi, int snr_x10, bool has_position = false,
                    int32_t lat_e6 = 0, int32_t lon_e6 = 0);
 int contactsFind(const ContactStore& s, const uint8_t pub[32]);
 
 // The order the Nodes list shows (S515/EST-461): favourites first, then rows that are still FRESH (newest
-// heard first), then everything else by last heard. Writes indices, returns how many. A stable order matters
-// more than a clever sort: two rows must not swap places while the user is looking.
+// heard first), then everything else by last heard. Writes indices, returns how many.
+//
+// S515/EST-463: ONE stable bottom-up merge sort instead of the three O(n^2) passes. The comparator is the same
+// three groups plus heard_at descending, with the store index as the final tie-break, so a fill of 2,000 rows is
+// O(n log n) and the order is identical to v58's for every input (pinned by test_store's ordering checks and by
+// test_node_table's 2,000-row timing).
 size_t contactsOrder(const ContactStore& s, int* out, size_t max_out);
 
 // How many rows are still fresh (the Nodes sigil's dot). Same flag contactsOrder sorts by.

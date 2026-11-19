@@ -15,6 +15,170 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S515 (EST-463 part 2) · node storage: radio.bin on /int, nodes.bin on SD, boot merge
+
+> Written by **DeepSeek** for ticket **EST-464**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed, pushed or committed. Tree = the uncommitted EST-463 part 1 on **v58 `ffe0abf`**. **Version: 59**
+> (`core/settings.h`). `firmware/` read only, unchanged.
+>
+> **ITEMS DONE: 0 (the blocker), 3a, 3b, 3c, 4 (read + test), 5 (tests + ASan), 6 (boot log).** The node storage
+> core is complete; the UI (Nodes filter, Add to radio / Move to archive menu, Settings rows) stays EST-465.
+
+### 0. The blocker fixed (EST-463 part 1 review)
+
+- `main/mc_link.cpp`'s advert branch no longer calls `contactsUpsert` directly: it calls
+  `advertInArchive(g_contacts, g_heard_to_radio, …)` (`node_table.*`). With the new setting
+  `HeardToRadio g_heard_to_radio` (NVS `mcset`/`heardto`, default **Off**) a verified advert is **archive only**;
+  nothing enters the radio automatically and a full radio still refuses.
+- The NVS blob is now only the **fallback** (when `/int` does not mount) and `contactsEncodeRadio()` writes ONLY
+  `in_radio` rows, at most **32**. Radio node 33+ while on the fallback stays in RAM and on the SD archive, and the
+  log says exactly `radio list over the NVS fallback cap (N radio, 32 stored)`. A host test proves the encoder
+  never writes a non-radio row, never more than 32, and writes an EMPTY blob when the radio list is empty.
+- The radio writer compares the encoded bytes' CRC with the last write, so an archive-only advert causes **no**
+  internal-flash write at all (no write storm on the 16 KB NVS partition, whatever the table size).
+
+### 3a/3b/3c. Persistence and boot order
+
+- `core/node_store.*` (new, pure, host-tested): one file format for both stores:
+  `magic "OMN1" | version u16 | record_size u16 | count u16 | flags u16 | records | CRC-32` (CRC over header +
+  records; the record is the v4 contact record). Bad magic/version/record width/count/size/CRC/truncation is
+  refused WHOLE. `mergeArchive()` and `migrateNvsToRadio()` live beside the codec.
+- `/int` is mounted exactly as the launcher mounts locfd (`esp_vfs_fat_spiflash_mount_rw_wl("/int", "locfd", …)`,
+  `format_if_mount_failed = false`, `max_files 10`, `CONFIG_WL_SECTOR_SIZE`, `use_one_fat = false`), NEVER formatted,
+  our own `/int/om-lite/`; unmounted in `nodeStorageShutdown()` before the launcher frame/`esp_restart`.
+- `/int/om-lite/radio.bin`: in_radio rows (cap 300), temp + rename (`radio.tmp`), v57 floors (structural at once,
+  soft 10 min, ack 5 s), never per key press.
+- `/sdcard/om-lite/nodes.bin`: ALL rows, temp + rename (`nodes.tmp`), at most once per 30 s, plus leaving Nodes
+  (`contactsAckLeave`) and Esc (`nodeStorageShutdown`). No SD: RAM only, logged once.
+- Boot: radio.bin → if absent, the NVS blob is decoded and its rows become `in_radio` (v1-v3; v4 keeps its flags),
+  radio.bin is written and `migrated N nodes from NVS` is logged — the NVS blob itself is left UNTOUCHED. Then the
+  archive is merged by key: radio wins `in_radio` + route; the newer `heard_at` wins name/type/hops/heard/RSSI/SNR/
+  position; `fresh` comes from the archive. `restoreContacts()` now calls `initNodeTable()` itself (the blob
+  scratch was allocated only in `begin()`, which runs after the boot restore).
+- Boot log lines (item 6), exactly: `/int mounted (free N KB)` or
+  `/int not mounted (…): radio list stays on the NVS fallback (cap 32)`, `radio: N nodes from /int/om-lite/radio.bin`,
+  `archive: N nodes from /sdcard/om-lite/nodes.bin`, `migrated N nodes from NVS`, the unchanged `nvs … used, free,
+  total entries` line, and `node table: 2000 rows, 320000 B in PSRAM (…)`.
+
+### 4. One lookup — read and cited
+
+- DM receive: `main/mc_link.cpp:1514`, `:1551` (`contactsFind(g_contacts, peer_pub)` on the one table).
+- DM send: `main/mc_link.cpp:1834` (`dmPeerKey`), `:1866`, `:1899`, `:1940`, `:2035` — full-key lookup + route from
+  the SAME row; an archive-only peer is as usable as a radio one.
+- Ping / Trace: `main/mc_link.cpp:2409` (`contactByPub` → `contactsFind`), used by `nodePing` `:2443` and
+  `nodeTrace` `:2472`.
+- RPTR target: `main/rptr_link.cpp:135`, `:176` (`mc::contacts()`).
+- Time row: `core/chat_meta.cpp:26-33` (`pathHopLabel` walks `s.count`, no radio filter); called from
+  `main/main.cpp:1093`.
+- Hint dot / unread: `core/mc_store.cpp:334-345` (`unreadTotals` walks the whole table); `main/main.cpp:3493`.
+- New host test: `test_node_table.cpp` `testUnreadTotalsArchiveOnlyPeer` — an archive-only DM peer raises
+  `dm_unread == 1`.
+
+### 5/6. Evidence
+
+- `sh test/host/run.sh` → **exit 0**, **31,699 checks, 0 failures**. New `test_node_store.cpp` = **185 checks**
+  (plain + ASan/UBSan): codec round trips, every refusal, merge rules, migration from v2/v3/v4, the step-0 encoder.
+- Armed twice (restored afterwards, green again):
+  - `FAIL test_node_store.cpp:159  blob[2] | (blob[3] << 8) == 32 (got 35, want 32)` (cap removed)
+  - `FAIL test_node_store.cpp:204  live.c[i1].out_path_len == 0x41 (got 255, want 65)` (archive overwrote the
+    radio route)
+- `make build` → **exit 0**, `application.bin` = **0x19E6E0 = 1,697,504 B**, 19 % of the app partition free.
+- Internal RAM (`esp_idf_size`, idf6.0 env): **DIRAM 281,764 / 572,368 B (49.23 %)**, 290,604 B free
+  (.bss 126,032 + 49,304, .data 22,268). The table, the NVS scratch and the 318 KB node-file buffer are PSRAM.
+- Files: new `core/node_store.{h,cpp}`, `test/host/test_node_store.cpp`; modified `core/contact_blob.{h,cpp}`,
+  `core/CMakeLists.txt`, `main/{mc_link.cpp,mc_link.h,main.cpp,CMakeLists.txt}`, `test/host/run.sh`,
+  `docs/PROGRESS.md`; plus the part-1 files still uncommitted (`core/node_table.*`, `test/host/test_node_table.cpp`,
+  `core/{mc_store.*,nodes_fresh.h,settings.h}`, `main/rptr_link.cpp`, `test/host/{test_contact_blob,test_store}.cpp`).
+- **Not verified:** no device run (nothing installed): the real `/int` mount, the two atomic renames on FATFS, and
+  the PSRAM allocations are code-read + host-tested only, not seen on the glass.
+
+
+**Claude's review of EST-463 part 1 + EST-464 (S515, 2026-11-19 19:0x), two device-only defects fixed before the commit:**
+1. **FatFs rename refuses an existing target** (`ff.c` `f_rename` → `FR_EXIST`; `vfs_fat_rename` passes it through), unlike POSIX, so the host tests could not see it: every write of `radio.bin` / `nodes.bin` after the first would have failed and the files would never have changed again. `writeFileAtomic()` now removes the old file between the finished temp file and the rename, and the boot loads use `readNodeFileOrTemp()` (the temp file when the real one is missing, CRC still decides, then renamed into place), so a power cut in that gap loses nothing and does not fall back to the stale NVS copy.
+2. **A failed archive write had no retry floor** (`g_archive_write_failed` was set but never read): a pulled card meant a 340 KB re-encode under the store lock on every loop pass. A failure now waits the same 30 s floor; every write logs its duration (`archive: N written … (B, X ms)`), because it runs on the main task and is a UI pause.
+**To prove on the device:** `/int mounted`, `migrated 10 nodes from NVS` on the first boot, then a SECOND `radio:`/`archive: … written` line succeeding (the rename fix), and the archive write time.
+## 2026-11-19 · S515 (EST-463) · node storage core: ONE table, the radio mark, the rules
+
+> Written by **DeepSeek** for ticket **EST-463**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed, pushed or committed. Starting point **v58 `ffe0abf`** (tree clean). **Version: 59**
+> (`core/settings.h` kAppVersion). `firmware/` was read only and is unchanged.
+>
+> **ITEMS DONE: 1 (one table) and 2 (the rules in a pure core file, host-tested), plus the parts of item 3 that a
+> host can prove (the blob's v4 format).** Items 3a/3b/3c (the /int mount, radio.bin, nodes.bin, boot order,
+> merge and migration), 4 (wiring the DM/ping/trace/time-row lookups through the new rules — they already read
+> the same table, so what is missing is the persistence, not the lookup), 5's codec/merge/migration tests, and
+> 6's boot log lines are **NOT done**: the 30-minute cap was reached at a clean boundary after item 2 + the format
+> change that item 1 forced. Nothing half-wired was left behind: the tree builds and every suite is green.
+
+### 1. ONE TABLE (done)
+
+- `core/mc_store.h`: `kMaxNodes = 2000`, `kMaxRadio = 300`, and `kMaxContacts` kept as an ALIAS of `kMaxNodes`
+  so every existing `kMaxContacts` user keeps compiling at the new capacity (renaming 30 sites would have been
+  diff noise on a ticket that must stay reviewable).
+- `Contact` gains `bool in_radio` (one flag, one table; a favourite does not imply it).
+- `ContactStore` is no longer an inline `Contact c[32]`: `Contact* c` + `cap` + `count`, ONE allocation of
+  `contactsTableBytes()` = **2,000 x 160 = 320,000 B**, taken from PSRAM on the device through
+  `setContactAlloc()` (installed at the bottom of `main/mc_link.cpp`, before the long-lived store is constructed;
+  the host leaves the hook at `malloc`). A failed allocation leaves `cap == 0`, which every operation treats as a
+  full table and `initNodeTable()` logs. `sizeof(ContactStore)` is 24 B, not 320 KB.
+- Copy semantics are OWNED (copy ctor / operator= / destructor), because the tests hand a small store back by
+  value and the ASan stage (leak detection) would otherwise report one 320 KB block per store.
+- **Order:** `contactsOrder()` is now ONE stable bottom-up merge sort (group = favourite / fresh / rest, then
+  `heard_at` descending, then store index for a tie) instead of the three O(n^2) passes. The scratch is a
+  file-scope `int[2000]` in `mc_store.cpp` (never a task stack); `out` is the merge's second buffer when it is
+  large enough. Host measurement: **2,000 rows in 0.20-0.27 ms**, printed by the new test. The order is the same
+  for every input the old code had (favourites, then fresh newest-first, then the rest).
+
+### 2. THE RULES IN A PURE CORE FILE (done)
+
+`core/node_table.h/.cpp`, host-tested (`test/host/test_node_table.cpp`, 6,685 checks):
+
+- `HeardToRadio { Off, Clients, All }`, default **Off**, `heardToRadioFromByte()` maps any unknown byte to Off,
+  `heardToRadioAllows()` says Clients = type 1 only.
+- `advertInArchive()` inserts or refreshes; an INSERT sets `fresh` and sets `in_radio` only when the setting
+  allows it AND there is room; a REFRESH never changes `in_radio` or `favourite` (a node the user moved to the
+  archive cannot be pulled back by its next advert).
+- `addToRadio()` → **Ok / AlreadyIn / RadioFull / NotFound**, and at 300 it refuses with **nothing changed** (no
+  eviction, no reorder, no field moved) — Filip's rule 2.
+- `removeFromRadio()` clears the flag and keeps the row (the archive still has the node).
+- `deleteEverywhere()` removes the row from both stores; `setFavourite()` works on either store.
+
+### 3. THE FORMAT CHANGE ITEM 1 FORCED (part of item 3, done)
+
+The NVS blob's count was a u8 — 2,000 does not fit. `kContactBlobVersion = 4`: header is
+`version u8 | 0 u8 | count u16 | record_size u16` (6 B) and the record is 159 B (the v3 tail + `in_radio`).
+Versions 1, 2 and 3 still decode with their own 4-byte header and 148/158-byte records, so a blob already on
+the device loads. `contactsDecode` no longer constructs a second store (that would have taken another 320 KB):
+it clears `count` and keeps the caller's allocation. Round-trip at the full 2,000 rows is covered.
+
+### What moved off .bss / the stack because the table grew (every kMaxContacts site)
+
+| Where | Was | Now |
+|---|---|---|
+| `main/mc_link.cpp` NVS blob scratch | `uint8_t g_contact_blob[kContactBlobMaxBytes]` (would be 318 KB) | PSRAM pointer, `initNodeTable()` |
+| `main/mc_link.cpp` DM peer snapshot | `static uint8_t[2000*32]` + `char[2000*24]` (112 KB) | PSRAM, once |
+| `main/mc_link.cpp` PATH peer snapshot | `static uint8_t[2000*32]` (64 KB) | PSRAM, once |
+| `main/rptr_link.cpp` merge rows | `static Row[kMaxContacts]` (~130 KB) | `static Row[kMaxRadio]` (repeaters only) |
+| `main/main.cpp` Settings › NODES list | three arrays sized by `kMaxContacts` (~250 KB) | `kNodesSettingsRows = 64` (a page-sized list; the real list is Nodes) |
+| `main/main.cpp` Nodes order buffers | `int order[kMaxContacts]` on the loop task's stack (8 KB each) | file-scope `g_nodes_order` / `g_nodes_shown` |
+| `core/nodes_fresh.h` `nodesFrozenSync()` | `int kept[kMaxContacts]` on the caller's stack | compacts `f.order` in place |
+| `test/host/test_store.cpp` | `int order[kMaxContacts]` | `static` (host) |
+
+### Measured
+
+- `sh test/host/run.sh` → **exit 0**, **23,496 checks, 0 failures** (the new suite alone: 6,685).
+- `make build` → **exit 0**, `application.bin` = **1,688,928 B** (0x19C960), 19 % of the app partition free.
+- Internal RAM (`esp_idf_size`, idf6.0 env): **DIRAM 281,740 of 572,368 B (49.22 %)**, 290,628 B remain.
+  .bss 126,008 + 49,304, .data 22,268. The new .bss is the 8 KB sort scratch and the two 8 KB order buffers;
+  the 320 KB table, the 318 KB blob scratch and the 176 KB of peer snapshots are in PSRAM by construction.
+
+### Next (for EST-464 and the rest of EST-463)
+
+The persistence half: mount `/int` exactly as the launcher does, `/int/om-lite/radio.bin` (header + records +
+CRC-32, temp + rename, coalesced), `/sdcard/om-lite/nodes.bin`, the boot order and merge, the one-time migration
+from the NVS v1/v2/v3 blob (which is now also the v4 fallback), and the six boot log lines. The lookup half
+(item 4) needs no new table: every caller already searches this one table.
+
 ## 2026-11-19 · S515 (EST-462) · the time row
 
 > Written by **DeepSeek** for ticket **EST-462**: fenced Paperclip run, no session start/end, nothing installed,
