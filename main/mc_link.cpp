@@ -1011,14 +1011,15 @@ bool setHeardToRadioSetting(om::mc::HeardToRadio v) {
     return true;
 }
 
-void nodeStoreCounts(size_t* radio, size_t* archive) {
+// S515/EST-468: `sd` is EVERY node saved on the SD card — the radio's rows are in the same file, one row per
+// node, so this is the whole table (the head shows "SD -" when there is no card; the UI owns that word).
+void nodeStoreCounts(size_t* radio, size_t* sd) {
     if (radio != nullptr) *radio = 0;
-    if (archive != nullptr) *archive = 0;
+    if (sd != nullptr) *sd = 0;
     if (g_store_mutex == nullptr) return;
     StoreLock l;
-    const size_t r = radioCount(g_contacts);
-    if (radio != nullptr) *radio = r;
-    if (archive != nullptr) *archive = g_contacts.count > r ? g_contacts.count - r : 0;
+    if (radio != nullptr) *radio = radioCount(g_contacts);
+    if (sd != nullptr) *sd = g_contacts.count;
 }
 
 // S515 (Claude, review): the four user actions below FORCE the archive write. A structural change already writes

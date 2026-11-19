@@ -113,11 +113,12 @@ void test_rows_per_type() {
   CHECK_STR(rows[6].value, "on");
   CHECK(rows[6].valueAccent);
 
-  // S515/EST-465: in the radio the store row flips to "Move to SD", and never both.
+  // S515/EST-465: in the radio the store row flips to the remove wording, and never both. S515/EST-468: the
+  // label says the SD copy stays.
   c.in_radio = true;
   CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 8);
   CHECK(rows[5].action == om::ui::NodeAction::MoveToArchive);
-  CHECK_STR(rows[5].label, "Move to SD");
+  CHECK_STR(rows[5].label, "Remove from radio (stays on SD)");
   for (int i = 0; i < 8; ++i) CHECK(rows[i].action != om::ui::NodeAction::AddToRadio);
   c.in_radio = false;
 

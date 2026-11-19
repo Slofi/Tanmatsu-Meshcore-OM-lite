@@ -26,7 +26,7 @@ struct NodesView {
     int                     in_last_hour = 0;
     uint32_t                now = 0;
 
-    // S515/EST-465: the store view (All / Radio / Archive), the rows the VIEW holds (M in "N of M"), and the
+    // S515/EST-465: the store view (All / Radio / SD only), the rows the VIEW holds (M in "N of M"), and the
     // live counts the head and the chips report. `sd_mounted` false draws the one dim line under the header.
     NodeView view        = kNodeViewDefault;
     int      view_count  = 0;

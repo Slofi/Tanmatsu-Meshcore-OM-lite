@@ -35,6 +35,8 @@ idf_component_register(
         # is compiled from the L2's own firmware/src/sound_synth.cpp in the core component.
         "audio_out.cpp"
         "sound_store.cpp"
+        # S515/EST-468: the message LED's NVS choice and low-priority task (rule in core/message_led_rule.h).
+        "message_led.cpp"
     INCLUDE_DIRS
         "."
     # The six Tanmatsu faces (tools/mkfonts.py -> main/fonts/*.bin, decoded by font.cpp).

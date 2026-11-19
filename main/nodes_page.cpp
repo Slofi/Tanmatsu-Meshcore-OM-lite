@@ -104,10 +104,11 @@ void drawNodes(Screen& s, const NodesView& v) {
     s.clear((uint16_t)kBg);
     drawStatusBar(s, v.clock, v.battery_pct, v.charging);
 
-    // S515/EST-465: the head's right slot is the two stores' live counts. The three chips are drawn in the SAME
-    // band (where "N nodes heard" used to be), on the title's right, so the filter is never off screen.
+    // S515/EST-465: the head's right slot is the two stores' live counts. S515/EST-468: SD is EVERY saved node
+    // (radio ones included) and "SD -" without a card. The three chips are drawn in the SAME band (where "N
+    // nodes heard" used to be), on the title's right, so the filter is never off screen.
     char head_right[64];
-    nodeStoreCountsText(head_right, sizeof(head_right), v.radio_count, v.archive_count);
+    nodeStoreCountsText(head_right, sizeof(head_right), v.radio_count, v.archive_count, v.sd_mounted);
     const int head_bot = drawPageHead(s, "Nodes", head_right);
     {
         const Font* hf       = fontFor(Face::Hint);

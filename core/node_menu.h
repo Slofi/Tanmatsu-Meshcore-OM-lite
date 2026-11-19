@@ -73,7 +73,8 @@ struct NodeMenuContext {
     uint8_t advType   = 0;
     bool    hasKey    = false;   // a real contact, so its public key is known
     bool    favourite = false;
-    // S515/EST-465: which store the row is in. The menu says "Add to radio" or "Move to SD", never both.
+    // S515/EST-465: which store the row is in. The menu says "Add to radio" or, S515/EST-468,
+    // "Remove from radio (stays on SD)", never both.
     bool    in_radio  = false;
     // S514/EST-456: ContactInfo::out_path_len != OUT_PATH_UNKNOWN (core/mc_store.h contactHasOutPath).
     bool    pathKnown = false;
@@ -110,7 +111,9 @@ inline int nodeMenuRows(const NodeMenuContext& c, NodeMenuRow* out, int max) {
     add(NodeAction::Map, "Map", c.hasPosition ? "" : "no position", false, !c.hasPosition);
     if (c.hasKey) {
         // S515/EST-465: one store row, worded by where the node is now. The action is never both.
-        if (c.in_radio) add(NodeAction::MoveToArchive, "Move to SD");
+        // S515/EST-468: the row is in the radio AND on the SD card, so the action takes it out of the radio and
+        // says that the SD copy stays (Filip: "I think it should be on both").
+        if (c.in_radio) add(NodeAction::MoveToArchive, "Remove from radio (stays on SD)");
         else add(NodeAction::AddToRadio, "Add to radio");
         add(NodeAction::Favourite, "Favourite", c.favourite ? "on" : "off", c.favourite);
         // One table, two files: "Delete everywhere" is what removing the row really does now (EST-463). The
@@ -169,10 +172,10 @@ inline void nodeRadioFullNotice(char* out, size_t cap) {
 }
 
 inline const char* nodeAddedToRadioNotice() { return "Added to the radio"; }
-inline const char* nodeMovedToArchiveNotice() { return "Moved to the SD card"; }
-// S515/EST-467: Settings › NODES' per-contact action. It takes the node OUT OF the radio and leaves the row
-// on the SD card — the sentence and the action must not drift apart.
+// S515/EST-468: both the node menu's row and Settings › NODES use the same sentence — taking a node OUT of the
+// radio does NOT delete it from the SD card (the row stays, fully usable).
 inline const char* nodeRemovedFromRadioNotice() { return "Removed from the radio, kept on the SD card"; }
+inline const char* nodeMovedToArchiveNotice() { return nodeRemovedFromRadioNotice(); }
 
 // Delete everywhere's question. The row is removed from BOTH files; its DM thread and dm-*.log are never
 // touched (main/mc_link.cpp contactsRemove/contactsClear and core/node_table.cpp deleteEverywhere only remove

@@ -72,6 +72,8 @@ extern "C" {
 #include "sound_events.h"    // S514/EST-450: the events, their L2 defaults and every sound rule
 #include "sound_store.h"     // S514/EST-450: the sound settings' NVS blob (mcsnd)
 #include "audio_out.h"       // S514/EST-450: the one owner of I2S (queue-only, never blocks the UI)
+#include "message_led.h"     // S515/EST-468: the message LED's task + NVS choice (rule in core/message_led_rule.h)
+#include "message_led_rule.h"   // S515/EST-468: the pure blink rules + the Off/1..6 labels
 #include "tm_theme.h"
 #include "../../firmware/src/ui/theme.h"   // the L2 palette (kBg/kInk/kDim): one source of truth, never copied
 
@@ -210,6 +212,9 @@ void screenLightsOn() {
 }
 
 static void leaveToLauncher() {
+    // S515/EST-468: hand the LEDs back BEFORE the handover, like the backlight: all dark, then automatic mode,
+    // so the launcher's Wi-Fi/power indicators are not left dim or off.
+    om::led::restoreAutomatic();
     // S515/EST-461: the launcher must never start DARK. Esc with the screen off is a wake as well as an exit.
     if (g_screen_power.off) {
         g_screen_power.off = false;
@@ -323,6 +328,8 @@ enum : uint16_t {
     kSetRowSoundMaster = 10,
     kSetRowSoundVolume,
     kSetRowSoundEventBase = 20,
+    // S515/EST-468: the LED section's one row.
+    kSetRowMessageLed = 30,
 };
 
 static char gset_name[32], gset_pub[32], gset_adv[8], gset_freq[24], gset_bw[16];
@@ -494,6 +501,24 @@ bool adjustSoundVolume(int delta) {
     return true;
 }
 
+// ---- S515/EST-468: the MESSAGE LED row (General › LED) ------------------------------------------------
+// Off / 1..6, default Off, NVS "omled"/"msgled". While the row is being changed, the chosen LED blinks
+// three times AT ONCE (the task's preview), so the user can see which one "3" means; the task then hands the
+// LEDs back. The blink rule itself is core/message_led_rule.h.
+const char* gsetMessageLed(tm::Core&) {
+    return om::ui::messageLedLabel(om::led::choice());
+}
+
+void generalCycleMessageLed(tm::Core&, const tm::SettingRow&) {
+    const uint8_t next = om::ui::messageLedCycle(om::led::choice());
+    if (!om::led::setChoice(next)) {
+        om::ui::noticeSet("Message LED not saved", 3000);
+        return;
+    }
+    if (next != om::ui::kMessageLedOff) om::led::requestPreview(next);
+    ESP_LOGI(TAG, "settings: message LED -> %s", om::ui::messageLedLabel(next));
+}
+
 static const tm::SettingRow kGeneralNodeRows[] = {
     {tm::SettingKind::SubPage, kSetRowName, "Name", "", gsetName, nullptr},
     {tm::SettingKind::Info, 0, "Public key", "", gsetPublicKey, nullptr},
@@ -518,6 +543,9 @@ static const tm::SettingRow kGeneralSoundRows[] = {
     {tm::SettingKind::SubPage, (uint16_t)(kSetRowSoundEventBase + (int)tm::soundcfg::Event::Boot),
      "Boot", "", tm::RowValueFn(gsetSoundChoiceValue), nullptr},
 };
+static const tm::SettingRow kGeneralLedRows[] = {
+    {tm::SettingKind::Cycle, kSetRowMessageLed, "Message LED", "", gsetMessageLed, generalCycleMessageLed},
+};
 static const tm::SettingRow kGeneralRadioRows[] = {
     {tm::SettingKind::Info, 0, "Frequency", "", gsetFrequency, nullptr},
     {tm::SettingKind::Info, 0, "Bandwidth", "", gsetBandwidth, nullptr},
@@ -539,10 +567,11 @@ static const tm::SettingsSection kGeneralSections[] = {
     {"ADVERT", kGeneralAdvertRows, 1},
     {"SOUND", kGeneralSoundRows,
      (int)(sizeof(kGeneralSoundRows) / sizeof(kGeneralSoundRows[0]))},
+    {"LED", kGeneralLedRows, 1},
     {"RADIO (READ ONLY)", kGeneralRadioRows, 6},
     {"DEVICE (READ ONLY)", kGeneralDeviceRows, 6},
 };
-constexpr int kGeneralSectionCount = 5;
+constexpr int kGeneralSectionCount = 6;
 
 // The CORE's General tab. Not a module: the shell owns it, exactly as the L2's General does.
 const tm::SettingsSection* generalSettings(int* count) {
@@ -591,12 +620,13 @@ void nodesCycleHeard(tm::Core&, const tm::SettingRow&) {
     if (!om::mc::setHeardToRadioSetting(next)) om::ui::noticeSet("Add-to-radio setting not saved", 3000);
 }
 
-// The info row: the same two live counts the Nodes head shows, plus the card's state.
+// The info row: the same two live counts the Nodes head shows, plus the card's state. S515/EST-468: `sd` is
+// EVERY saved node (the radio's rows are in the same file), and a missing card reads "SD -".
 const char* nodesStoresValue(tm::Core&) {
     static char buf[80];
-    size_t radio = 0, archive = 0;
-    om::mc::nodeStoreCounts(&radio, &archive);
-    om::ui::nodeStoreInfoText(buf, sizeof(buf), radio, archive, g_sd_mounted);
+    size_t radio = 0, sd = 0;
+    om::mc::nodeStoreCounts(&radio, &sd);
+    om::ui::nodeStoreInfoText(buf, sizeof(buf), radio, sd, g_sd_mounted);
     return buf;
 }
 
@@ -1225,6 +1255,11 @@ extern "C" void app_main(void) {
     }
     bsp_display_set_backlight_brightness(100);
 
+    // S515/EST-468: the LEDs belong to the system in automatic mode; a previous run (or the launcher's own
+    // state) must never leave them dark, so automatic mode is re-asserted here and owned only while blinking.
+    om::led::begin();
+    om::led::startTask();
+
     // S502: the clock, before anything that stamps a time. It must come AFTER bsp_device_initialize (the RTC
     // lives in the CH32 coprocessor, which the BSP brings up) and after nvs_flash_init (the stored floor).
     // Nothing after this point may call time() and get 1970 without the log having said so first.
@@ -1838,8 +1873,9 @@ extern "C" void app_main(void) {
         }
         g_confirm_target = ConfirmTarget::ClearRadio;
         snprintf(g_confirm_title, sizeof(g_confirm_title), "Clear radio");
+        // S515/EST-468: the same "stays on SD" wording as the node menu and the per-node action.
         snprintf(g_confirm_text, sizeof(g_confirm_text),
-                 "Move all %u radio nodes to the SD card? The SD card keeps them all.", (unsigned)radio);
+                 "Remove all %u nodes from the radio? They stay on the SD card.", (unsigned)radio);
         snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Clear radio");
         g_confirm_danger = true;
         settings_frame.beginConfirm(focus_row);
@@ -1907,8 +1943,9 @@ extern "C" void app_main(void) {
             nv.view_count  = nodesViewCount();
             nv.view        = nodes_view;
             nv.radio_count = om::mc::radioCount(om::mc::contacts());
-            nv.archive_count =
-                om::mc::contacts().count > nv.radio_count ? om::mc::contacts().count - nv.radio_count : 0;
+            // S515/EST-468: SD = EVERY saved node, radio rows included (the view filter still keeps only the
+            // rows NOT in the radio for the "SD only" chip).
+            nv.archive_count = om::mc::contacts().count;
             nv.sd_mounted  = g_sd_mounted;
             if (nodes_focus >= nv.order_count) nodes_focus = nv.order_count > 0 ? nv.order_count - 1 : 0;
             if (nodes_focus < 0) nodes_focus = 0;
@@ -2581,12 +2618,16 @@ extern "C" void app_main(void) {
                         ev.args_action.state ? om::ui::ScreenEv::PowerPress : om::ui::ScreenEv::PowerRelease);
                     if (act == om::ui::ScreenAct::Off) {
                         screenLightsOff();
+                        // S515/EST-468: tell the LED task at the EDGE, not at the next 250 ms poll, so a blink
+                        // stops the moment the screen comes back and starts at once when it goes dark.
+                        om::led::setScreenOff(true);
                         // S515/EST-467: a pop-up is not shown while the screen is off, and it is not kept
                         // for later. Polling with screen_off discards the live one (and any pending one).
                         (void)om::ui::msgPopupPoll((uint32_t)(esp_timer_get_time() / 1000), true, false,
                                                    om::ui::PopupChat::None, 0, nullptr);
                         ESP_LOGI(TAG, "[screen] off");
                     } else if (act == om::ui::ScreenAct::OnByPower) {
+                        om::led::setScreenOff(false);
                         screenLightsOn();
                         ESP_LOGI(TAG, "[screen] on (by power)");
                         dirty = true;   // one repaint of the page the user left
@@ -3428,7 +3469,7 @@ extern "C" void app_main(void) {
                                 }
                                 case om::ui::NodeAction::AddToRadio: {
                                     // Filip's rule 2: a FULL radio refuses and NOTHING changes. The sheet stays
-                                    // up so the row flips to "Move to SD" on the next frame.
+                                    // up so the row flips to "Remove from radio (stays on SD)" on the next frame.
                                     uint8_t pub[32];
                                     if (nodeMenuPub(pub)) {
                                         const om::mc::RadioResult r = om::mc::nodeAddToRadio(pub);
@@ -3789,15 +3830,20 @@ extern "C" void app_main(void) {
         // The counts come from the SAME functions the chat list's badges use (unreadTotals sums
         // unreadForChannel + dmUnreadForPeer), so a dot and its badge cannot disagree.
         {
-            uint8_t mask = 0;
+            uint8_t  mask      = 0;
+            uint32_t unread_all = 0;
             {
                 om::mc::StoreLock l;
                 uint32_t          unread_ch = 0, unread_dm = 0;
                 om::mc::unreadTotals(om::mc::messages(), om::mc::readState(), om::mc::channelCount(),
                                      om::mc::dmThreads(), om::mc::contacts(), &unread_ch, &unread_dm);
+                unread_all = unread_ch + unread_dm;
                 mask = om::ui::hintDotMask(unread_ch, unread_dm, om::mc::contactsFreshCount(om::mc::contacts()));
             }
             om::ui::hintDotsSet(mask);
+            // S515/EST-468: the message LED's rule reads the SAME unread total as the Chat dot; the task polls
+            // these published values every 25 ms, so the main loop never does an LED write itself.
+            om::led::publish(g_screen_power.off, unread_all);
             // A message arriving while the Map (or any page) is on screen raises this with no key press behind
             // it, so the dot appears at the next 250 ms pass.
             if (om::ui::hintDotsNeedsRepaint()) dirty = true;

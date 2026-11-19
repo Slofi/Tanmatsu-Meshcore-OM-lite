@@ -47,11 +47,12 @@ NODESTOREASAN="$(mktemp /tmp/tm-node-store-asan.XXXXXX)"
 NODEVIEW="$(mktemp /tmp/tm-node-view.XXXXXX)"
 NODESMAPN="$(mktemp /tmp/tm-nodes-map-nodes.XXXXXX)"
 MSGPOPUP="$(mktemp /tmp/tm-msg-popup.XXXXXX)"
+MSGLED="$(mktemp /tmp/tm-message-led.XXXXXX)"
 RPTRED="$(mktemp -d /tmp/tm-rptr-ed.XXXXXX)"
 CHANORACLE="$(mktemp -d /tmp/tm-chan-oracle.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN" "$NODEVIEW" "$NODESMAPN" "$MSGPOPUP"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN" "$NODEVIEW" "$NODESMAPN" "$MSGPOPUP" "$MSGLED"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -483,3 +484,11 @@ ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$NODESTOREASAN"
     test_msg_popup.cpp \
     -o "$MSGPOPUP"
 "$MSGPOPUP"
+
+# S515/EST-468: the message LED's rule (core/message_led_rule.h). Only with the screen off AND something
+# unread AND a chosen LED; three short blinks at once then every 20 s; the Settings preview; the frame says
+# CHANGED only when I2C work is needed; a 32-bit time wrap does not stall the schedule.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_message_led.cpp \
+    -o "$MSGLED"
+"$MSGLED"

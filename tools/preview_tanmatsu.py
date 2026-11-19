@@ -1974,6 +1974,38 @@ def settings_sound():
     return save(img, '2026-11-19-settings-sound.png')
 
 
+def settings_message_led():
+    """S515/EST-468: the General tab's new LED section, with the focused "Message LED" row.
+
+    Off / 1 / 2 / 3 / 4 / 5 / 6, default Off, NVS. The value shown is "3": while the row is changed the chosen
+    LED gives three short blinks at once (the task's preview), so the number can be matched to a physical LED.
+    The body is scrolled so the section is on screen; SOUND's last rows above and RADIO below are context.
+    """
+    img, d, W, H, pad, body_top = _settings_owner_frame(0, 'general · tab 1 of 4')
+    body_bot = H - TM['hint_h']
+    lx0, lx1 = pad, W - pad
+    row_h, sect_h = 34, 22
+    rows = [
+        ('sect', 'SOUND'), ('row', 'Sent', 'Soft Tick'), ('row', 'New node', 'Soft Lo'),
+        ('row', 'Error', 'Bell Fall'),
+        ('sect', 'LED'), ('row', 'Message LED', '3'),
+        ('sect', 'RADIO (READ ONLY)'), ('row', 'Frequency', '869.618 MHz'),
+        ('row', 'Bandwidth', '62.5 kHz'),
+    ]
+    yy = body_top + 4
+    for kind, *rest in rows:
+        if kind == 'sect':
+            spaced(d, (lx0 + 4, yy + 5), rest[0], font(FONT_MONO, TM['f_label']), P['Dim'])
+            yy += sect_h
+            continue
+        label, value = rest
+        setrow(d, lx0, lx1, yy, label, value, focused=(label == 'Message LED'))
+        yy += row_h + 2
+    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),
+                             (',', 'settings')])
+    return save(img, '2026-11-19-settings-message-led.png')
+
+
 def settings_sound_picker():
     """S514/EST-451: the Message event's sound picker, SCROLLED past the first screenful.
 
@@ -2064,7 +2096,7 @@ def _omlite_rows():
         ('row', 'Add heard nodes to the radio', 'Off', False),
         ('row', 'Stored nodes', 'Radio 10 / 300 · SD 412 · SD ok', False),
         ('row', 'Clear radio (SD keeps them)', '', False),
-        ('row', 'Remove a contact', '', True),
+        ('row', 'Remove from radio', '', True),
         ('row', 'Clear all contacts', '', False),
         ('row', 'New-node notice', 'On', False),
         ('sect', 'CHAT', None, None),
@@ -2580,7 +2612,7 @@ def _nodes_head_store(d, W, pad, radio, archive, view):
     cx = pad + title_w + 28
     chip_h = 22
     cy = y + (TM['head_h'] - chip_h) // 2
-    for name in ('All', 'Radio', 'SD'):
+    for name in ('All', 'Radio', 'SD only'):
         cw = tw(fh, name) + 20
         on = (name == view)
         d.rectangle([cx, cy, cx + cw, cy + chip_h], fill=P['SelBg'] if on else P['FieldBg'],
@@ -2640,7 +2672,7 @@ def nodes_views():
     W, H = TM['W'], TM['H']
     status_bar(d)
     radio = sum(1 for r in NODES_VIEWS if r[5])
-    archive = len(NODES_VIEWS) - radio
+    archive = len(NODES_VIEWS)          # S515/EST-468: SD = EVERY saved node, radio rows included
     _nodes_head_store(d, W, TM['pad'], radio, archive, 'All')
     rows_top, list_x0, list_x1, row_h = _nodes_store_list(
         d, W, NODES_VIEWS, 0, '%d of %d' % (len(NODES_VIEWS), len(NODES_VIEWS)), 'All')
@@ -2663,12 +2695,54 @@ def nodes_views():
         yy += 28
     yy += 8
     text(d, (x, yy), 'Enter: actions for this node.', font(FONT_SANS, TM['f_body']), P['Dimmer'])
-    text(d, (x, yy + 22), '←→: All / Radio / SD. f: favourite.',
+    text(d, (x, yy + 22), '←→: All / Radio / SD only. f: favourite.',
          font(FONT_SANS, TM['f_body']), P['Dimmer'])
 
     hint_bar(d, 'nodes', [('<>', 'view'), ('Enter', 'menu'), ('/', 'search'), ('esc', 'back'),
                           ('f', 'fav'), ('a', 'advert')], dots=('chat', 'nodes'))
     return save(img, '2026-11-19-nodes-views.png')
+
+
+def nodes_sd_wording():
+    """S515/EST-468: the node-storage wording, in the All view so the R tags are visible.
+
+    The head says "Radio 3 / 300 · SD 7": the SD file holds EVERY node, the three radio rows included (one
+    table, one row per node). The third chip is "SD only" — the four rows NOT in the radio — and the detail
+    pane's STORE line still says radio for a row that is in BOTH. The row set is the Nodes fixture (rule 9).
+    """
+    img, d = new_screen()
+    W, H = TM['W'], TM['H']
+    status_bar(d)
+    radio = sum(1 for r in NODES_VIEWS if r[5])
+    sd_total = len(NODES_VIEWS)
+    _nodes_head_store(d, W, TM['pad'], radio, sd_total, 'All')
+    _nodes_store_list(d, W, NODES_VIEWS, 0, '%d of %d' % (len(NODES_VIEWS), len(NODES_VIEWS)), 'All')
+
+    work_top = TM['status_h'] + TM['head_h'] + 1
+    list_x1 = TM['pad'] + TM['list_w']
+    vline(d, list_x1 + 8, work_top, H - TM['hint_h'] - 8, P['Line'])
+    x = list_x1 + 8 + 24
+    yy = work_top + 18
+    text(d, (x, yy), 'TEST-A1', font(FONT_SANS, 26), P['Ink'])
+    yy += 34
+    text(d, (x, yy), 'client · key ' + NODE_KEY + ' · radio + SD', font(FONT_MONO, TM['f_meta']), P['Dim'])
+    yy += 26
+    fk = font(FONT_MONO, TM['f_kv'])
+    for label, value in (('TYPE', 'client (companion)'), ('HOPS', 'direct · 0 hops'),
+                         ('SNR / RSSI', '3.2 dB / -71 dBm'), ('LAST HEARD', '14 h ago'),
+                         ('PUBLIC KEY', NODE_KEY), ('STORE', 'radio (also on SD)'), ('PATH', 'direct')):
+        text(d, (x, yy), label, fk, P['Dimmer'])
+        text(d, (x + 130, yy), value, fk, P['Ink'])
+        yy += 28
+    yy += 8
+    text(d, (x, yy), 'R: in the radio. Every row is on the SD card.',
+         font(FONT_SANS, TM['f_body']), P['Dimmer'])
+    text(d, (x, yy + 22), 'SD only: the rows NOT in the radio (4 here).',
+         font(FONT_SANS, TM['f_body']), P['Dimmer'])
+
+    hint_bar(d, 'nodes', [('<>', 'view'), ('Enter', 'menu'), ('/', 'search'), ('esc', 'back'),
+                          ('f', 'fav'), ('a', 'advert')], dots=('chat', 'nodes'))
+    return save(img, '2026-11-19-nodes-sd-wording.png')
 
 
 def popup_msg():
@@ -2682,7 +2756,7 @@ def popup_msg():
     W, H = TM['W'], TM['H']
     status_bar(d)
     radio = sum(1 for r in NODES_VIEWS if r[5])
-    archive = len(NODES_VIEWS) - radio
+    archive = len(NODES_VIEWS)          # S515/EST-468: SD = EVERY saved node, radio rows included
     _nodes_head_store(d, W, TM['pad'], radio, archive, 'All')
     rows_top, list_x0, list_x1, row_h = _nodes_store_list(
         d, W, NODES_VIEWS, 1, '%d of %d' % (len(NODES_VIEWS), len(NODES_VIEWS)), 'All')
@@ -2756,7 +2830,7 @@ def node_menu_radio():
     W, H = TM['W'], TM['H']
     status_bar(d)
     radio = sum(1 for r in NODES_VIEWS if r[5])
-    archive = len(NODES_VIEWS) - radio
+    archive = len(NODES_VIEWS)          # S515/EST-468: SD = EVERY saved node, radio rows included
     _nodes_head_store(d, W, TM['pad'], radio, archive, 'All')
     _nodes_store_list(d, W, NODES_VIEWS, 3, '%d of %d' % (len(NODES_VIEWS), len(NODES_VIEWS)), 'All')
 
@@ -2920,14 +2994,15 @@ MAP_NODES_Z14 = [
     ('ROOM-Test', 0.46, 0.14, 'room', False, 5000),
 ]
 
-RENDERERS = dict(map_nodes_z12=map_nodes_z12, map_nodes_z14=map_nodes_z14, nodes_views=nodes_views, node_menu_radio=node_menu_radio, launcher=launcher, nodes_fresh=nodes_fresh, hint_dots=hint_dots, menu=menu, nodes=nodes, nodes_search=nodes_search,
+RENDERERS = dict(map_nodes_z12=map_nodes_z12, map_nodes_z14=map_nodes_z14, nodes_views=nodes_views, nodes_sd_wording=nodes_sd_wording, node_menu_radio=node_menu_radio, launcher=launcher, nodes_fresh=nodes_fresh, hint_dots=hint_dots, menu=menu, nodes=nodes, nodes_search=nodes_search,
                  nodes_favourites=nodes_favourites, node_trace=node_trace, chat=chat, chat2=chat_cards,
                  chat_emoji=chat_emoji,
                  chat_dm=chat_dm_column, chat_meta=chat_meta, dm_enter=dm_enter, map=map_page, rptr=rptr, rptr_list=rptr_list, rptr_status=rptr_status, settings=settings,
                  settings_general=settings_general, settings_omlite=settings_omlite,
                  settings_opstoc=settings_opstoc, settings_chat=settings_chat,
                  settings_nodes=settings_nodes, settings_map=settings_map,
-                 settings_sound=settings_sound, settings_sound_picker=settings_sound_picker, popup_msg=popup_msg)
+                 settings_sound=settings_sound, settings_message_led=settings_message_led,
+                 settings_sound_picker=settings_sound_picker, popup_msg=popup_msg)
 
 
 def main(argv):

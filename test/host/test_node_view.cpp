@@ -115,7 +115,7 @@ void testViewCountsAndOrder() {
   CHECK_EQ(shown[0], 3);
   CHECK_EQ(shown[1], 1);
 
-  // The chips: All -> Radio -> Archive, clamped at both ends (three choices, no wrap).
+  // The chips: All -> Radio -> "SD only", clamped at both ends (three choices, no wrap).
   CHECK(om::ui::nodeViewCycle(om::ui::NodeView::All, 1) == om::ui::NodeView::Radio);
   CHECK(om::ui::nodeViewCycle(om::ui::NodeView::Radio, 1) == om::ui::NodeView::Archive);
   CHECK(om::ui::nodeViewCycle(om::ui::NodeView::Archive, 1) == om::ui::NodeView::Archive);
@@ -123,7 +123,7 @@ void testViewCountsAndOrder() {
   CHECK(om::ui::nodeViewCycle(om::ui::NodeView::Archive, -1) == om::ui::NodeView::Radio);
   CHECK(strcmp(om::ui::nodeViewText(om::ui::NodeView::All), "All") == 0);
   CHECK(strcmp(om::ui::nodeViewText(om::ui::NodeView::Radio), "Radio") == 0);
-  CHECK(strcmp(om::ui::nodeViewText(om::ui::NodeView::Archive), "SD") == 0);
+  CHECK(strcmp(om::ui::nodeViewText(om::ui::NodeView::Archive), "SD only") == 0);
   CHECK(om::ui::kNodeViewDefault == om::ui::NodeView::All);
 }
 
@@ -156,7 +156,7 @@ void testMenuRowsPerState() {
   n = om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows);
   CHECK_EQ(n, 8);
   CHECK(rows[5].action == om::ui::NodeAction::MoveToArchive);
-  CHECK(strcmp(rows[5].label, "Move to SD") == 0);
+  CHECK(strcmp(rows[5].label, "Remove from radio (stays on SD)") == 0);
   for (int i = 0; i < n; i++) CHECK(rows[i].action != om::ui::NodeAction::AddToRadio);
 
   // A repeater without a route: no DM, no Trace, but the store row, favourite and delete are there.
@@ -217,7 +217,7 @@ void testRadioFullPath() {
   om::ui::nodeRadioFullNotice(text, sizeof(text));
   CHECK(strcmp(text, "Radio full (300 / 300): move a node to the SD card first") == 0);
   CHECK(strcmp(om::ui::nodeAddedToRadioNotice(), "Added to the radio") == 0);
-  CHECK(strcmp(om::ui::nodeMovedToArchiveNotice(), "Moved to the SD card") == 0);
+  CHECK(strcmp(om::ui::nodeMovedToArchiveNotice(), "Removed from the radio, kept on the SD card") == 0);
 }
 
 // ---- 4. the confirm sentence, and the focus re-find after a delete --------------------------------
@@ -276,13 +276,16 @@ void testSettingsValues() {
   om::ui::nodeStoreInfoText(info, sizeof(info), 10, 412, true);
   CHECK(strcmp(info, "Radio 10 / 300 \xc2\xb7 SD 412 \xc2\xb7 SD ok") == 0);
   om::ui::nodeStoreInfoText(info, sizeof(info), 0, 0, false);
-  CHECK(strcmp(info, "Radio 0 / 300 \xc2\xb7 SD 0 \xc2\xb7 no SD card") == 0);
+  CHECK(strcmp(info, "Radio 0 / 300 \xc2\xb7 SD - \xc2\xb7 no SD card") == 0);
 
   char head[64];
-  om::ui::nodeStoreCountsText(head, sizeof(head), 10, 412);
+  om::ui::nodeStoreCountsText(head, sizeof(head), 10, 412, true);
   CHECK(strcmp(head, "Radio 10 / 300 \xc2\xb7 SD 412") == 0);
-  om::ui::nodeStoreCountsText(head, sizeof(head), om::mc::kMaxRadio, 2000);
+  om::ui::nodeStoreCountsText(head, sizeof(head), om::mc::kMaxRadio, 2000, true);
   CHECK(strcmp(head, "Radio 300 / 300 \xc2\xb7 SD 2000") == 0);
+  // S515/EST-468: no card = "SD -", never a number that implies the nodes survive a restart.
+  om::ui::nodeStoreCountsText(head, sizeof(head), 3, 7, false);
+  CHECK(strcmp(head, "Radio 3 / 300 \xc2\xb7 SD -") == 0);
 
   // The Settings list is the RADIO list: of the five fixture rows only the three in the radio are offered.
   Fixture f;
@@ -294,6 +297,14 @@ void testSettingsValues() {
     if (f.s.c[order[i]].in_radio) radio_rows++;
   CHECK_EQ(total, 5);
   CHECK_EQ(radio_rows, 3);
+
+  // S515/EST-468: the head's SD number is EVERY node saved on the card (radio rows included), while the
+  // "SD only" view holds only the rows NOT in the radio. The ticket's whole point: "it is on both".
+  const size_t radio_n = om::mc::radioCount(f.s);
+  om::ui::nodeStoreCountsText(head, sizeof(head), radio_n, f.s.count, true);
+  CHECK(strcmp(head, "Radio 3 / 300 \xc2\xb7 SD 5") == 0);
+  CHECK_EQ(om::ui::nodeViewCount(f.s, om::ui::NodeView::Archive, radio_n), 2);
+  CHECK_EQ(om::ui::nodeViewCount(f.s, om::ui::NodeView::Radio, radio_n), 3);
 }
 
 // ---- 6. Settings › NODES' "Remove from radio": the row STAYS on the SD card (S515/EST-467) -----------

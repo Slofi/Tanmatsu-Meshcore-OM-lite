@@ -15,6 +15,95 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S515 (EST-468) message LED + storage wording
+
+> Written by **DeepSeek** for ticket **EST-468**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed, pushed or committed. Starting point **v62 `9ee566c`** (tree clean, before work). **Version: 63**
+> (`core/settings.h` kAppVersion). `firmware/` was read only and is unchanged.
+>
+> **Filip's words (quoted, S515):** *"when node is saved on the radio, is it also on the SD, or is it moved to the
+> radio? It is not clear from the UI.. I think it should be on both"* / *"when the Tanmatsu is 'locked', screen off,
+> all LEDs would be off, but the new MSG one would blink, like 3-continuing blinks, every 20 secs"*.
+>
+> **ITEMS DONE: 1, 2, 3.** `sh test/host/run.sh` **exit 0**: **33,293 counted checks** (the sum of the run's own
+> pass lines, plus the DM-guard suite's 169 and the emoji suite's own pass line; the new `message-led` suite is
+> **99 checks**, `test_node_view` is now **746**). `make build` **exit 0**, `application.bin`
+> **0x1A3130 = 1,716,528 B** (18 % of the app partition free; **+4,080 B** over v62's 1,712,448 B). Previews
+> re-rendered, including `shots/2026-11-19-nodes-sd-wording.png` and
+> `shots/2026-11-19-settings-message-led.png`. Nothing is installed, flashed, pushed or committed.
+
+### 1. Node storage: the radio rows are ALSO on the SD (item 1)
+
+It was already true in the store (one table, one row per node; `/sdcard/om-lite/nodes.bin` holds every row and
+`/int/om-lite/radio.bin` holds the `in_radio` marks). The UI now says it:
+
+- `core/node_menu.h`: the in-radio store row is **`Remove from radio (stays on SD)`** (was `Move to SD`), and its
+  notice is **`Removed from the radio, kept on the SD card`** (`nodeMovedToArchiveNotice()` now returns the same
+  sentence as Settings' per-node action). `Add to radio` is unchanged.
+- `core/node_view.h`: the head is **`Radio N / 300 · SD M`** where **M = EVERY saved node, radio rows included**;
+  without a card it is **`Radio N / 300 · SD -`**. The third chip is **`SD only`** and still filters to the rows
+  NOT in the radio. Settings' info row follows the same rule (`Radio … · SD … · SD ok` / `… SD - … no SD card`).
+- `main/mc_link.cpp`: `nodeStoreCounts(&radio, &sd)` now returns the whole table as `sd` (it used to return only
+  the non-radio rows). `main/main.cpp` uses it for the Settings info row and fills the Nodes page's head with
+  `contacts().count`.
+- Settings › NODES': `Clear radio (SD keeps them)` is unchanged; its confirm now says
+  `Remove all N nodes from the radio? They stay on the SD card.` and its notice stays
+  `Radio cleared; the SD card keeps every node`. The per-node row is `Remove from radio` (EST-467).
+- Host test: the head's SD number includes the radio rows (fixture 3 radio / 5 total → `Radio 3 / 300 · SD 5`)
+  while the `SD only` view holds only the 2 rows NOT in the radio. The `R` tag is untouched and still marks
+  radio rows.
+- **Fit check (real `sans_hint11` advances, 800 px):** the chip row is `All` + `Radio` + `SD only`; the head's
+  right text is measured and reserved exactly as before, so the wider `SD only` chip still ends well short of it
+  (the preview shows no overlap). The hint bar is unchanged and still drops `f fav` / `a advert` at the
+  documented break (EST-467); no chip starts off-screen or under the page margin.
+
+### 2. Message LED (item 2)
+
+- **Settings row: General › LED** (`Message LED`): **Off / 1 / 2 / 3 / 4 / 5 / 6, default Off**, NVS
+  **`omled`/`msgled`** (new namespace, one byte). While the row is being changed the task blinks the chosen LED
+  three times AT ONCE and then hands the LEDs back.
+- **Rule**: `core/message_led_rule.h` (new, pure, time in / LED frame out). Active only while the screen is OFF
+  (`core/screen_power.h` state) AND the hint bar's `unreadTotals` sum > 0 AND a LED is chosen. Then manual mode,
+  all 6 LEDs dark, the chosen one gives **3 blinks of 120 ms on / 180 ms off** at once and then **every 20 s**.
+  **Brightness 15 %**, **soft cyan** (`0,255,255` through the coprocessor's 15 % limit; a white would read the
+  same but cyan is the choice, said here).
+- **Stop**: all pixels dark, then `bsp_led_set_mode(true)` so the system's Wi-Fi/power indicators return; the
+  previous automatic brightness is restored too. It stops the moment the screen goes on, the unread drops to 0,
+  or the choice goes to Off. `leaveToLauncher()` calls `om::led::restoreAutomatic()` FIRST, before the
+  backlight and before the handover.
+- **Start**: `om::led::begin()` after `bsp_device_initialize` reads the NVS choice and calls
+  `bsp_led_set_mode(true)`, so a previous run can never leave the system indicators dark.
+- **Task**: one low-priority `om-led` task (priority 1, 3 KB, 25 ms period) drives the state machine and makes
+  every `bsp_led_*` call from task context (the calls are I2C through the coprocessor). The main loop only
+  publishes `(screen_off, unread)` and the power button publishes its edge, so the blink timing does not depend
+  on the 250 ms poll and never blocks it. A frame is applied only when `changed` is true: one on-write and one
+  off-write per blink, **no I2C traffic between the 20 s bursts**. Logs `[led] blink on (LED n)` / `[led] off`
+  once per state change, not per blink.
+- Which physical LED is "the message one" is still undocumented, so the row is the way Filip picks it.
+
+### 3. Tests, ARM, build, previews (item 3)
+
+- New host suite `test/host/test_message_led.cpp` (99 checks): the Off/1..6 setting and cycle, the three-way
+  gate, the exact burst schedule (0/120/300/420/600/720/900 ms and the 20 s repeat), no-change in the dark gap,
+  every stop path, choice-change restart, the Settings preview, poll-period independence, and a 32-bit wrap.
+  `test_node_view` grew to 746 checks with the M-includes-radio / SD-only-excludes-radio assertions.
+- **ARMED TWICE** (real FAIL lines, then reverted, no MUTANT left):
+  - `SD only` view counted every row: `FAIL test_node_view.cpp:89 … == 2 (got 5, want 2)` and
+    `FAIL test_node_view.cpp:306 …`.
+  - the LED rule ignored the screen state: `FAIL test_message_led.cpp:75  !rule.step(0, in(false, 3, 2)).manual`
+    and `FAIL test_message_led.cpp:122  !f.manual`.
+- Previews: `shots/2026-11-19-nodes-sd-wording.png` (`Radio 3 / 300 · SD 7`, chip `SD only`, R tags on the
+  radio rows, detail `radio + SD`) and `shots/2026-11-19-settings-message-led.png` (General › LED, `Message LED`
+  focused, value `3`). The preview tool's Nodes head now uses the total for SD and its OM Lite fixture says
+  `Remove from radio`.
+- Files touched: `core/message_led_rule.h` (new), `core/node_menu.h`, `core/node_view.h`, `core/settings.h`,
+  `main/message_led.h` (new), `main/message_led.cpp` (new), `main/CMakeLists.txt`, `main/main.cpp`,
+  `main/mc_link.h`, `main/mc_link.cpp`, `main/nodes_page.h`, `main/nodes_page.cpp`, `test/host/run.sh`,
+  `test/host/test_message_led.cpp` (new), `test/host/test_node_menu.cpp`, `test/host/test_node_view.cpp`,
+  `tools/preview_tanmatsu.py`, this entry, and the two new `shots/*.png`.
+- **NOT checked:** anything on the glass (no install); which LED index is the message LED; whether 15 % is
+  visible in a lit room; the task's real I2C timing on the device.
+
 ## 2026-11-19 · S515 (EST-467) · test round 1: names, Enter, Cancel, the pop-up
 
 > Written by **DeepSeek** for ticket **EST-467**: fenced Paperclip run, no session start/end, nothing installed,
