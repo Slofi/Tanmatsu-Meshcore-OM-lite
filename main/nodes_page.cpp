@@ -101,15 +101,48 @@ void drawNodes(Screen& s, const NodesView& v) {
     s.clear((uint16_t)kBg);
     drawStatusBar(s, v.clock, v.battery_pct, v.charging);
 
+    // S515/EST-465: the head's right slot is the two stores' live counts. The three chips are drawn in the SAME
+    // band (where "N nodes heard" used to be), on the title's right, so the filter is never off screen.
     char head_right[64];
-    snprintf(head_right, sizeof(head_right), "%d node%s heard \xc2\xb7 %d in the last hour",
-             (int)(v.store ? v.store->count : 0), (v.store && v.store->count == 1) ? "" : "s", v.in_last_hour);
+    nodeStoreCountsText(head_right, sizeof(head_right), v.radio_count, v.archive_count);
     const int head_bot = drawPageHead(s, "Nodes", head_right);
+    {
+        const Font* hf       = fontFor(Face::Hint);
+        const Font* tf       = fontFor(Face::Title);
+        const int   title_w  = (tf != nullptr && tf->ready()) ? tf->textWidth("Nodes") : 60;
+        const int   chip_h   = 22;
+        int         cx       = kTmPad + title_w + 28;
+        const int   chip_y   = kTmStatusH + (kTmHeadH - chip_h) / 2;
+        // The counts' own reserve keeps the chips clear of the head's right text.
+        const Font* mf       = fontFor(Face::Meta);
+        const int   right_w  = (mf != nullptr && mf->ready()) ? mf->textWidth(head_right) : 200;
+        const int   chips_end = kTmW - kTmPad - right_w - 16;
+        for (int i = 0; i < 3; i++) {
+            const NodeView chip = (NodeView)i;
+            const char*    txt  = nodeViewText(chip);
+            const int      cw   = ((hf != nullptr && hf->ready()) ? hf->textWidth(txt) : 40) + 20;
+            if (cx + cw > chips_end) break;
+            const bool on = (chip == v.view);
+            s.fillRect(cx, chip_y, cw, chip_h, on ? (uint16_t)kSelBg : (uint16_t)kFieldBg);
+            s.frame(cx, chip_y, cw, chip_h, on ? (int)kTmRingW : 1, on ? (uint16_t)kAcc : (uint16_t)kLine);
+            drawTextCentred(s, Face::Hint, cx + cw / 2, textBaseline(s, Face::Hint, chip_y, chip_h), txt,
+                            on ? (uint16_t)kAccInk : (uint16_t)kDim);
+            cx += cw + 8;
+        }
+    }
 
     const int list_x0 = kTmPad;
     const int list_x1 = kTmPad + kTmListW;
     const int work_top = head_bot;
     const int work_bot = H - kTmHintH;
+
+    // No SD card: ONE dim line under the header, above the list (the radio list still works; heard nodes are
+    // kept only until the restart). The list moves down by exactly the line's height so nothing overlaps.
+    int sd_line_h = 0;
+    if (!v.sd_mounted) {
+        drawText(s, Face::Meta, list_x0, work_top + 16, "No SD card: heard nodes are kept until restart", kDimmer);
+        sd_line_h = 18;
+    }
 
     // ---- S514/EST-449: the search bar is the list's TOP ROW, always visible.
     // ONE field (Filip's L2 correction), the query on the left and "N of M" on the right, both clear of the
@@ -118,7 +151,7 @@ void drawNodes(Screen& s, const NodesView& v) {
     const int bar_x0 = list_x0;
     const int bar_x1 = list_x1 - kTmRingInset;
     const int bar_w  = bar_x1 - bar_x0;
-    const int bar_y  = work_top + 4;
+    const int bar_y  = work_top + 4 + sd_line_h;
     const int bar_h  = 30;
     s.fillRect(bar_x0, bar_y, bar_w, bar_h, kFieldBg);
     s.frame(bar_x0, bar_y, bar_w, bar_h, v.search_focused ? (int)kTmRingW : 1,
@@ -130,7 +163,9 @@ void drawNodes(Screen& s, const NodesView& v) {
                     bar_w - 12 - 84, has_query ? query : "search nodes",
                     has_query ? (uint16_t)kInk : (uint16_t)kDimmer);
     char count[32];
-    nodeSearchCountText(count, sizeof(count), v.order_count, (int)(v.store ? v.store->count : 0));
+    // "N of M": M is the VIEW's row count (the rows the filter holds), not the whole table — otherwise the
+    // Radio view would read "10 of 412" and look like a broken search.
+    nodeSearchCountText(count, sizeof(count), v.order_count, v.view_count);
     drawTextRight(s, Face::Hint, bar_x1 - 12, textBaseline(s, Face::Hint, bar_y, bar_h), count, kDim);
 
     int       y       = bar_y + bar_h + 6;
@@ -156,8 +191,17 @@ void drawNodes(Screen& s, const NodesView& v) {
             s.frame(list_x0, y, list_x1 - kTmRingInset - list_x0, kNodesRowH - 2, kTmRingW, kAcc);
         }
         s.disc(list_x0 + 12, y + kNodesRowH / 2 - 1, 4, dotColour(c.type));
-        drawTextClipped(s, Face::Row, list_x0 + 28, textBaseline(s, Face::Row, y + 2, 28),
-                        list_x1 - kTmRingInset - 28 - list_x0 - 80, c.name[0] ? c.name : "(no name)",
+        const int row_right = list_x1 - kTmRingInset;
+        // S515/EST-465: the store tag. A radio row gets a small gold "R" plate before the name; an archive row
+        // gets nothing (its silence is the tag). The name starts at the same x in both views, so the two lists
+        // do not jog sideways when the filter changes; the favourite dot (-74), the fresh dot (-46) and the age
+        // column keep their S514/EST-461 places, which is what lets one row carry all three marks.
+        if (c.in_radio) {
+            s.fillRect(list_x0 + 23, y + 7, 14, 14, kAcc);
+            drawTextCentred(s, Face::Hint, list_x0 + 30, textBaseline(s, Face::Hint, y + 7, 14), "R", kBg);
+        }
+        drawTextClipped(s, Face::Row, list_x0 + 43, textBaseline(s, Face::Row, y + 2, 28),
+                        row_right - (list_x0 + 43) - 72, c.name[0] ? c.name : "(no name)",
                         f ? (uint16_t)kAccInk : (uint16_t)kInk);
         // S514/EST-455: the favourite mark. The generated faces carry ASCII + Latin-1/Latin Extended-A only,
         // so there is no U+2605 star; a small gold dot is the mark that can actually be drawn.
@@ -169,7 +213,7 @@ void drawNodes(Screen& s, const NodesView& v) {
         char sub[24];
         if (c.path_len == 0) snprintf(sub, sizeof(sub), "direct");
         else snprintf(sub, sizeof(sub), "path %u", (unsigned)c.path_len);
-        drawText(s, Face::Meta, list_x0 + 28, textBaseline(s, Face::Meta, y + 26, 20), sub, kDim);
+        drawText(s, Face::Meta, list_x0 + 43, textBaseline(s, Face::Meta, y + 26, 20), sub, kDim);
         // right edge: age, then the SNR the radio measured
         char age[8], snr[16];
         mc::formatAge(v.now, c.heard_at, age, sizeof(age));
@@ -252,7 +296,12 @@ void drawNodes(Screen& s, const NodesView& v) {
     // S513/EST-432: the advert key works on this page too, so it is a hint and not only the empty-list line.
     // S514/EST-449: `/` opens the search, and while the BAR has the focus it gets its own (shorter) hints.
     // S514/EST-455: with the menu up, the same three keys describe the sheet (Esc closes it).
-    static const HintItem hints_list[] = {{"ret", "menu"}, {"f", "favourite"}, {",", "settings"},
+    // S515 (Claude, review): "lt/rt" -> "<>" and "favourite" -> "fav": six chips overflowed the bar's left edge by
+    // ~50 px in the preview (the font has no arrow glyphs, Latin-1 + Ext-A only).
+    // S515/EST-465: "<> view" first — the filter key must be visible. Left/Right are free on this page (Up/Down
+    // move the list and every other arrow/letter already has a job), so no new letter steals a typed character
+    // from the search or an existing shortcut.
+    static const HintItem hints_list[] = {{"<>", "view"}, {"ret", "menu"}, {"f", "fav"},
                                           {"/", "search"}, {"a", "advert"}, {"esc", "back"}};
     static const HintItem hints_search[] = {{"type", "search"}, {"dn", "list"}, {"esc", "clear/back"}};
     static const HintItem hints_menu[]   = {{"up/dn", "move"}, {"ret", "choose"}, {"esc", "close"}};
@@ -272,6 +321,7 @@ void drawNodeMenu(Screen& s, const mc::Contact& c, int focus, uint32_t now, bool
     ctx.advType      = c.type;
     ctx.hasKey       = !mc::contactKeyIncomplete(c.pub);
     ctx.favourite    = c.favourite;
+    ctx.in_radio     = c.in_radio;   // S515/EST-465: Add to radio / Move to archive
     ctx.pathKnown    = mc::contactHasOutPath(c);
     ctx.pingPending  = ping_pending;
     ctx.tracePending = trace_pending;

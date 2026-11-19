@@ -26,6 +26,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "node_table.h"   // S515/EST-465: kMaxRadio, for the "Radio full (300 / 300)" sentence
+
 namespace om {
 namespace ui {
 
@@ -41,13 +43,16 @@ enum class NodeAction : uint8_t {
     Info,
     Ping,
     Trace,
+    AddToRadio,      // S515/EST-465: the row is not in the radio
+    MoveToArchive,   // S515/EST-465: the row is in the radio (clears the mark; the node stays usable)
     Favourite,
-    RemoveContact,
+    DeleteEverywhere,   // S515/EST-465: one table, so this is the old Remove contact, named honestly
+    RemoveContact,      // kept for the Settings › NODES list's own confirm path (EST-447)
 };
 
-// Six is the real maximum (a client with a route: DM, Info, Ping, Trace, Favourite, Remove). Kept as a bound so
-// a future action cannot silently overrun a caller's array.
-constexpr int kMaxNodeMenuRows = 6;
+// Seven is the real maximum (a client with a route: DM, Info, Ping, Trace, the store row, Favourite,
+// Delete everywhere). Kept as a bound so a future action cannot silently overrun a caller's array.
+constexpr int kMaxNodeMenuRows = 7;
 
 struct NodeMenuRow {
     NodeAction  action      = NodeAction::None;
@@ -61,6 +66,8 @@ struct NodeMenuContext {
     uint8_t advType   = 0;
     bool    hasKey    = false;   // a real contact, so its public key is known
     bool    favourite = false;
+    // S515/EST-465: which store the row is in. The menu says "Add to radio" or "Move to archive", never both.
+    bool    in_radio  = false;
     // S514/EST-456: ContactInfo::out_path_len != OUT_PATH_UNKNOWN (core/mc_store.h contactHasOutPath).
     bool    pathKnown = false;
     // A ping/trace to THIS node is in flight: the row says "waiting..." and Esc stops waiting.
@@ -88,8 +95,13 @@ inline int nodeMenuRows(const NodeMenuContext& c, NodeMenuRow* out, int max) {
     if (c.hasKey) add(NodeAction::Ping, "Ping", c.pingPending ? "waiting..." : "");
     if (c.hasKey && c.pathKnown) add(NodeAction::Trace, "Trace", c.tracePending ? "waiting..." : "");
     if (c.hasKey) {
+        // S515/EST-465: one store row, worded by where the node is now. The action is never both.
+        if (c.in_radio) add(NodeAction::MoveToArchive, "Move to archive");
+        else add(NodeAction::AddToRadio, "Add to radio");
         add(NodeAction::Favourite, "Favourite", c.favourite ? "on" : "off", c.favourite);
-        add(NodeAction::RemoveContact, "Remove contact");
+        // One table, two files: "Delete everywhere" is what removing the row really does now (EST-463). The
+        // FAVOURITE flag and the DM history are not touched by it.
+        add(NodeAction::DeleteEverywhere, "Delete everywhere");
     }
     return n;
 }
@@ -128,6 +140,41 @@ inline int nodeMenuFocusFollow(const int* shown, int shown_count, int store_inde
         if (shown[i] == store_index) return i;
     }
     return -1;
+}
+
+// ---------------------------------------------------------------- S515/EST-465: the store actions' words
+// "Radio full (300 / 300): move a node to the archive first" — Filip's rule 2, in the sheet's exact words.
+// The numbers come from kMaxRadio, so the sentence cannot drift from the cap.
+inline void nodeRadioFullNotice(char* out, size_t cap) {
+    if (out == nullptr || cap == 0) return;
+    snprintf(out, cap, "Radio full (%u / %u): move a node to the archive first",
+             (unsigned)om::mc::kMaxRadio, (unsigned)om::mc::kMaxRadio);
+}
+
+inline const char* nodeAddedToRadioNotice() { return "Added to the radio"; }
+inline const char* nodeMovedToArchiveNotice() { return "Moved to the archive"; }
+
+// Delete everywhere's question. The row is removed from BOTH files; its DM thread and dm-*.log are never
+// touched (main/mc_link.cpp contactsRemove/contactsClear and core/node_table.cpp deleteEverywhere only remove
+// the contact row), which is what the sentence promises.
+inline void nodeDeleteConfirmText(char* out, size_t cap, const char* name) {
+    if (out == nullptr || cap == 0) return;
+    const char* who = (name != nullptr && name[0] != '\0') ? name : "this node";
+    snprintf(out, cap, "Delete %s from the radio and the archive? Its DM history stays on the card.", who);
+}
+
+// After a delete the rows shift down. The caller re-finds the node BY KEY (contactsFind on the new table) and
+// lands the focus on it. When the key is gone (it was the deleted row, or it was never shown), the focus is
+// clamped to the list it now has, so an empty view never leaves an index past the end.
+inline int nodeMenuFocusAfterRemove(const int* shown, int shown_count, int new_store_index, int old_focus) {
+    if (shown_count <= 0) return 0;
+    if (new_store_index >= 0) {
+        const int pos = nodeMenuFocusFollow(shown, shown_count, new_store_index);
+        if (pos >= 0) return pos;
+    }
+    if (old_focus < 0) return 0;
+    if (old_focus >= shown_count) return shown_count - 1;
+    return old_focus;
 }
 
 }  // namespace ui

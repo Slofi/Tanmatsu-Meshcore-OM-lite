@@ -990,6 +990,95 @@ void contactsAckLeave() {
     markContactsAck(true);
 }
 
+// ------------------------------------------- S515/EST-465: the store UI's actions (Nodes menu, Settings)
+// Each one runs core/node_table.h's rule under the lock, then raises the structural dirty flag the one writer
+// already owns. radioCount() is O(n) and n is 2,000: fine for a key press or a redraw.
+om::mc::HeardToRadio heardToRadioSetting() { return g_heard_to_radio; }
+
+bool setHeardToRadioSetting(om::mc::HeardToRadio v) {
+    nvs_handle_t h;
+    if (nvs_open("mcset", NVS_READWRITE, &h) != ESP_OK) return false;
+    const esp_err_t r = nvs_set_u8(h, "heardto", (uint8_t)v);
+    if (r == ESP_OK) nvs_commit(h);
+    nvs_close(h);
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "add heard nodes to the radio: NVS write failed (%s); the old value stays",
+                 esp_err_to_name(r));
+        return false;
+    }
+    g_heard_to_radio = v;
+    ESP_LOGI(TAG, "add heard nodes to the radio: %s (NVS mcset/heardto)", heardToRadioText(g_heard_to_radio));
+    return true;
+}
+
+void nodeStoreCounts(size_t* radio, size_t* archive) {
+    if (radio != nullptr) *radio = 0;
+    if (archive != nullptr) *archive = 0;
+    if (g_store_mutex == nullptr) return;
+    StoreLock l;
+    const size_t r = radioCount(g_contacts);
+    if (radio != nullptr) *radio = r;
+    if (archive != nullptr) *archive = g_contacts.count > r ? g_contacts.count - r : 0;
+}
+
+// S515 (Claude, review): the four user actions below FORCE the archive write. A structural change already writes
+// radio.bin on the next pass, but the SD archive waited its 30 s floor, so a power-off inside that window brought a
+// deleted node back from the card on the next boot (the merge adds archive rows). They are rare and deliberate.
+om::mc::RadioResult nodeAddToRadio(const uint8_t pub[32]) {
+    if (g_store_mutex == nullptr) return om::mc::RadioResult::NotFound;
+    StoreLock l;
+    const om::mc::RadioResult r = addToRadio(g_contacts, pub);
+    if (r == om::mc::RadioResult::Ok) {
+        markContactsDirty(true);
+        g_archive_force = true;   // a user action: the SD copy follows at once (Claude, S515 review)
+        ESP_LOGI(TAG, "nodes: added to the radio (%u / %u)", (unsigned)radioCount(g_contacts),
+                 (unsigned)kMaxRadio);
+    } else if (r == om::mc::RadioResult::RadioFull) {
+        ESP_LOGW(TAG, "nodes: radio full (%u / %u); nothing changed", (unsigned)radioCount(g_contacts),
+                 (unsigned)kMaxRadio);
+    }
+    return r;
+}
+
+om::mc::RadioResult nodeRemoveFromRadio(const uint8_t pub[32]) {
+    if (g_store_mutex == nullptr) return om::mc::RadioResult::NotFound;
+    StoreLock l;
+    const om::mc::RadioResult r = removeFromRadio(g_contacts, pub);
+    if (r == om::mc::RadioResult::Ok) {
+        markContactsDirty(true);
+        g_archive_force = true;   // a user action: the SD copy follows at once (Claude, S515 review)
+        ESP_LOGI(TAG, "nodes: moved to the archive (%u left in the radio)", (unsigned)radioCount(g_contacts));
+    }
+    return r;
+}
+
+bool nodeDeleteEverywhere(const uint8_t pub[32]) {
+    if (g_store_mutex == nullptr) return false;
+    StoreLock l;
+    if (!deleteEverywhere(g_contacts, pub)) return false;
+    markContactsDirty(true);
+    g_archive_force = true;   // a user action: the SD copy follows at once (Claude, S515 review)
+    ESP_LOGI(TAG, "nodes: deleted from both stores (%u left); its DM history stays on the card",
+             (unsigned)g_contacts.count);
+    return true;
+}
+
+size_t nodeClearRadio() {
+    if (g_store_mutex == nullptr) return 0;
+    StoreLock l;
+    size_t n = 0;
+    for (size_t i = 0; i < g_contacts.count; i++) {
+        if (!g_contacts.c[i].in_radio) continue;
+        g_contacts.c[i].in_radio = false;
+        n++;
+    }
+    if (n == 0) return 0;
+    markContactsDirty(true);
+    g_archive_force = true;   // a user action: the SD copy follows at once (Claude, S515 review)
+    ESP_LOGI(TAG, "nodes: radio cleared (%u moved to the archive; the archive keeps them)", (unsigned)n);
+    return n;
+}
+
 bool newNodeNoticeEnabled() { return g_new_node_notice; }
 
 bool setNewNodeNoticeEnabled(bool on) {

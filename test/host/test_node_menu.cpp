@@ -71,51 +71,63 @@ void addContact(om::mc::ContactStore& s, uint8_t seed, const char* name, uint8_t
 
 // ------------------------------------------------------------------------------ 1. rows per node type
 void test_rows_per_type() {
-  printf("test  rows: client -> DM/Info/Favourite/Remove; repeater/room/sensor -> no DM; no key -> Info\n");
+  printf("test  rows: client -> DM/Info/Ping/Trace/store/Favourite/Delete; repeater/room/sensor -> no DM; no key -> Info\n");
   om::ui::NodeMenuRow  rows[om::ui::kMaxNodeMenuRows];
   om::ui::NodeMenuContext c;
 
   c.advType   = om::ui::kNodeMenuAdvChat;
   c.hasKey    = true;
   c.pathKnown = true;   // EST-456: a stored route is what makes Trace offerable
-  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 6);
+  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 7);
   CHECK(rows[0].action == om::ui::NodeAction::DirectMessage);
   CHECK_STR(rows[0].label, "Direct message");
   CHECK(rows[1].action == om::ui::NodeAction::Info);
   CHECK(rows[2].action == om::ui::NodeAction::Ping);
   CHECK(rows[3].action == om::ui::NodeAction::Trace);
-  CHECK(rows[4].action == om::ui::NodeAction::Favourite);
-  CHECK_STR(rows[4].value, "off");
-  CHECK(!rows[4].valueAccent);
-  CHECK(rows[5].action == om::ui::NodeAction::RemoveContact);
+  CHECK(rows[4].action == om::ui::NodeAction::AddToRadio);   // S515/EST-465: an archive-only node
+  CHECK_STR(rows[4].label, "Add to radio");
+  CHECK(rows[5].action == om::ui::NodeAction::Favourite);
+  CHECK_STR(rows[5].value, "off");
+  CHECK(!rows[5].valueAccent);
+  CHECK(rows[6].action == om::ui::NodeAction::DeleteEverywhere);
+  CHECK_STR(rows[6].label, "Delete everywhere");
   // The actions that do not exist here are never offered.
-  for (int i = 0; i < 6; ++i) {
+  for (int i = 0; i < 7; ++i) {
     CHECK(rows[i].action != om::ui::NodeAction::None);
   }
 
   // No stored route: the Trace row is ABSENT, not dimmed (EST-456).
   c.pathKnown = false;
-  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 5);
-  for (int i = 0; i < 5; ++i) CHECK(rows[i].action != om::ui::NodeAction::Trace);
+  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 6);   // store row + Favourite + Delete
+  for (int i = 0; i < 6; ++i) CHECK(rows[i].action != om::ui::NodeAction::Trace);
   c.pathKnown = true;
 
   // Favourite on: the value is "on" AND the accent flag is set (never inferred from the word).
   c.favourite = true;
-  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 6);
-  CHECK_STR(rows[4].value, "on");
-  CHECK(rows[4].valueAccent);
+  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 7);
+  CHECK_STR(rows[5].value, "on");
+  CHECK(rows[5].valueAccent);
+
+  // S515/EST-465: in the radio the store row flips to "Move to archive", and never both.
+  c.in_radio = true;
+  CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 7);
+  CHECK(rows[4].action == om::ui::NodeAction::MoveToArchive);
+  CHECK_STR(rows[4].label, "Move to archive");
+  for (int i = 0; i < 7; ++i) CHECK(rows[i].action != om::ui::NodeAction::AddToRadio);
+  c.in_radio = false;
 
   // A repeater, room and sensor can each hold a key but cannot take a text DM.
   const uint8_t types[] = {om::ui::kNodeMenuAdvRepeater, om::ui::kNodeMenuAdvRoom, om::ui::kNodeMenuAdvSensor, 0};
   for (uint8_t t : types) {
     c.advType = t;
     c.favourite = false;
-    CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 5);
+    CHECK_EQ(om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows), 6);
     CHECK(rows[0].action == om::ui::NodeAction::Info);
     CHECK(rows[1].action == om::ui::NodeAction::Ping);
     CHECK(rows[2].action == om::ui::NodeAction::Trace);
-    CHECK(rows[3].action == om::ui::NodeAction::Favourite);
-    CHECK(rows[4].action == om::ui::NodeAction::RemoveContact);
+    CHECK(rows[3].action == om::ui::NodeAction::AddToRadio);
+    CHECK(rows[4].action == om::ui::NodeAction::Favourite);
+    CHECK(rows[5].action == om::ui::NodeAction::DeleteEverywhere);
   }
 
   // No full key: only Info is honest.
@@ -147,8 +159,9 @@ void test_focus_and_action() {
   const int n = om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows);
   CHECK(om::ui::nodeMenuActionAt(rows, n, 0) == om::ui::NodeAction::DirectMessage);
   CHECK(om::ui::nodeMenuActionAt(rows, n, 2) == om::ui::NodeAction::Ping);
-  CHECK(om::ui::nodeMenuActionAt(rows, n, 5) == om::ui::NodeAction::RemoveContact);
-  CHECK(om::ui::nodeMenuActionAt(rows, n, 6) == om::ui::NodeAction::None);
+  CHECK(om::ui::nodeMenuActionAt(rows, n, 5) == om::ui::NodeAction::Favourite);
+  CHECK(om::ui::nodeMenuActionAt(rows, n, 6) == om::ui::NodeAction::DeleteEverywhere);
+  CHECK(om::ui::nodeMenuActionAt(rows, n, 7) == om::ui::NodeAction::None);
   CHECK(om::ui::nodeMenuActionAt(rows, n, -1) == om::ui::NodeAction::None);
   CHECK(om::ui::nodeMenuActionAt(nullptr, n, 0) == om::ui::NodeAction::None);
 }

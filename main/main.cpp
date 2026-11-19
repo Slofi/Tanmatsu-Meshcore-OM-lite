@@ -46,6 +46,7 @@ extern "C" {
 #include "nodes_search.h"        // S514/EST-449: the Nodes search (matcher, count, focus rules)
 #include "node_menu.h"           // S514/EST-455: the per-node actions + the favourite notice/focus rule
 #include "nodes_fresh.h"         // S515/EST-461: the NEW contact's frozen order + ack (pure, host-tested)
+#include "node_view.h"           // S515/EST-465: the Nodes page's All / Radio / Archive filter
 #include "screen_power.h"        // S515/EST-461: the power button's screen-off state machine (pure, host-tested)
 #include "rptr_page.h"           // S514/EST-453: RPTR part 1 (list, login, status)
 #include "rptr_link.h"           // S514/EST-453: the RPTR radio requests + remembered passwords
@@ -564,6 +565,11 @@ enum : uint16_t {
     kNodesRowRemove = 1,
     kNodesRowClear,
     kNodesRowNotice,
+    // S515/EST-465: the two stores. The heard-to-radio rule (NVS), the live counts + card, and one way to
+    // empty the radio without touching the archive.
+    kNodesRowHeard = 10,
+    kNodesRowStores,
+    kNodesRowClearRadio,
 };
 
 const char* nodesNoticeValue(tm::Core&) { return om::mc::newNodeNoticeEnabled() ? "On" : "Off"; }
@@ -573,8 +579,31 @@ void nodesToggleNotice(tm::Core&, const tm::SettingRow&) {
         om::ui::noticeSet("New-node notice not saved", 3000);
 }
 
+// S515/EST-465: "Add heard nodes to the radio" — Off / Clients / All. The value and the cycle are pure
+// (core/node_view.h), the write is mc_link's NVS setter. A refused write keeps the old value and says so.
+const char* nodesHeardValue(tm::Core&) {
+    return om::ui::nodeHeardToRadioValue(om::mc::heardToRadioSetting());
+}
+
+void nodesCycleHeard(tm::Core&, const tm::SettingRow&) {
+    const om::mc::HeardToRadio next = om::ui::nodeHeardToRadioCycle(om::mc::heardToRadioSetting());
+    if (!om::mc::setHeardToRadioSetting(next)) om::ui::noticeSet("Add-to-radio setting not saved", 3000);
+}
+
+// The info row: the same two live counts the Nodes head shows, plus the card's state.
+const char* nodesStoresValue(tm::Core&) {
+    static char buf[80];
+    size_t radio = 0, archive = 0;
+    om::mc::nodeStoreCounts(&radio, &archive);
+    om::ui::nodeStoreInfoText(buf, sizeof(buf), radio, archive, g_sd_mounted);
+    return buf;
+}
+
 static const tm::SettingRow kOmNodesRows[] = {
-    {tm::SettingKind::Info, 0, "Contacts", "", gsetContacts, nullptr},
+    {tm::SettingKind::Cycle, kNodesRowHeard, "Add heard nodes to the radio", "", nodesHeardValue,
+     nodesCycleHeard},
+    {tm::SettingKind::Info, kNodesRowStores, "Stored nodes", "", nodesStoresValue, nullptr},
+    {tm::SettingKind::Action, kNodesRowClearRadio, "Clear radio (archive kept)"},
     {tm::SettingKind::SubPage, kNodesRowRemove, "Remove a contact"},
     {tm::SettingKind::Action, kNodesRowClear, "Clear all contacts"},
     {tm::SettingKind::Toggle, kNodesRowNotice, "New-node notice", "", nodesNoticeValue, nodesToggleNotice},
@@ -697,7 +726,8 @@ enum : uint16_t {
 };
 enum class ChatSub : uint8_t { None = 0, Channel, Scope, AddKey, KeyShown };
 enum class ChatField : uint8_t { None = 0, Tag, KeyName, KeyB64, ScopeRegion, Rename };
-enum class ConfirmTarget : uint8_t { Name = 0, RemoveChannel, ShowKey, RemoveContact, ClearContacts, ForgetRptr };
+enum class ConfirmTarget : uint8_t { Name = 0, RemoveChannel, ShowKey, RemoveContact, ClearContacts, ForgetRptr,
+                                     DeleteEverywhere, ClearRadio };
 
 // S514/EST-453: the RPTR page's UI state. The link owns the found list, the login machine and the status;
 // these are only where the cursor and the typed password are.
@@ -742,8 +772,14 @@ tm::SettingRow      g_nodes_sub_rows[kNodesSettingsRows];
 // 8 KB, and the loop task has 16 KB. The store lock is held across each use.
 int                 g_nodes_order[om::mc::kMaxNodes];
 int                 g_nodes_shown[om::mc::kMaxNodes];
+// S515/EST-465: the rows the VIEW keeps, between the frozen order and the search filter (one more 8 KB
+// array, file scope like the other two; the search then reads this and writes g_nodes_order).
+int                 g_nodes_view_order[om::mc::kMaxNodes];
 tm::SettingsSection g_nodes_sub_sections[1];
 int                 g_confirm_contact = -1;
+// S515/EST-465: Delete everywhere names a KEY, not a row: an advert or a delete can shift the index while
+// the question is up, and Apply must still act on the node the question names.
+uint8_t             g_confirm_pub[32] = {0};
 
 ConfirmTarget g_confirm_target  = ConfirmTarget::Name;
 int           g_confirm_channel = -1;
@@ -864,14 +900,18 @@ int buildNodesSubRows() {
     om::mc::ContactStore& cs = om::mc::contacts();
     int* order = g_nodes_order;
     const int count = (int)om::mc::contactsOrder(cs, order, om::mc::kMaxNodes);
-    if (count == 0) {
-        g_nodes_sub_rows[n++] = tm::SettingRow(tm::SettingKind::Info, 0, "No contacts yet");
+    if (count == 0 || om::mc::radioCount(cs) == 0) {
+        g_nodes_sub_rows[n++] = tm::SettingRow(tm::SettingKind::Info, 0, "No radio nodes yet");
         return n;
     }
     const uint32_t now = om::time_source::epochNow();
     for (int i = 0; i < count && n < (int)kNodesSettingsRows; ++i) {
         const int idx = order[i];
         const om::mc::Contact& c = cs.c[idx];
+        // S515/EST-465: this list is the RADIO list (what "Remove a contact" can act on), not the whole table.
+        // Before the two-store split the table WAS the radio, so it listed the same nodes; since EST-463 the
+        // table also holds the archive, and listing those here would have made this page a second Nodes page.
+        if (!c.in_radio) continue;
         snprintf(g_nodes_names[n], sizeof(g_nodes_names[n]), "%s", c.name);
         char age[12];
         om::mc::formatAge(now, c.heard_at, age, sizeof(age));
@@ -885,6 +925,8 @@ int buildNodesSubRows() {
                                              g_nodes_meta[n], nullptr, nullptr);
         ++n;
     }
+    // The first 64 rows of the order happened to be archive-only: say so instead of an empty page.
+    if (n == 0) g_nodes_sub_rows[n++] = tm::SettingRow(tm::SettingKind::Info, 0, "No radio nodes yet");
     return n;
 }
 
@@ -1326,6 +1368,10 @@ extern "C" void app_main(void) {
     char   nodes_query[om::ui::kNodeQueryBytes] = {0};
     size_t nodes_query_len = 0;
     static bool nodes_bar = false;   // true = the search bar has the focus; false = the list does
+    // S515/EST-465: the store view (Left/Right), session-only like the search. A view change re-seats the ack
+    // dwell on the new first row WITHOUT acking it (entry alone acks nothing).
+    static om::ui::NodeView nodes_view         = om::ui::kNodeViewDefault;
+    static bool             nodes_view_changed = false;
     // S514/EST-455: the node menu. `node_menu_index` is the STORE row the menu belongs to — not the focused
     // position — so an advert or a re-sort cannot make the sheet act on somebody else. The focus follows that
     // row after a favourite toggle (core/node_menu.h::nodeMenuFocusFollow).
@@ -1767,6 +1813,24 @@ extern "C" void app_main(void) {
         settings_frame.beginConfirm(focus_row);
     };
 
+    // S515/EST-465: "Clear radio (archive kept)". The APPLY path moves the marks, never the rows, so the
+    // archive keeps every node and every DM/route still works.
+    auto raiseClearRadio = [&](int focus_row) {
+        size_t radio = 0;
+        om::mc::nodeStoreCounts(&radio, nullptr);
+        if (radio == 0) {
+            om::ui::noticeSet("The radio is already empty", 3000);
+            return;
+        }
+        g_confirm_target = ConfirmTarget::ClearRadio;
+        snprintf(g_confirm_title, sizeof(g_confirm_title), "Clear radio");
+        snprintf(g_confirm_text, sizeof(g_confirm_text),
+                 "Move all %u radio nodes to the archive? The archive keeps them all.", (unsigned)radio);
+        snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Clear radio");
+        g_confirm_danger = true;
+        settings_frame.beginConfirm(focus_row);
+    };
+
     // Both page views are BUILT and DRAWN under the store lock; the lock is released before the panel blit, so
     // the radio task never waits for an 800x480 push, and a draw never sees a half-refreshed node.
     // S514/EST-456: the captured menu row's public key, copied under the store lock. False for a stale index, so
@@ -1794,6 +1858,25 @@ extern "C" void app_main(void) {
         return (int)om::mc::contactsOrder(cs, out, om::mc::kMaxNodes);
     };
 
+    // S515/EST-465: frozen order -> the VIEW (All / Radio / Archive) -> the search. ONE pipeline, used by the
+    // draw and by every key that needs "how many rows are shown", so they cannot disagree. The caller holds the
+    // store lock (nodesOrderForPage takes it again; it is recursive).
+    auto nodesApplyFilters = [&](int* shown) -> int {
+        int*                  order = g_nodes_order;
+        om::mc::ContactStore& cs    = om::mc::contacts();
+        const int total   = nodesOrderForPage(order);
+        const int in_view = om::ui::nodeViewFilter(cs, order, total, nodes_view, g_nodes_view_order);
+        return om::ui::nodeSearchFilter(&cs, g_nodes_view_order, in_view, nodes_query, shown);
+    };
+
+    // How many rows the current VIEW holds, before the search ("M" in "N of M").
+    auto nodesViewCount = [&]() -> int {
+        om::mc::StoreLock     l;
+        om::mc::ContactStore& cs = om::mc::contacts();
+        const int total = nodesOrderForPage(g_nodes_order);
+        return om::ui::nodeViewFilter(cs, g_nodes_order, total, nodes_view, nullptr);
+    };
+
     auto drawNodesPage = [&]() {
         om::ui::NodesView nv;
         nv.clock       = clockText();
@@ -1804,11 +1887,15 @@ extern "C" void app_main(void) {
         {
             om::mc::StoreLock l;
             nv.store       = &om::mc::contacts();
-            const int total = nodesOrderForPage(order);
-            // S514/EST-449: the list shows the FILTERED order; the bar prints "N of M" against the whole
-            // contact table (store->count), exactly the L2's count line.
+            // S515/EST-465: the list shows the VIEW + search filtered order; "M" is the view's row count.
             nv.order       = shown;
-            nv.order_count = om::ui::nodeSearchFilter(&om::mc::contacts(), order, total, nodes_query, shown);
+            nv.order_count = nodesApplyFilters(shown);
+            nv.view_count  = nodesViewCount();
+            nv.view        = nodes_view;
+            nv.radio_count = om::mc::radioCount(om::mc::contacts());
+            nv.archive_count =
+                om::mc::contacts().count > nv.radio_count ? om::mc::contacts().count - nv.radio_count : 0;
+            nv.sd_mounted  = g_sd_mounted;
             if (nodes_focus >= nv.order_count) nodes_focus = nv.order_count > 0 ? nv.order_count - 1 : 0;
             if (nodes_focus < 0) nodes_focus = 0;
             // S514/EST-455: the menu belongs to a STORE row; after a toggle (or an advert) the focus follows it,
@@ -1844,7 +1931,9 @@ extern "C" void app_main(void) {
         }
         // S514/EST-455: Remove raises the EST-447 confirm on THIS page. The sheet is drawn over the list with
         // the same shared frame and look the Settings sub-page uses.
-        if (settings_frame.confirmOpen() && g_confirm_target == ConfirmTarget::RemoveContact) {
+        if (settings_frame.confirmOpen() &&
+            (g_confirm_target == ConfirmTarget::RemoveContact ||
+             g_confirm_target == ConfirmTarget::DeleteEverywhere)) {
             om::ui::SettingsView sv;
             sv.confirm        = true;
             sv.confirm_title  = g_confirm_title;
@@ -1858,21 +1947,16 @@ extern "C" void app_main(void) {
     // S514/EST-449: how many rows the current query keeps. The key handler needs the count for Down from
     // the bar (the first MATCH) and the list's clamp; it is the SAME filter the draw uses, not a second one.
     auto nodesShownCount = [&]() -> int {
-        int* order = g_nodes_order;
-        int* shown = g_nodes_shown;
         om::mc::StoreLock l;
-        const int total = nodesOrderForPage(order);   // S515/EST-461: the frozen order on the page
-        return om::ui::nodeSearchFilter(&om::mc::contacts(), order, total, nodes_query, shown);
+        return nodesApplyFilters(g_nodes_shown);
     };
 
     // ---- S514/EST-455: the NODE MENU's side effects ---------------------------------------------------------
     // The rows and their order are core/node_menu.h (host-tested); these lambdas only perform what a chosen row
     // does, and every read of the contact table is under the store lock.
     auto nodesShownOrder = [&](int* shown) -> int {
-        int* order = g_nodes_order;   // S515/EST-463: file scope, not 8 KB of the loop task's stack
         om::mc::StoreLock l;
-        const int total = nodesOrderForPage(order);   // S515/EST-461: the frozen order on the page
-        return om::ui::nodeSearchFilter(&om::mc::contacts(), order, total, nodes_query, shown);
+        return nodesApplyFilters(shown);
     };
 
     auto nodesFocusedStoreIndex = [&]() -> int {
@@ -1958,6 +2042,41 @@ extern "C" void app_main(void) {
         settings_frame.beginConfirm(nodes_focus);
     };
 
+    // S515/EST-465: Delete everywhere's shared sheet. The node's KEY is copied when the question opens, so
+    // Apply cannot hit a row that shifted under it; the sentence is core/node_menu.h's (and true: deleting a
+    // contact row never touches its DM thread or its dm-*.log).
+    auto raiseDeleteConfirm = [&](int store_index) {
+        uint8_t pub[32] = {0};
+        char    name[om::mc::kNameBytes] = {0};
+        {
+            om::mc::StoreLock     l;
+            om::mc::ContactStore& cs = om::mc::contacts();
+            if ((size_t)store_index >= cs.count) return;
+            memcpy(pub, cs.c[store_index].pub, sizeof(pub));
+            snprintf(name, sizeof(name), "%s", cs.c[store_index].name);
+        }
+        memcpy(g_confirm_pub, pub, sizeof(g_confirm_pub));
+        g_confirm_target = ConfirmTarget::DeleteEverywhere;
+        snprintf(g_confirm_title, sizeof(g_confirm_title), "Delete everywhere");
+        om::ui::nodeDeleteConfirmText(g_confirm_text, sizeof(g_confirm_text), name);
+        snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Delete");
+        g_confirm_danger = true;
+        settings_frame.beginConfirm(nodes_focus);
+    };
+
+    // Rows shift after a delete. The shown order is rebuilt, the node is looked up BY KEY (it is gone, so -1)
+    // and the pure rule keeps the box on the row that slid into the deleted one, clamped to the list.
+    auto refocusAfterDelete = [&](const uint8_t pub[32], int old_focus) {
+        int*      shown = g_nodes_shown;
+        const int n     = nodesShownOrder(shown);
+        int       idx   = -1;
+        {
+            om::mc::StoreLock l;
+            idx = om::mc::contactsFind(om::mc::contacts(), pub);
+        }
+        nodes_focus = om::ui::nodeMenuFocusAfterRemove(shown, n, idx, old_focus);
+    };
+
     // The sheet's current rows, read under the lock: the count for Up/Down and the action Enter would run.
     auto nodeMenuRowCount = [&](int store_index, om::ui::NodeMenuRow* out, int max) -> int {
         om::mc::StoreLock     l;
@@ -1967,6 +2086,7 @@ extern "C" void app_main(void) {
         ctx.advType      = cs.c[store_index].type;
         ctx.hasKey       = !om::mc::contactKeyIncomplete(cs.c[store_index].pub);
         ctx.favourite    = cs.c[store_index].favourite;
+        ctx.in_radio     = cs.c[store_index].in_radio;
         ctx.pathKnown    = om::mc::contactHasOutPath(cs.c[store_index]);
         ctx.pingPending  = om::mc::nodePingPendingFor(cs.c[store_index].pub);
         ctx.tracePending = om::mc::nodeTracePendingFor(cs.c[store_index].pub);
@@ -2793,6 +2913,12 @@ extern "C" void app_main(void) {
                                     // This sheet was raised at the ROOT (the Clear row), so there is no
                                     // sub-page to close; closing one would restore a stale root focus.
                                     if (settings_frame.subPage()) closeNodesPage();
+                                } else if (g_confirm_target == ConfirmTarget::ClearRadio) {
+                                    const size_t moved = om::mc::nodeClearRadio();
+                                    if (moved > 0)
+                                        om::ui::noticeSet("Radio cleared; the archive keeps every node", 3000);
+                                    else
+                                        om::ui::noticeSet("The radio is already empty", 3000);
                                 } else if (om::mc::setNodeName(settings_pending_name)) {
                                     om::ui::noticeSet("Node name saved", 3000);
                                     ESP_LOGI(TAG, "settings: node name saved");
@@ -3041,6 +3167,8 @@ extern "C" void app_main(void) {
                                         snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Forget all");
                                         g_confirm_danger = true;
                                         settings_frame.beginConfirm(r.row);
+                                    } else if (row != nullptr && row->id == kNodesRowClearRadio) {
+                                        raiseClearRadio(r.row);
                                     } else if (row != nullptr && row->id == kNodesRowClear) {
                                         raiseClearContacts(r.row);
                                     } else {
@@ -3116,7 +3244,8 @@ extern "C" void app_main(void) {
                         handled          = true;
                         dirty            = true;
                     } else if (settings_frame.confirmOpen() &&
-                               g_confirm_target == ConfirmTarget::RemoveContact) {
+                               (g_confirm_target == ConfirmTarget::RemoveContact ||
+                                g_confirm_target == ConfirmTarget::DeleteEverywhere)) {
                         // S514/EST-455: Remove's EST-447 question, raised on THIS page. The shared sheet owns
                         // every key: Enter = Apply, Esc = Cancel, everything else is swallowed so a held arrow
                         // cannot move the list behind the question.
@@ -3136,6 +3265,21 @@ extern "C" void app_main(void) {
                                 }
                                 g_confirm_contact = -1;
                                 closeNodesPage();   // also closes the menu; a cancel below leaves it open
+                            } else if (g_confirm_target == ConfirmTarget::DeleteEverywhere) {
+                                uint8_t pub[32];
+                                memcpy(pub, g_confirm_pub, sizeof(pub));
+                                const int old_focus = nodes_focus;
+                                if (om::mc::nodeDeleteEverywhere(pub)) {
+                                    om::ui::noticeSet("Deleted from the radio and the archive; its DM history stays",
+                                                      3000);
+                                } else {
+                                    om::ui::noticeSet("Node not deleted", 3000);
+                                }
+                                // The menu's node is gone: close the sheet and leave the box on the row that
+                                // slid into its place (by key, then clamped).
+                                node_menu_open  = false;
+                                node_menu_index = -1;
+                                refocusAfterDelete(pub, old_focus);
                             }
                         } else if (r.event == tm::SettingsEvent::ConfirmCancelled) {
                             ESP_LOGI(TAG, "nodes: remove cancelled; nothing changed");
@@ -3199,10 +3343,43 @@ extern "C" void app_main(void) {
                                     }
                                     break;
                                 }
+                                case om::ui::NodeAction::AddToRadio: {
+                                    // Filip's rule 2: a FULL radio refuses and NOTHING changes. The sheet stays
+                                    // up so the row flips to "Move to archive" on the next frame.
+                                    uint8_t pub[32];
+                                    if (nodeMenuPub(pub)) {
+                                        const om::mc::RadioResult r = om::mc::nodeAddToRadio(pub);
+                                        if (r == om::mc::RadioResult::Ok) {
+                                            om::ui::noticeSet(om::ui::nodeAddedToRadioNotice(), 3000);
+                                        } else if (r == om::mc::RadioResult::RadioFull) {
+                                            char text[80];
+                                            om::ui::nodeRadioFullNotice(text, sizeof(text));
+                                            om::ui::noticeSet(text, 4000);
+                                        } else if (r == om::mc::RadioResult::AlreadyIn) {
+                                            om::ui::noticeSet("Already in the radio", 2500);
+                                        }
+                                    }
+                                    break;
+                                }
+                                case om::ui::NodeAction::MoveToArchive: {
+                                    uint8_t pub[32];
+                                    if (nodeMenuPub(pub)) {
+                                        const om::mc::RadioResult r = om::mc::nodeRemoveFromRadio(pub);
+                                        if (r == om::mc::RadioResult::Ok)
+                                            om::ui::noticeSet(om::ui::nodeMovedToArchiveNotice(), 3000);
+                                        else if (r == om::mc::RadioResult::AlreadyIn)
+                                            om::ui::noticeSet("Already in the archive", 2500);
+                                    }
+                                    break;
+                                }
                                 case om::ui::NodeAction::Favourite:
                                     // The list re-sorts at once; the focus follows. The sheet stays up so a
                                     // second press can undo it.
                                     toggleFavourite(node_menu_index);
+                                    break;
+                                case om::ui::NodeAction::DeleteEverywhere:
+                                    // The shared question, naming the node; a Cancel brings this sheet back.
+                                    raiseDeleteConfirm(node_menu_index);
                                     break;
                                 case om::ui::NodeAction::RemoveContact:
                                     // The EST-447 question; a Cancel brings this sheet back unchanged.
@@ -3260,6 +3437,21 @@ extern "C" void app_main(void) {
                         } else if (k == tm::Key::Down) {
                             if (om::ui::nodesFocusDown(&nodes_bar, &nodes_focus, nodesShownCount()) && !nodes_bar)
                                 nodes_key_moved = true;
+                            handled = true;
+                            dirty   = true;
+                        } else if (k == tm::Key::Left || k == tm::Key::Right) {
+                            // S515/EST-465: the store filter. Left/Right are free on this page (Up/Down are the
+                            // list, Enter the menu, and every letter already has a job), so the filter adds no
+                            // new typed character to steal. The box goes to the new view's first row and the
+                            // ack dwell is re-seated there WITHOUT acking it.
+                            const om::ui::NodeView next =
+                                om::ui::nodeViewCycle(nodes_view, k == tm::Key::Left ? -1 : 1);
+                            if (next != nodes_view) {
+                                nodes_view         = next;
+                                nodes_focus        = 0;
+                                nodes_view_changed = true;
+                                ESP_LOGI(TAG, "nodes: view -> %s", om::ui::nodeViewText(nodes_view));
+                            }
                             handled = true;
                             dirty   = true;
                         } else if (k == tm::Key::Enter) {
@@ -3525,7 +3717,10 @@ extern "C" void app_main(void) {
                 nodes_page_prev = pnow;
             }
             if (pnow == tm::Page::Nodes) {
-                if (nodes_key_moved) {
+                if (nodes_view_changed) {
+                    nodes_view_changed = false;
+                    om::ui::nodesAckEnter(nodes_ack, nodes_focus, now_ms);   // a new view's row 0: rest, no ack
+                } else if (nodes_key_moved) {
                     nodes_key_moved = false;
                     if (om::ui::nodesAckKeyMoved(nodes_ack, nodes_focus, now_ms) >= 0) {
                         const int si = nodesFocusedStoreIndex();

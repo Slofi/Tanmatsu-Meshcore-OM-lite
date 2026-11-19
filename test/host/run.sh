@@ -44,11 +44,12 @@ NODESFRESHASAN="$(mktemp /tmp/tm-nodes-fresh-asan.XXXXXX)"
 NODETABLE="$(mktemp /tmp/tm-node-table.XXXXXX)"
 NODESTORE="$(mktemp /tmp/tm-node-store.XXXXXX)"
 NODESTOREASAN="$(mktemp /tmp/tm-node-store-asan.XXXXXX)"
+NODEVIEW="$(mktemp /tmp/tm-node-view.XXXXXX)"
 RPTRED="$(mktemp -d /tmp/tm-rptr-ed.XXXXXX)"
 CHANORACLE="$(mktemp -d /tmp/tm-chan-oracle.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN" "$NODEVIEW"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -449,3 +450,14 @@ python3 ../../tools/mkemoji_subset.py --check
     ../../core/mc_store.cpp ../../core/contact_blob.cpp ../../core/node_store.cpp ../../core/node_table.cpp \
     -o "$NODESTOREASAN"
 ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$NODESTOREASAN"
+
+# S515/EST-465: the Nodes page's ALL / RADIO / ARCHIVE view, the node menu's store rows ("Add to radio" vs
+# "Move to archive", never both), the RadioFull refusal's exact words with nothing changed, the Delete
+# everywhere sentence, the focus re-find BY KEY after a delete (rows shift), and Settings › OM Lite › NODES'
+# row values (Off/Clients/All, the counts + card line). node_menu/node_view are headers; mc_store + node_table
+# are the device's own rules.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_node_view.cpp \
+    ../../core/mc_store.cpp ../../core/node_table.cpp \
+    -o "$NODEVIEW"
+"$NODEVIEW"

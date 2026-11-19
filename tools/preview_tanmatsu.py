@@ -2055,7 +2055,9 @@ def _omlite_rows():
     """
     return [
         ('sect', 'NODES', None, None),
-        ('row', 'Contacts', '3 / 32', False),
+        ('row', 'Add heard nodes to the radio', 'Off', False),
+        ('row', 'Stored nodes', 'Radio 10 / 300 · Archive 412 · SD ok', False),
+        ('row', 'Clear radio (archive kept)', '', False),
         ('row', 'Remove a contact', '', True),
         ('row', 'Clear all contacts', '', False),
         ('row', 'New-node notice', 'On', False),
@@ -2158,7 +2160,7 @@ def settings_nodes():
     """
     img, d, W, H, pad, body_top = _settings_owner_frame(1, 'OM Lite · tab 2 of 4')
     body_bot = H - TM['hint_h']
-    _draw_omlite_rows(d, W, pad, body_top, body_bot, 'Remove a contact', 0)
+    _draw_omlite_rows(d, W, pad, body_top, body_bot, 'Add heard nodes to the radio', 0)
     hint_bar(d, 'settings', [('←→', 'tab'), ('↑↓', 'row'), ('↵', 'open/change'), ('esc', 'back'),
                              (',', 'settings')])
     return save(img, '2026-11-19-settings-nodes.png')
@@ -2173,8 +2175,8 @@ def settings_map():
     """
     img, d, W, H, pad, body_top = _settings_owner_frame(1, 'OM Lite · tab 2 of 4')
     body_bot = H - TM['hint_h']
-    # Height of everything above the MAP header in _omlite_rows(): NODES (22 + 4*34) + CHAT (22 + 6*34).
-    above_map = (22 + 4 * 34) + (22 + 6 * 34)
+    # Height of everything above the MAP header in _omlite_rows(): NODES (22 + 6*34) + CHAT (22 + 6*34).
+    above_map = (22 + 6 * 34) + (22 + 6 * 34)
     _draw_omlite_rows(d, W, pad, body_top, body_bot, 'Start position', above_map)
     hint_bar(d, 'settings', [('←→', 'tab'), ('↑↓', 'row'), ('↵', 'open/change'), ('esc', 'back'),
                              (',', 'settings')])
@@ -2545,7 +2547,184 @@ def hint_dots():
     return launcher(dots=('chat', 'nodes'), name='2026-11-19-hint-dots.png')
 
 
-RENDERERS = dict(launcher=launcher, nodes_fresh=nodes_fresh, hint_dots=hint_dots, menu=menu, nodes=nodes, nodes_search=nodes_search,
+# ------------------------------------------- S515/EST-465: the store view, the row tag and the node menu
+# Invented, like every fixture here. `store` = True means in the radio (the gold "R" chip); every other row is
+# archive-only. One row carries all three marks (radio + favourite + fresh), which is the row the ticket asks
+# to check.
+NODES_VIEWS = [
+    ('client', 'TEST-A1', 'direct', '14h', '3.2', True, True, True),
+    ('repeater', 'RPT-Sever', 'path 2', '18m', '7.5', True, True, False),
+    ('repeater', 'RPT-Jug', 'path 2', '49m', '6.1', True, False, False),
+    ('client', 'TEST-B2', 'direct', '2m', '4.1', False, False, True),
+    ('room', 'ROOM-3', 'path 2', '3m', '1.8', False, False, False),
+    ('repeater', 'RPT-Vzhod', 'path 3', '9h', '-1.4', False, False, False),
+    ('client', 'LOCAL-KB', 'direct', '2d', '4.4', False, False, False),
+]
+
+
+def _nodes_head_store(d, W, pad, radio, archive, view):
+    """The head band: title, the three chips (active gold), the live counts on the right."""
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Nodes', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    fh = font(FONT_MONO, TM['f_hint'])
+    fm = font(FONT_MONO, TM['f_meta'])
+    head_right = 'Radio %d / 300 · Archive %d' % (radio, archive)
+    text(d, (W - pad, y + TM['head_h'] // 2), head_right, fm, P['Dim'], anchor='rm')
+    title_w = tw(font(FONT_SANS, TM['f_title']), 'Nodes')
+    cx = pad + title_w + 28
+    chip_h = 22
+    cy = y + (TM['head_h'] - chip_h) // 2
+    for name in ('All', 'Radio', 'Archive'):
+        cw = tw(fh, name) + 20
+        on = (name == view)
+        d.rectangle([cx, cy, cx + cw, cy + chip_h], fill=P['SelBg'] if on else P['FieldBg'],
+                    outline=P['Acc'] if on else P['Line'], width=2 if on else 1)
+        text(d, (cx + cw // 2, cy + chip_h // 2), name, fh, P['AccInk'] if on else P['Dim'], anchor='mm')
+        cx += cw + 8
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+
+
+def _nodes_store_list(d, W, rows, focus_row, bar_count, view):
+    pad = TM['pad']
+    list_x0, list_x1 = pad, pad + TM['list_w']
+    work_top = TM['status_h'] + TM['head_h'] + 1
+    bar_x1 = list_x1 - TM['ring_inset']
+    bar_y, bar_h = work_top + 4, 30
+    d.rectangle([list_x0, bar_y, bar_x1, bar_y + bar_h], fill=P['FieldBg'], outline=P['Line'], width=1)
+    text(d, (list_x0 + 12, bar_y + bar_h // 2), 'search nodes', font(FONT_SANS, TM['f_body']),
+         P['Dimmer'], anchor='lm')
+    text(d, (bar_x1 - 12, bar_y + bar_h // 2), bar_count, font(FONT_MONO, TM['f_hint']), P['Dim'],
+         anchor='rm')
+    rows_top = bar_y + bar_h + 6
+    row_h = 46
+    row_right = list_x1 - TM['ring_inset']
+    for i, (kind, name, hops, age, snr, store, fav, fresh) in enumerate(rows):
+        y0 = rows_top + i * row_h
+        y1 = y0 + row_h
+        if i == focus_row:
+            focus_band(d, list_x0 - 8, list_x1, y0, y1)
+        else:
+            hline(d, list_x0, row_right, y1, P['RowLine'])
+        col = P['Client'] if kind == 'client' else (P['Green'] if kind == 'repeater' else P['Warn'])
+        d.ellipse([list_x0 + 6, y0 + row_h // 2 - 4, list_x0 + 14, y0 + row_h // 2 + 4], fill=col)
+        # main/nodes_page.cpp: a 14x14 gold plate at list_x0+23, the letter R in the background ink.
+        if store:
+            d.rectangle([list_x0 + 23, y0 + 7, list_x0 + 37, y0 + 21], fill=P['Acc'])
+            text(d, (list_x0 + 30, y0 + 14), 'R', font(FONT_MONO, TM['f_hint']), P['Bg'], anchor='mm')
+        nc = P['AccInk'] if i == focus_row else P['Ink']
+        text(d, (list_x0 + 43, y0 + 10), name, font(FONT_SANS, 16), nc)
+        meta = font(FONT_MONO, TM['f_meta'])
+        text(d, (list_x0 + 43, y0 + 29), hops, meta, P['Dimmer'])
+        text(d, (row_right - 74, y0 + 11), age, meta, P['Dim'], anchor='ra')
+        text(d, (row_right - 6, y0 + 29), snr + ' dB', meta, P['Dim'], anchor='ra')
+        if fav:
+            d.ellipse([row_right - 77, y0 + 13, row_right - 71, y0 + 19], fill=P['Acc'])
+        if fresh:
+            d.ellipse([row_right - 49, y0 + 13, row_right - 43, y0 + 19], fill=P['Bad'])
+    scroll_indicator(d, (list_x0, rows_top, list_x1, rows_top + len(rows) * row_h),
+                     total=len(rows), visible=len(rows))
+    return rows_top, list_x0, list_x1, row_h
+
+
+def nodes_views():
+    """S515/EST-465: the Nodes page with the store view. All three chips in the head band (All active), the head
+    right carrying the live counts, and a gold "R" on every radio row. The first row is the one with ALL THREE
+    marks: radio (R), favourite (gold dot) and fresh (red dot). Rows 4-6 are archive-only and carry no R."""
+    img, d = new_screen()
+    W, H = TM['W'], TM['H']
+    status_bar(d)
+    radio = sum(1 for r in NODES_VIEWS if r[5])
+    archive = len(NODES_VIEWS) - radio
+    _nodes_head_store(d, W, TM['pad'], radio, archive, 'All')
+    rows_top, list_x0, list_x1, row_h = _nodes_store_list(
+        d, W, NODES_VIEWS, 0, '%d of %d' % (len(NODES_VIEWS), len(NODES_VIEWS)), 'All')
+
+    work_top = TM['status_h'] + TM['head_h'] + 1
+    vline(d, list_x1 + 8, work_top, H - TM['hint_h'] - 8, P['Line'])
+    x = list_x1 + 8 + 24
+    yy = work_top + 18
+    text(d, (x, yy), 'TEST-A1', font(FONT_SANS, 26), P['Ink'])
+    yy += 34
+    text(d, (x, yy), 'client · key ' + NODE_KEY + ' · radio · favourite · new', font(FONT_MONO, TM['f_meta']),
+         P['Dim'])
+    yy += 26
+    fk = font(FONT_MONO, TM['f_kv'])
+    for label, value in (('TYPE', 'client (companion)'), ('HOPS', 'direct · 0 hops'),
+                         ('SNR / RSSI', '3.2 dB / -71 dBm'), ('LAST HEARD', '14 h ago'),
+                         ('PUBLIC KEY', NODE_KEY), ('STORE', 'radio'), ('PATH', 'direct')):
+        text(d, (x, yy), label, fk, P['Dimmer'])
+        text(d, (x + 130, yy), value, fk, P['Ink'])
+        yy += 28
+    yy += 8
+    text(d, (x, yy), 'Enter: actions for this node.', font(FONT_SANS, TM['f_body']), P['Dimmer'])
+    text(d, (x, yy + 22), '←→: All / Radio / Archive. f: favourite.',
+         font(FONT_SANS, TM['f_body']), P['Dimmer'])
+
+    hint_bar(d, 'nodes', [('<>', 'view'), ('ret', 'menu'), ('f', 'fav'), ('/', 'search'),
+                          ('a', 'advert'), ('esc', 'back')], dots=('chat', 'nodes'))
+    return save(img, '2026-11-19-nodes-views.png')
+
+
+def node_menu_radio():
+    """S515/EST-465: the node menu on an ARCHIVE node — "Add to radio" (never "Move to archive" here), the
+    store row sits under Trace, and Delete everywhere is the last row. The list keeps the same R tags."""
+    img, d = new_screen()
+    W, H = TM['W'], TM['H']
+    status_bar(d)
+    radio = sum(1 for r in NODES_VIEWS if r[5])
+    archive = len(NODES_VIEWS) - radio
+    _nodes_head_store(d, W, TM['pad'], radio, archive, 'All')
+    _nodes_store_list(d, W, NODES_VIEWS, 3, '%d of %d' % (len(NODES_VIEWS), len(NODES_VIEWS)), 'All')
+
+    work_top = TM['status_h'] + TM['head_h'] + 1
+    list_x1 = TM['pad'] + TM['list_w']
+    vline(d, list_x1 + 8, work_top, H - TM['hint_h'] - 8, P['Line'])
+    x = list_x1 + 8 + 24
+    yy = work_top + 18
+    text(d, (x, yy), 'TEST-B2', font(FONT_SANS, 26), P['Ink'])
+    yy += 34
+    text(d, (x, yy), 'client · key ' + NODE_KEY + ' · archive', font(FONT_MONO, TM['f_meta']), P['Dim'])
+    yy += 26
+    fk = font(FONT_MONO, TM['f_kv'])
+    for label, value in (('TYPE', 'client (companion)'), ('HOPS', 'direct · 0 hops'),
+                         ('SNR / RSSI', '4.1 dB / -68 dBm'), ('LAST HEARD', '2 m ago'),
+                         ('PUBLIC KEY', NODE_KEY), ('STORE', 'archive'), ('PATH', 'direct')):
+        text(d, (x, yy), label, fk, P['Dimmer'])
+        text(d, (x + 130, yy), value, fk, P['Ink'])
+        yy += 28
+
+    # ---- the sheet: scrim, gold outline, the node's name and facts, seven rows.
+    img = Image.blend(img, Image.new('RGB', img.size, '#000000'), 0.62)
+    d = ImageDraw.Draw(img)
+    fm = font(FONT_MONO, TM['f_meta'])
+    sheet_w, row_h, head_h, spad = 560, 42, 64, 16
+    rows = [('Direct message', ''), ('Info', ''), ('Ping', ''), ('Trace', ''),
+            ('Add to radio', ''), ('Favourite', 'off'), ('Delete everywhere', '')]
+    sheet_h = 2 * spad + head_h + len(rows) * row_h
+    x0 = (W - sheet_w) // 2
+    x1 = x0 + sheet_w
+    y0 = max(28, H - TM['hint_h'] - 8 - sheet_h)
+    plate(d, [x0, y0, x1, y0 + sheet_h], P['Panel'], P['Acc'], r=0, w=2)
+    text(d, (x0 + 20, y0 + spad), 'TEST-B2', font(FONT_SANS, 22), P['Ink'])
+    text(d, (x0 + 20, y0 + spad + 34), 'client · last heard 2m ago · archive', fm, P['Dim'])
+    hline(d, x0 + 1, x1 - 1, y0 + spad + head_h - 1, P['Line'])
+    ry = y0 + spad + head_h
+    for i, (label, value) in enumerate(rows):
+        if i == 4:
+            focus_band(d, x0 + 8, x1 - 8, ry + 1, ry + row_h - 2)
+        text(d, (x0 + 24, ry + row_h // 2), label, font(FONT_SANS, 17),
+             P['AccInk'] if i == 4 else P['Ink'], anchor='lm')
+        if value:
+            text(d, (x1 - 24, ry + row_h // 2), value, font(FONT_MONO, TM['f_hint']), P['Dim'], anchor='rm')
+        if i + 1 < len(rows):
+            hline(d, x0 + 8, x1 - 8, ry + row_h - 1, P['RowLine'])
+        ry += row_h
+
+    hint_bar(d, 'nodes', [('up/dn', 'move'), ('ret', 'choose'), ('esc', 'close')])
+    return save(img, '2026-11-19-node-menu-radio.png')
+
+
+RENDERERS = dict(nodes_views=nodes_views, node_menu_radio=node_menu_radio, launcher=launcher, nodes_fresh=nodes_fresh, hint_dots=hint_dots, menu=menu, nodes=nodes, nodes_search=nodes_search,
                  nodes_favourites=nodes_favourites, node_trace=node_trace, chat=chat, chat2=chat_cards,
                  chat_emoji=chat_emoji,
                  chat_dm=chat_dm_column, chat_meta=chat_meta, dm_enter=dm_enter, map=map_page, rptr=rptr, rptr_list=rptr_list, rptr_status=rptr_status, settings=settings,

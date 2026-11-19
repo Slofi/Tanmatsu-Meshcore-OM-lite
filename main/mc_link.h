@@ -16,7 +16,8 @@
 
 #include "advert_rule.h"
 #include "mc_identity.h"
-#include "node_ops.h"   // S514/EST-456: Ping/Trace jobs (the L2's node actions)
+#include "node_ops.h"     // S514/EST-456: Ping/Trace jobs (the L2's node actions)
+#include "node_table.h"   // S515/EST-465: HeardToRadio / RadioResult for the store UI
 #include "mc_store.h"
 
 namespace om {
@@ -182,6 +183,23 @@ bool contactsAckFresh(size_t index);
 
 // The user left the Nodes page: flush the acked flags now, past the 5 s floor. Cheap when nothing is pending.
 void contactsAckLeave();
+
+// ------------------------------------------------- S515/EST-465: the node storage UI's actions
+// Every one of them runs core/node_table.h's rule under the store lock and raises the SAME structural dirty flag
+// contactsPersistTick() owns, so the /int radio file (or the NVS fallback) and the SD archive are rewritten on
+// this loop's pass. Keyed by the node's PUBLIC KEY, never by a row index: the row can shift under the caller.
+om::mc::RadioResult nodeAddToRadio(const uint8_t pub[32]);
+om::mc::RadioResult nodeRemoveFromRadio(const uint8_t pub[32]);
+bool                nodeDeleteEverywhere(const uint8_t pub[32]);   // false: no row with that key
+size_t              nodeClearRadio();   // clears in_radio on every row; the archive keeps them all
+
+// The live counts the Nodes head and the Settings info row show. One pass each, under the lock.
+void nodeStoreCounts(size_t* radio, size_t* archive);
+
+// Settings › OM Lite › NODES: "Add heard nodes to the radio" — Off / Clients / All, NVS mcset/heardto. A failed
+// write leaves the old value in RAM and returns false (the row then raises its own notice).
+om::mc::HeardToRadio heardToRadioSetting();
+bool                setHeardToRadioSetting(om::mc::HeardToRadio v);
 
 // ------------------------------------------------- S514/EST-456: the NODE MENU's Ping and Trace
 // Both are the L2's: Ping is the EST-453 status request (REQ_TYPE_GET_STATUS) and measures the reply's round trip;

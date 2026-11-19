@@ -11,7 +11,8 @@
 
 #include "font.h"
 #include "mc_store.h"
-#include "node_ops.h"   // S514/EST-456: the node menu's Ping/Trace result view
+#include "node_ops.h"    // S514/EST-456: the node menu's Ping/Trace result view
+#include "node_view.h"   // S515/EST-465: the All / Radio / Archive filter
 #include "screen.h"
 
 namespace om {
@@ -20,10 +21,18 @@ namespace ui {
 struct NodesView {
     const mc::ContactStore* store = nullptr;
     const int*              order = nullptr;   // contactsOrder(), FILTERED by `query` (S514/EST-449)
-    int                     order_count = 0;   // N in "N of M": rows after the search filter
+    int                     order_count = 0;   // N in "N of M": rows after the view + search filters
     int                     focused = 0;       // index INTO order
     int                     in_last_hour = 0;
     uint32_t                now = 0;
+
+    // S515/EST-465: the store view (All / Radio / Archive), the rows the VIEW holds (M in "N of M"), and the
+    // live counts the head and the chips report. `sd_mounted` false draws the one dim line under the header.
+    NodeView view        = kNodeViewDefault;
+    int      view_count  = 0;
+    size_t   radio_count = 0;
+    size_t   archive_count = 0;
+    bool     sd_mounted  = true;
 
     // S514/EST-449: the search bar is the list's top row. `query` is the live filter text (null/empty =
     // all nodes) and `search_focused` means the BAR owns the keys, so no row is drawn as selected.

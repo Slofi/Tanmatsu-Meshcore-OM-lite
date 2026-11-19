@@ -15,6 +15,103 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S515 (EST-465) · node storage UI: All / Radio / Archive, the node menu's store rows, Settings › NODES
+
+> Written by **DeepSeek** for ticket **EST-465**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed, pushed or committed. Starting point **v59 `e4b1121`** (tree clean). **Version: 60**
+> (`core/settings.h` kAppVersion). `firmware/` was read only and is unchanged.
+>
+> **ITEMS DONE: 1, 2, 3, 4, 5.** Host exit 0, build exit 0, three previews written. Nothing is installed.
+
+### 1. The Nodes page: the view filter and the store tag (item 1)
+
+- **Key: LEFT / RIGHT.** Both are FREE on the Nodes list today (main.cpp's Nodes branch uses Up/Down for the
+  list, Enter for the menu, `/` for search, `f` favourite, `a` advert, Esc back; the own symbol key is the
+  page-top hook). A letter would either steal a typed character from the search bar or collide with `f`/`a`, so
+  the two arrows that do nothing are the honest choice. The hint bar's first chip is now `lt/rt view`.
+- Three chips **All · Radio · Archive** (default **All**) in the head band, drawn where "N nodes heard" was:
+  the active one is the gold ring + `kSelBg`. The head's right slot is the ticket's live line
+  `Radio 10 / 300 · Archive 412` (`core/node_view.h::nodeStoreCountsText`). Chips and counts share the band with
+  the counts' measured width reserved, so they cannot overlap.
+- Every row has the SAME name x; a radio row adds a **14x14 gold "R" plate** (bg ink) between the type dot and
+  the name; an archive row adds nothing. The favourite dot (-74), the v57 fresh dot (-46) and the age/SNR
+  columns keep their EST-461 places — the first preview row carries all three (R + gold dot + red dot).
+- The pipeline is frozen order (EST-461) → **view filter** → search (EST-449), one function used by the draw
+  and every key, so "N of M" is the matched count over the VIEW's rows (`10 of 10`, not `10 of 412`).
+- No SD card: one dim line under the header, "No SD card: heard nodes are kept until restart", and the list
+  starts 18 px lower (the line occupies its own strip; nothing overlaps).
+- A view change puts the box on the new view's first row and **re-seats the 1.5 s ack dwell without acking**
+  (entry alone still acks nothing, EST-461's rule).
+
+### 2. The node menu (item 2)
+
+`core/node_menu.h` gains `AddToRadio` / `MoveToArchive` (exactly one of the two, by the row's `in_radio`) and
+`DeleteEverywhere`, and `kMaxNodeMenuRows` goes 6 → 7. **"Delete everywhere" REPLACED "Remove contact"** in the
+node menu: with ONE table (EST-463) they were the same operation, and offering both would have been two labels
+for one destructive action. (`RemoveContact` stays in the enum for the Settings › NODES list's own EST-447
+confirm path, which the ticket did not ask to change.)
+
+- Add to radio → Ok: "Added to the radio"; **RadioFull: `Radio full (300 / 300): move a node to the archive
+  first` and nothing changed** (the rule is core/node_table.h's; the sentence is built from `kMaxRadio`).
+- Move to archive → "Moved to the archive".
+- Delete everywhere → the shared EST-447/455 sheet, titled "Delete everywhere", with
+  `Delete <name> from the radio and the archive? Its DM history stays on the card.`
+  **That sentence is TRUE in the code:** `core/node_table.cpp::deleteEverywhere` removes the contact row only,
+  and mc_link's remove/clear paths never touch the DM ring or `dm-*.log` (they say so in their own log lines).
+- The delete captures the node's **public key** when the question opens and applies `deleteEverywhere(pub)`, so
+  a shifted row cannot be hit. After the delete the shown order is rebuilt, the key is looked up again
+  (`contactsFind`, -1 — it is gone) and `nodeMenuFocusAfterRemove` keeps the box on the row that slid into its
+  place, clamped; the page stays open.
+
+### 3. Settings › OM Lite › NODES (item 3)
+
+New rows at the top of the section:
+- **Add heard nodes to the radio** — Cycle Off / Clients / All, value from the live setting, written to NVS
+  `mcset/heardto` through a new `setHeardToRadioSetting()` (a refused write keeps the old value + a notice).
+- **Stored nodes** — `Radio 10 / 300 · Archive 412 · SD ok` (or `· no SD card`), read live on every draw.
+- **Clear radio (archive kept)** — behind the shared sheet ("Move all N radio nodes to the archive? The archive
+  keeps them all."); the apply path clears the `in_radio` mark on every row and never removes a row.
+- Then the EST-447 rows as before: Remove a contact (list), Clear all contacts, New-node notice.
+- **The contact list: BEFORE it listed the WHOLE table** (since v59 that means radio + archive rows), because
+  `buildNodesSubRows` walked `contactsOrder()` unfiltered. **AFTER it lists ONLY `in_radio` rows** (empty →
+  "No radio nodes yet"), which is what "Remove a contact" acts on.
+
+### 4. Host tests (item 4)
+
+`test/host/test_node_view.cpp` (new, 718 checks): counts + order per view over a frozen order, the frozen order
+kept in every view, search on top of a view, the chip cycle, the menu's rows per state (archive → Add to radio,
+radio → Move to archive, never both), the RadioFull path with the store snapshot unchanged and the exact
+sentence, the delete confirm's exact words, the focus re-find after a real `deleteEverywhere` (gone → clamped;
+still-present key → its new position), and the Settings row values.
+`test_node_menu.cpp` and `test_node_ops.cpp` are updated to the new seven-row menu (the old six-row/Remove
+expectations were the only failures).
+
+**Armed twice (restored afterwards, suite green again):**
+
+```
+FAIL test_node_view.cpp:89  om::ui::nodeViewCount(f.s, om::ui::NodeView::Archive, radio) == 2 (got 5, want 2)
+FAIL test_node_view.cpp:157  rows[4].action == om::ui::NodeAction::MoveToArchive
+```
+
+### 5. Measured
+
+- `sh test/host/run.sh` → **exit 0**, **32,892 checks, 0 failures** (sum of every suite's count, ASan stages
+  included; the new suite alone: 718).
+- `make build` → **exit 0**, `application.bin` = **0x19FCB0 = 1,703,088 B**, 19 % of the app partition free
+  (0x60350).
+- Internal RAM: **not re-measured** (no idf.py size pass in this run). The only new static storage is
+  `g_nodes_view_order[2000]` = **+8 KB .bss**; the chips/R plates allocate nothing.
+- Previews: `shots/2026-11-19-nodes-views.png` (All view: R tags, an archive row, a fresh row, a favourite, one
+  row with all three), `shots/2026-11-19-node-menu-radio.png` (menu on an archive node: Add to radio),
+  `shots/2026-11-19-settings-nodes.png` (the three new rows).
+- Files: new `core/node_view.h`, `test/host/test_node_view.cpp`; modified `core/node_menu.h`, `core/settings.h`,
+  `main/{mc_link.h,mc_link.cpp,nodes_page.h,nodes_page.cpp,main.cpp}`, `tools/preview_tanmatsu.py`,
+  `test/host/{run.sh,test_node_menu.cpp,test_node_ops.cpp}`, `docs/PROGRESS.md`, two new/changed shots.
+- **Not verified:** no device run — the chips' fit with the real generated faces, the R plate on the glass,
+  Left/Right on the keyboard, and the radio.bin/SD writes the actions trigger are code-read + host-tested only.
+
+
+**Claude's review of EST-465 (S515, 2026-11-19 19:2x), two fixes before the commit:** (1) Add to radio / Move to archive / Delete everywhere / Clear radio now FORCE the SD archive write (`g_archive_force`): a structural change rewrote `radio.bin` at once but the archive waited its 30 s floor, so a power-off in that window brought a deleted node back from the card at the next boot. (2) The Nodes hint bar overflowed its left edge by ~50 px with six chips (visible in the preview): `lt/rt` → `<>`, `favourite` → `fav`; the preview re-rendered and fits. Noted, not changed: after Delete everywhere a DM thread with that node leaves the chat list until the node is heard again (its log stays on the card, as the confirm text says).
 ## 2026-11-19 · S515 (EST-463 part 2) · node storage: radio.bin on /int, nodes.bin on SD, boot merge
 
 > Written by **DeepSeek** for ticket **EST-464**: fenced Paperclip run, no session start/end, nothing installed,
