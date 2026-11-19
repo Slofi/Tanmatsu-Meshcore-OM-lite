@@ -24,6 +24,16 @@
 namespace om {
 namespace mc {
 
+// Set one row's favourite flag (S514/EST-455). False (and the table untouched) for an out-of-range index, the
+// same stale-row rule as removal: a list built before an advert changed the table must not mark somebody else.
+// The flag is part of the contact record (contact_blob), so on the device the caller also raises the structural
+// dirty flag and the SAME `mcct` write persists it.
+inline bool contactSetFavourite(ContactStore& s, size_t index, bool on) {
+    if (index >= s.count) return false;
+    s.c[index].favourite = on;
+    return true;
+}
+
 // Remove the row at `index`, shifting the rows after it down and zeroing the vacated slot. False (and the
 // table untouched) when the index is out of range: a stale row id from a list built before an advert changed
 // the table must never remove somebody else.

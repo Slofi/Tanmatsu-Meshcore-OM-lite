@@ -6,6 +6,7 @@
 
 #include "chrome.h"
 #include "launcher_page.h"   // drawText* / textBaseline
+#include "node_menu.h"       // S514/EST-455: the rows the node menu offers
 #include "nodes_search.h"    // S514/EST-449: the "N of M" text (one home for the rule)
 #include "tm_theme.h"
 #include "../../firmware/src/ui/theme.h"
@@ -158,7 +159,9 @@ void drawNodes(Screen& s, const NodesView& v) {
         drawTextClipped(s, Face::Row, list_x0 + 28, textBaseline(s, Face::Row, y + 2, 28),
                         list_x1 - kTmRingInset - 28 - list_x0 - 80, c.name[0] ? c.name : "(no name)",
                         f ? (uint16_t)kAccInk : (uint16_t)kInk);
-        if (c.favourite) drawText(s, Face::Hint, list_x1 - kTmRingInset - 14, y + 20, "*", kAcc);
+        // S514/EST-455: the favourite mark. The generated faces carry ASCII + Latin-1/Latin Extended-A only,
+        // so there is no U+2605 star; a small gold dot is the mark that can actually be drawn.
+        if (c.favourite) s.disc(list_x1 - kTmRingInset - 74, y + 16, 3, kAcc);
         // second line: how it reached us
         char sub[24];
         if (c.path_len == 0) snprintf(sub, sizeof(sub), "direct");
@@ -227,20 +230,89 @@ void drawNodes(Screen& s, const NodesView& v) {
                             W - (rx + 190) - kTmPad, values[i], kInk);
             kv_y += 30;
         }
-        // S514 (Claude): DMs exist since v40/v41, so the old "DM ... arrive later" line was no longer true.
-        drawText(s, Face::Body, rx, kv_y + 26, "DM this node from the Chat page (right column).", kDimmer);
-        drawText(s, Face::Body, rx, kv_y + 48, "Trace and favourite come later.", kDimmer);
+        // S514/EST-455: the menu is where the actions live now; 'f' is the shortcut that skips it.
+        drawText(s, Face::Body, rx, kv_y + 26, "Enter: actions for this node.", kDimmer);
+        drawText(s, Face::Body, rx, kv_y + 48, "f: favourite. DM from the menu or the Chat page.", kDimmer);
+    }
+
+    // S514/EST-455: the node menu, drawn over the page (a dither scrim + bottom sheet, the confirm sheet's
+    // house style). It belongs to the FOCUSED row: a toggle re-sorts the list and moves the focus with the node.
+    if (v.menu_open && v.order_count > 0 && v.store != nullptr) {
+        const mc::Contact& c = v.store->c[v.order[v.focused >= 0 && v.focused < v.order_count ? v.focused : 0]];
+        drawNodeMenu(s, c, v.menu_focus, v.now);
     }
 
     // S513/EST-432: the advert key works on this page too, so it is a hint and not only the empty-list line.
     // S514/EST-449: `/` opens the search, and while the BAR has the focus it gets its own (shorter) hints.
-    static const HintItem hints_list[] = {{",", "settings"}, {"up/dn", "move"}, {"a", "advert"},
-                                          {"/", "search"}, {"esc", "back"}};
+    // S514/EST-455: with the menu up, the same three keys describe the sheet (Esc closes it).
+    static const HintItem hints_list[] = {{"ret", "menu"}, {"f", "favourite"}, {",", "settings"},
+                                          {"/", "search"}, {"a", "advert"}, {"esc", "back"}};
     static const HintItem hints_search[] = {{"type", "search"}, {"dn", "list"}, {"esc", "clear/back"}};
-    if (v.search_focused)
+    static const HintItem hints_menu[]   = {{"up/dn", "move"}, {"ret", "choose"}, {"esc", "close"}};
+    if (v.menu_open)
+        drawHintBar(s, tm::Page::Nodes, hints_menu, 3);
+    else if (v.search_focused)
         drawHintBar(s, tm::Page::Nodes, hints_search, 3);
     else
-        drawHintBar(s, tm::Page::Nodes, hints_list, 5);
+        drawHintBar(s, tm::Page::Nodes, hints_list, 6);
+}
+
+void drawNodeMenu(Screen& s, const mc::Contact& c, int focus, uint32_t now) {
+    const int W = kTmW, H = kTmH;
+
+    NodeMenuContext ctx;
+    ctx.advType   = c.type;
+    ctx.hasKey    = !mc::contactKeyIncomplete(c.pub);
+    ctx.favourite = c.favourite;
+    NodeMenuRow rows[kMaxNodeMenuRows];
+    const int   row_count = nodeMenuRows(ctx, rows, kMaxNodeMenuRows);
+    if (row_count <= 0) return;
+    if (focus < 0) focus = 0;
+    if (focus >= row_count) focus = row_count - 1;
+
+    // The confirm sheet's modal look: a dither scrim (Screen has no alpha blend), then a plate with the gold
+    // 2 px outline. The hint bar is drawn after this function, so the keys stay readable.
+    for (int y = 0; y < H; y += 2) s.fillRect(0, y, W, 1, kBg);
+
+    const int sheet_w = 560;
+    const int row_h   = 42;
+    const int head_h  = 64;
+    const int pad     = 16;
+    const int sheet_h = 2 * pad + head_h + row_count * row_h;
+    const int x0      = (W - sheet_w) / 2;
+    const int x1      = x0 + sheet_w;
+    const int y0      = H - kTmHintH - 8 - sheet_h;
+
+    s.fillRect(x0, y0, sheet_w, sheet_h, kPanel);
+    s.frame(x0, y0, sheet_w, sheet_h, 2, kAcc);
+
+    drawTextClipped(s, Face::Title, x0 + 20, textBaseline(s, Face::Title, y0 + pad, 34),
+                    sheet_w - 40, c.name[0] ? c.name : "(no name)", kInk);
+    char meta[96];
+    char age[12];
+    mc::formatAge(now, c.heard_at, age, sizeof(age));
+    snprintf(meta, sizeof(meta), "%s \xc2\xb7 last heard %s ago%s", typeName(c.type), age,
+             c.favourite ? " \xc2\xb7 favourite" : "");
+    drawTextClipped(s, Face::Meta, x0 + 20, textBaseline(s, Face::Meta, y0 + pad + 34, 22),
+                    sheet_w - 40, meta, kDim);
+    s.hline(x0 + 1, x1 - 1, y0 + pad + head_h - 1, kLine);
+
+    int ry = y0 + pad + head_h;
+    for (int i = 0; i < row_count; ++i) {
+        const bool f = (i == focus);
+        if (f) {
+            s.fillRect(x0 + 8, ry + 1, sheet_w - 16, row_h - 3, kSelBg);
+            s.frame(x0 + 8, ry + 1, sheet_w - 16, row_h - 3, kTmRingW, kAcc);
+        }
+        drawText(s, Face::Row, x0 + 24, textBaseline(s, Face::Row, ry, row_h), rows[i].label,
+                 f ? (uint16_t)kAccInk : (uint16_t)kInk);
+        if (rows[i].value[0] != '\0') {
+            drawTextRight(s, Face::Hint, x1 - 24, textBaseline(s, Face::Hint, ry, row_h), rows[i].value,
+                          rows[i].valueAccent ? (uint16_t)kAcc : (uint16_t)kDim);
+        }
+        if (i + 1 < row_count) s.hline(x0 + 8, x1 - 8, ry + row_h - 1, kRowLine);
+        ry += row_h;
+    }
 }
 
 }  // namespace ui

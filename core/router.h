@@ -28,7 +28,7 @@ enum class RouteAction : uint8_t {
   Noop = 0,     // nothing changes (already there, no such page, later module, or at the root)
   Switched,     // `page` is now current
   OfferStart,   // the page's module is STOPPED: offer Start, do not auto-start (PLAN §2 rule 3)
-  Top,          // the page's OWN symbol key: ask its module to close an inner level (S514/EST-444)
+  Top,          // the page's OWN symbol key: close an inner level, or first row at the top (EST-444/454)
 };
 
 struct RouteResult {

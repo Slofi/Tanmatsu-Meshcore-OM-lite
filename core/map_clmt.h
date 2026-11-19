@@ -69,6 +69,20 @@ constexpr ClmtRetry clmtRetry(uint32_t needed_items, uint32_t tried_items) {
 // One open pack's link map table: at most one live allocation, and drop() hands it back exactly once, so
 // closePack() — which runs on every reopen (a zoom across a band boundary) and at teardown — can neither free
 // it twice nor leak it. No FatFs type here: the pointer is plain PSRAM the device frees.
+// S514 (Claude): a link map is a list of (run length, first cluster) pairs for ONE file's cluster chain; FatFs only
+// READS it after CREATE_LINKMAP (ff.c clmt_clust()), and the map packs never change while the app runs. So a map
+// built once may be attached again to a fresh FIL of the same file, instead of walking the FAT chain again (~0.6 s
+// for slo17) on every zoom across a band boundary. It is the same file when the table is a finished one (its used
+// count fits the allocation and holds at least one fragment), its first fragment starts at the file's start
+// cluster (tbl[2] == obj.sclust; ff.c:4507,4519) and the file size is unchanged. Anything else: build a new one.
+constexpr bool clmtReusable(const uint32_t* tbl, uint32_t items, uint32_t cached_size, uint32_t sclust,
+                            uint32_t size) {
+    if (tbl == nullptr || items < kClmtHeaderItems + kClmtItemsPerFragment) return false;
+    if (tbl[0] < kClmtHeaderItems + kClmtItemsPerFragment || tbl[0] > items) return false;
+    if (sclust == 0 || tbl[2] != sclust) return false;
+    return cached_size == size;
+}
+
 struct ClmtTable {
     uint32_t* table = nullptr;   // the live table, or nullptr when fast seek is off for this pack
     uint32_t  items = 0;         // its size in DWORDs (the allocation, not the used count)

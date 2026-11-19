@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "mc_link.h"
 
+#include "rptr_link.h"   // S514/EST-453: the RPTR receive hooks and the tx door
+
 #include <stdio.h>
 #include <string.h>
 // No <time.h> here: chrome.h -> pages.h defines `namespace tm`, and <time.h> defines `struct tm` — the two cannot
@@ -556,6 +558,18 @@ size_t contactsClear() {
     return n;
 }
 
+// S514/EST-455: the favourite flag is part of the contact record, so it is a STRUCTURAL change and follows the
+// same one-writer rule as remove/clear: change RAM under the lock, raise the flag, let contactsPersistTick()
+// rewrite the `mcct` blob on this loop's pass.
+bool contactsSetFavourite(size_t index, bool on) {
+    if (g_store_mutex == nullptr) return false;
+    StoreLock l;
+    if (!contactSetFavourite(g_contacts, index, on)) return false;
+    markContactsDirty(true);
+    ESP_LOGI(TAG, "contacts: row %u favourite -> %s", (unsigned)index, on ? "on" : "off");
+    return true;
+}
+
 bool newNodeNoticeEnabled() { return g_new_node_notice; }
 
 bool setNewNodeNoticeEnabled(bool on) {
@@ -835,6 +849,19 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
             return;
         }
     }
+    // ---------------------------------------------- S514/EST-453: RPTR part 1's two answer types
+    // A CONTROL frame is the discovery answer; a RESPONSE is a login or a status reply. Both are handled on the
+    // radio task, and the RPTR module keeps its own lock — it never transmits from here (a request always goes
+    // back out through queueRptrFrame/queueFrame).
+    if (v.type() == meshcore::kTypeControl) {
+        om::rptrlink::onControl(v, snr_db);
+        return;
+    }
+    if (v.type() == meshcore::kTypeResponse) {
+        if (om::rptrlink::onResponse(v)) return;
+        // Not one of ours: fall through to the old "unhandled" log at the bottom.
+    }
+
     // ------------------------------------------------- S513/EST-439: the PATH answer and the delivered ACK
     // A PATH packet is the recipient's answer to a flooded DM: it carries the route back TO that contact and, when
     // its extra type is ACK, the delivered mark for the message we sent (Mesh.cpp:160-180). Opening it is the
@@ -1804,6 +1831,16 @@ void noteDmRead(const uint8_t pub[32]) {
         ESP_LOGI(TAG, "DM: seen point -> log id %u", (unsigned)newest);
     }
 }
+
+// S514/EST-453: the RPTR page's two doors (see mc_link.h). Both are thin and honest: a frame goes through the
+// SAME four-slot queue and the SAME radio task as a DM, and the identity is only handed out once begin() has one.
+bool selfIdentity(meshcore::Identity* out) {
+    if (out == nullptr || !g_has_id) return false;
+    *out = g_id;
+    return true;
+}
+
+bool queueRptrFrame(const uint8_t* frame, size_t len) { return queueFrame(frame, len); }
 
 }  // namespace mc
 }  // namespace om

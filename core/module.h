@@ -87,9 +87,10 @@ struct Module {
   // S514/EST-444 (Filip): this module's symbol key OF THE PAGE ON SCREEN, pressed while that page is
   // current. Go to the page's top level — close an open chat, a search field or a sheet. `page` says
   // WHICH of the module's pages owns the level (OM Lite owns five, and a level on Chat must not be
-  // closed by the Nodes key). true = an inner level was open and is now closed; false = already at
-  // the top (nothing changes, the key is still consumed). nullptr = no page of this module has an
-  // inner level today. A symbol key is NEVER passed to onKey().
+  // closed by the Nodes key). S514/EST-454 (Filip): when the page is ALREADY at its top, this is where
+  // the module puts the selection back on the FIRST row. true = an inner level was open and is now
+  // closed (the focus did not move); false = already at the top, and the module reset its own focus.
+  // nullptr = no page of this module has a level or a list today. A symbol key is NEVER passed to onKey().
   bool (*onTop)(Core&, Page page);
   // S514/EST-448: THIS module's settings, as data. The Settings frame has one top tab per registry row
   // and draws exactly what this returns; a stopped or LATER module still answers (its values are stored),

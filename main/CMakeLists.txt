@@ -26,6 +26,9 @@ idf_component_register(
         "map_page.cpp"
         # EST-445: Settings, part 1 (frame + General). The rules are core/settings.h (host-tested).
         "settings_page.cpp"
+        # S514/EST-453: RPTR part 1 — the page and the radio/NVS glue (every send goes through mc_link's queue).
+        "rptr_page.cpp"
+        "rptr_link.cpp"
         # S514/EST-450: the one owner of the I2S channel and the NVS sound settings. The synth itself
         # is compiled from the L2's own firmware/src/sound_synth.cpp in the core component.
         "audio_out.cpp"

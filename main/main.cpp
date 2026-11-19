@@ -35,6 +35,7 @@ extern "C" {
 
 #include "bootloader_common.h"   // bootloader_common_get_rtc_retain_mem() (AppFS boot select lives there)
 #include "core.h"
+#include "own_top.h"             // S514/EST-454: the own key at the top -> first row (pure, host-tested)
 #include "menu_cards.h"          // S513/EST-432: the start menu's pure key decisions
 #include "font.h"
 #include "launcher_page.h"
@@ -42,6 +43,9 @@ extern "C" {
 #include "chrome.h"               // status bar, page head, hint bar: one home
 #include "nodes_page.h"          // step 4: the Nodes page
 #include "nodes_search.h"        // S514/EST-449: the Nodes search (matcher, count, focus rules)
+#include "node_menu.h"           // S514/EST-455: the per-node actions + the favourite notice/focus rule
+#include "rptr_page.h"           // S514/EST-453: RPTR part 1 (list, login, status)
+#include "rptr_link.h"           // S514/EST-453: the RPTR radio requests + remembered passwords
 #include "sd_history.h"          // step 5: chat history on the card
 #include <unistd.h>
 #include "map_link.h"            // step 6: the map pack on the card
@@ -247,6 +251,7 @@ bool omStart(tm::Core& core) {
     // status bar shows "radio FAIL" instead of pretending.
     if (om::radio::begin()) {
         om::mc::begin();   // step 3b slice 2: load the channel table (NVS) before any packet arrives
+        om::rptrlink::begin();   // S514/EST-453: remembered repeater passwords (NVS "mcrp")
         // 12 KiB, not 4: this task now verifies Ed25519 signatures (an incoming advert), and 4 KB panicked
         // with a stack protection fault the first time our own advert came back (S501). The task logs its
         // own low-water mark after the work, so the number is measured rather than assumed.
@@ -613,8 +618,25 @@ static const tm::SettingRow kOmMapRows[] = {
     {tm::SettingKind::Info, 0, "slo16 (z16)", "", mapPackSlo16Value, nullptr},
     {tm::SettingKind::Info, 0, "slo17 (z17)", "", mapPackSlo17Value, nullptr},
 };
+// ---- S514/EST-453: the RPTR section ----------------------------------------------------------------------
+// Part 1 changes nothing on a repeater, so the section carries only the two local rules: whether a password may
+// be remembered (the L2's On, its default) and one way to forget them all. "Forget all" raises the shared sheet.
+enum : uint16_t {
+    kRptrRowRemember = 300,
+    kRptrRowForget,
+};
+
+const char* rptrRememberValue(tm::Core&) { return om::rptrlink::rememberEnabled() ? "On" : "Off"; }
+
+void rptrToggleRemember(tm::Core&, const tm::SettingRow&) {
+    if (!om::rptrlink::setRememberEnabled(!om::rptrlink::rememberEnabled()))
+        om::ui::noticeSet("Remember passwords not saved", 3000);
+}
+
 static const tm::SettingRow kOmRptrRows[] = {
-    {tm::SettingKind::Info, 0, "Repeater admin comes later", "", nullptr, nullptr},
+    {tm::SettingKind::Toggle, kRptrRowRemember, "Remember passwords", "", rptrRememberValue,
+     rptrToggleRemember},
+    {tm::SettingKind::Action, kRptrRowForget, "Forget all passwords"},
 };
 
 // ---- S514/EST-446: the CHAT section's channels, and the pages behind them ------------------------------
@@ -639,7 +661,16 @@ enum : uint16_t {
 };
 enum class ChatSub : uint8_t { None = 0, Channel, Scope, AddKey, KeyShown };
 enum class ChatField : uint8_t { None = 0, Tag, KeyName, KeyB64, ScopeRegion, Rename };
-enum class ConfirmTarget : uint8_t { Name = 0, RemoveChannel, ShowKey, RemoveContact, ClearContacts };
+enum class ConfirmTarget : uint8_t { Name = 0, RemoveChannel, ShowKey, RemoveContact, ClearContacts, ForgetRptr };
+
+// S514/EST-453: the RPTR page's UI state. The link owns the found list, the login machine and the status;
+// these are only where the cursor and the typed password are.
+int          g_rptr_mode      = 0;    // 0 list, 1 login, 2 status (matches om::ui::RptrMode)
+int          g_rptr_focus     = 0;
+char         g_rptr_pw[om::rptr::kPasswordMax + 1] = "";
+size_t       g_rptr_pw_len    = 0;
+uint32_t     g_rptr_status_ms = 0;
+char         g_rptr_note[64]  = "";
 
 ChatSub     g_chat_sub         = ChatSub::None;
 ChatField   g_chat_field       = ChatField::None;
@@ -826,7 +857,7 @@ const tm::SettingsSection* omLiteSettings(tm::Core&, int* count) {
     g_om_sections[1] = tm::SettingsSection("CHAT", g_chat_tab_rows, chat_n);
     g_om_sections[2] = tm::SettingsSection("MAP", kOmMapRows,
                                            (int)(sizeof(kOmMapRows) / sizeof(kOmMapRows[0])));
-    g_om_sections[3] = tm::SettingsSection("RPTR", kOmRptrRows, 1);
+    g_om_sections[3] = tm::SettingsSection("RPTR", kOmRptrRows, 2);
     if (count != nullptr) *count = 4;
     return g_om_sections;
 }
@@ -1218,20 +1249,26 @@ extern "C" void app_main(void) {
     // WHO is on screen is the core router's business (symbol keys, Esc and the history). What each page keeps
     // for itself lives here: its cursor, whether a channel is open, and the composer's text.
     constexpr size_t kChatPreview = 96;   // one "sender: text" line for the channel list
-    int    nodes_focus   = 0;
+    static int nodes_focus = 0;
     // S514/EST-449: the Nodes search. SESSION-ONLY on purpose (never NVS): the query, its byte length and
     // which half of the page owns the keys live as long as the app does, so leaving the page and coming
     // back keeps the search. `nodes_focus` above is an index into the FILTERED list.
     char   nodes_query[om::ui::kNodeQueryBytes] = {0};
     size_t nodes_query_len = 0;
-    bool   nodes_bar       = false;   // true = the search bar has the focus; false = the list does
+    static bool nodes_bar = false;   // true = the search bar has the focus; false = the list does
+    // S514/EST-455: the node menu. `node_menu_index` is the STORE row the menu belongs to — not the focused
+    // position — so an advert or a re-sort cannot make the sheet act on somebody else. The focus follows that
+    // row after a favourite toggle (core/node_menu.h::nodeMenuFocusFollow).
+    static bool node_menu_open  = false;
+    static int  node_menu_focus = 0;
+    static int  node_menu_index = -1;
     // S513/EST-430: the Chat list is two columns of cards, so the selection is a (column, row) pair like the model
     // in core/chat_cards.h. `chat_focus` is the row in the Channels column (and therefore the channel index);
     // `chat_dm_focus` is the row in the Direct messages column, which cannot be focused while it has no cards.
-    int    chat_col        = om::mc::kColChannels;
-    // S514/EST-444: the six variables below are `static` so the module's onTop hook (installed below,
-    // next to the Chat state it closes) can be a captureless lambda. `chat_focus` doubles as the open
-    // channel's index, which is why the hook needs it.
+    static int chat_col = om::mc::kColChannels;
+    // S514/EST-444: these variables are `static` so the module's onTop hook (installed below, next to the
+    // page state it acts on) can be a captureless lambda. S514/EST-454 added the focus/scroll fields to
+    // that list because "already at the top" now also resets the selection.
     static int chat_focus  = 0;
     int    chat_dm_focus   = 0;
     // The Direct messages column's model. There is no TXT_MSG receive or send in this app yet, so the count is 0
@@ -1239,7 +1276,7 @@ extern "C" void app_main(void) {
     // nothing in the layout moves.
     int    chat_dm_count   = 0;
     // Each column scrolls by itself to keep its focused card visible (core/chat_cards::cardScroll).
-    int    chat_card_scroll[om::mc::kCardCols] = {0, 0};
+    static int chat_card_scroll[om::mc::kCardCols] = {0, 0};
     static bool chat_open  = false;
     // S513/EST-434: when the open chat is a DM thread, who it is. `chat_dm_pub` is the thread key; a restored thread
     // may still be prefix-only until an advert fills the rest in (mc_link's rebind).
@@ -1446,6 +1483,10 @@ extern "C" void app_main(void) {
         g_nodes_list       = false;
         g_nodes_sub_focus  = -1;
         g_nodes_sub_scroll = 0;
+        // S514/EST-455: leaving the Nodes page (or finishing a removal) closes its menu too.
+        node_menu_open  = false;
+        node_menu_focus = 0;
+        node_menu_index = -1;
     };
     auto openNodesPage = [&]() {
         g_nodes_list = true;
@@ -1665,13 +1706,36 @@ extern "C" void app_main(void) {
             nv.order_count = om::ui::nodeSearchFilter(&om::mc::contacts(), order, total, nodes_query, shown);
             if (nodes_focus >= nv.order_count) nodes_focus = nv.order_count > 0 ? nv.order_count - 1 : 0;
             if (nodes_focus < 0) nodes_focus = 0;
+            // S514/EST-455: the menu belongs to a STORE row; after a toggle (or an advert) the focus follows it,
+            // so the row the sheet names and the row the list rings are always the same node.
+            bool menu_shown = false;
+            if (node_menu_open && node_menu_index >= 0) {
+                const int pos = om::ui::nodeMenuFocusFollow(shown, nv.order_count, node_menu_index);
+                if (pos >= 0) {
+                    nodes_focus = pos;
+                    menu_shown  = true;
+                }
+            }
             nv.query          = nodes_query;
             nv.search_focused = nodes_bar;
+            nv.menu_open      = menu_shown;
+            nv.menu_focus     = node_menu_focus;
             const uint32_t now = om::time_source::epochNow();
             nv.focused         = nodes_focus;
             nv.now             = now;
             nv.in_last_hour    = (int)om::mc::contactsHeardWithin(om::mc::contacts(), now, 3600);
             om::ui::drawNodes(g_screen, nv);
+        }
+        // S514/EST-455: Remove raises the EST-447 confirm on THIS page. The sheet is drawn over the list with
+        // the same shared frame and look the Settings sub-page uses.
+        if (settings_frame.confirmOpen() && g_confirm_target == ConfirmTarget::RemoveContact) {
+            om::ui::SettingsView sv;
+            sv.confirm        = true;
+            sv.confirm_title  = g_confirm_title;
+            sv.confirm_text   = g_confirm_text;
+            sv.confirm_apply  = g_confirm_apply;
+            sv.confirm_danger = g_confirm_danger;
+            om::ui::drawConfirmSheet(g_screen, sv);
         }
     };
 
@@ -1683,6 +1747,111 @@ extern "C" void app_main(void) {
         om::mc::StoreLock l;
         const int total = (int)om::mc::contactsOrder(om::mc::contacts(), order, om::mc::kMaxContacts);
         return om::ui::nodeSearchFilter(&om::mc::contacts(), order, total, nodes_query, shown);
+    };
+
+    // ---- S514/EST-455: the NODE MENU's side effects ---------------------------------------------------------
+    // The rows and their order are core/node_menu.h (host-tested); these lambdas only perform what a chosen row
+    // does, and every read of the contact table is under the store lock.
+    auto nodesShownOrder = [&](int* shown) -> int {
+        int order[om::mc::kMaxContacts];
+        om::mc::StoreLock l;
+        const int total = (int)om::mc::contactsOrder(om::mc::contacts(), order, om::mc::kMaxContacts);
+        return om::ui::nodeSearchFilter(&om::mc::contacts(), order, total, nodes_query, shown);
+    };
+
+    auto nodesFocusedStoreIndex = [&]() -> int {
+        int       shown[om::mc::kMaxContacts];
+        const int n = nodesShownOrder(shown);
+        if (nodes_focus < 0 || nodes_focus >= n) return -1;
+        return shown[nodes_focus];
+    };
+
+    // Enter on Favourite (or 'f' on the list). Structural change: RAM under the lock, the EST-437 dirty flag,
+    // the notice, then the list re-sorts and the focus FOLLOWS the store row.
+    auto toggleFavourite = [&](int store_index) {
+        if (store_index < 0) return;
+        char name[om::mc::kNameBytes] = {0};
+        bool on = false;
+        {
+            om::mc::StoreLock      l;
+            om::mc::ContactStore&  cs = om::mc::contacts();
+            if ((size_t)store_index >= cs.count) return;
+            snprintf(name, sizeof(name), "%s", cs.c[store_index].name);
+            on = !cs.c[store_index].favourite;
+        }
+        if (!om::mc::contactsSetFavourite((size_t)store_index, on)) {
+            om::ui::noticeSet("Favourite not saved", 3000);
+            return;
+        }
+        char note[64];
+        om::ui::nodeFavouriteNotice(note, sizeof(note), name, on);
+        om::ui::noticeSet(note, 3000);
+
+        int       shown[om::mc::kMaxContacts];
+        const int n   = nodesShownOrder(shown);
+        const int pos = om::ui::nodeMenuFocusFollow(shown, n, store_index);
+        if (pos >= 0) nodes_focus = pos;
+        ESP_LOGI(TAG, "nodes: favourite %s -> %s", name, on ? "on" : "off");
+    };
+
+    // Direct message: open this contact's thread in Chat. There need not be a message yet — the thread view is
+    // the contact's key + name, and the Chat page already draws its honest empty state ("No messages in this
+    // thread yet."). The DM card column only lists threads that have messages, so this is also how a first DM
+    // is started.
+    auto openDmThread = [&](int store_index) {
+        uint8_t pub[32] = {0};
+        char    name[om::mc::kNameBytes] = {0};
+        {
+            om::mc::StoreLock     l;
+            om::mc::ContactStore& cs = om::mc::contacts();
+            if ((size_t)store_index >= cs.count) return;
+            memcpy(pub, cs.c[store_index].pub, sizeof(pub));
+            snprintf(name, sizeof(name), "%s", cs.c[store_index].name);
+        }
+        if (name[0] == '\0')
+            snprintf(name, sizeof(name), "%02x%02x%02x%02x", pub[0], pub[1], pub[2], pub[3]);
+        memcpy(chat_dm_pub, pub, sizeof(chat_dm_pub));
+        snprintf(chat_dm_name, sizeof(chat_dm_name), "%s", name);
+        chat_dm_open    = true;
+        chat_open       = true;
+        chat_scroll     = 0;
+        chat_seen_count = -1;
+        om::mc::noteDmRead(chat_dm_pub);
+        core.goPage(tm::Page::Chat);
+        ESP_LOGI(TAG, "nodes: DM thread with %s", name);
+    };
+
+    // Remove: the EST-447 confirm, raised HERE on the Nodes page (the shared sheet + target, so Cancel changes
+    // nothing and Apply is the same contactsRemove() the Settings sub-page uses).
+    auto raiseRemoveContactConfirm = [&](int store_index) {
+        char name[om::mc::kNameBytes] = {0};
+        {
+            om::mc::StoreLock     l;
+            om::mc::ContactStore& cs = om::mc::contacts();
+            if ((size_t)store_index >= cs.count) return;
+            snprintf(name, sizeof(name), "%s", cs.c[store_index].name);
+        }
+        if (name[0] == '\0') snprintf(name, sizeof(name), "this contact");
+        g_confirm_target  = ConfirmTarget::RemoveContact;
+        g_confirm_contact = store_index;
+        snprintf(g_confirm_title, sizeof(g_confirm_title), "Remove contact");
+        snprintf(g_confirm_text, sizeof(g_confirm_text),
+                 "Remove %s? A DM from it cannot be opened until it advertises again.", name);
+        snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Remove");
+        g_confirm_danger = true;
+        settings_frame.beginConfirm(nodes_focus);
+    };
+
+    // The sheet's current rows, read under the lock: the count for Up/Down and the action Enter would run.
+    auto nodeMenuRowCount = [&](int store_index, om::ui::NodeMenuRow* out, int max) -> int {
+        om::mc::StoreLock     l;
+        om::mc::ContactStore& cs = om::mc::contacts();
+        if ((size_t)store_index >= cs.count) return 0;
+        om::ui::NodeMenuContext ctx;
+        ctx.advType   = cs.c[store_index].type;
+        ctx.hasKey    = !om::mc::contactKeyIncomplete(cs.c[store_index].pub);
+        ctx.favourite = cs.c[store_index].favourite;
+        return om::ui::nodeMenuRows(ctx, out, max);
     };
 
     auto drawChatPage = [&]() {
@@ -1964,24 +2133,64 @@ extern "C" void app_main(void) {
     // is exactly what a radio test or an unattended listen looks like. Leave by Esc, which works.
     bool dirty = true;
 
-    // S514/EST-444 (Filip): the module's own-symbol-key hook. Pressing the circle key while a channel or a
-    // DM is open is the Chat page's top level, so it closes exactly as Esc does — the channel/DM is marked
-    // read (store and card), the list comes back, the scroll resets, and the composer text is kept. At the
-    // list, or with no channel open, it answers false: the page is already at its top, nothing changes.
+    // S514/EST-444 (Filip): the module's own-symbol-key hook. Inside an inner level it closes one step:
+    // an open channel/DM (mark read, list returns, message scroll resets, composer kept), the Nodes search
+    // bar, an RPTR login/status page. S514/EST-454 extends the SAME answer: when there is no inner level
+    // (the page is already at its top), the key moves the selection to the first row instead of doing
+    // nothing. The arithmetic is core/own_top.h, host-tested; this lambda only copies the state in and out
+    // and performs the close side effects.
     // A captureless lambda because Module stores a plain function pointer; the state is `static` above.
-    // `page` is why the guard is first: OM Lite owns five pages, and only the Chat page has this level.
+    // `page` is why the guard is first: OM Lite owns five pages, and one page's level must not close another's.
     g_om_lite.onTop = +[](tm::Core&, tm::Page page) -> bool {
-        if (page != tm::Page::Chat || !chat_open) return false;
-        if (chat_dm_open) {
-            om::mc::noteDmRead(chat_dm_pub);
-            chat_dm_open = false;
-        } else {
-            om::mc::noteChannelRead((uint8_t)chat_focus);
+        if (page == tm::Page::Nodes) {
+            tm::ListTop top;
+            top.inner = nodes_bar;
+            top.row   = nodes_focus;
+            const bool closed = tm::ownTopList(top);
+            nodes_bar   = top.inner;
+            nodes_focus = top.row;   // first node at the top; unchanged when the bar was the one closed
+            return closed;           // the typed query is deliberately untouched
         }
-        chat_open       = false;
-        chat_scroll     = 0;
-        chat_seen_count = -1;
-        return true;
+        if (page == tm::Page::Chat) {
+            tm::CardListTop top;
+            top.inner = chat_open;
+            top.col   = chat_col;
+            top.row   = chat_focus;
+            for (int i = 0; i < om::mc::kCardCols; ++i) top.scroll[i] = chat_card_scroll[i];
+            const bool closed = tm::ownTopCardList(top);
+            chat_open  = top.inner;
+            chat_col   = top.col;
+            chat_focus = top.row;
+            for (int i = 0; i < om::mc::kCardCols; ++i) chat_card_scroll[i] = top.scroll[i];
+            if (closed) {
+                if (chat_dm_open) {
+                    om::mc::noteDmRead(chat_dm_pub);
+                    chat_dm_open = false;
+                } else {
+                    om::mc::noteChannelRead((uint8_t)chat_focus);
+                }
+                chat_scroll     = 0;
+                chat_seen_count = -1;
+            }
+            return closed;
+        }
+        if (page == tm::Page::Rptr) {
+            // S514/EST-454: RPTR has a list too, so it gets the same rule: first row at the top; inside
+            // login/status one press returns to the list and does not also jump.
+            tm::ListTop top;
+            top.inner = g_rptr_mode != 0;
+            top.row   = g_rptr_focus;
+            const bool closed = tm::ownTopList(top);
+            g_rptr_focus = top.row;
+            if (closed) {
+                g_rptr_mode  = 0;
+                g_rptr_pw[0] = '\0';
+                g_rptr_pw_len = 0;
+                om::rptrlink::logout();
+            }
+            return closed;
+        }
+        return false;   // Map has no list; Settings is not reached by a symbol key, so neither has a row 0
     };
 
     // S513/EST-435: an advert press either queues one or says why not, and the sentence comes from the rule itself
@@ -2041,6 +2250,53 @@ extern "C" void app_main(void) {
             om::ui::noticeSet("OM Lite is not running", 3000);
         }
         dirty = true;
+    };
+    auto drawRptrPage = [&]() {
+        om::ui::RptrView rv;
+        rv.clock       = clockText();
+        rv.battery_pct = view.battery_pct;
+        rv.charging    = view.charging;
+        rv.mode        = (om::ui::RptrMode)g_rptr_mode;
+        // ONE copy under the link lock: the radio task writes these fields as answers arrive.
+        static om::rptr::FoundList found_copy;
+        static om::rptr::LoginMachine login_copy;
+        static om::rptr::Status status_copy;
+        static char target_copy[48];
+        bool pending = false;
+        uint32_t serial = 0;
+        om::rptrlink::lock();
+        found_copy = om::rptrlink::found();
+        login_copy = om::rptrlink::login();
+        status_copy = om::rptrlink::status();
+        pending = om::rptrlink::statusPending();
+        serial = om::rptrlink::statusSerial();
+        snprintf(target_copy, sizeof(target_copy), "%s", om::rptrlink::target());
+        om::rptrlink::unlock();
+        (void)serial;
+        rv.scanning     = found_copy.listening;
+        rv.found        = &found_copy;
+        rv.focus        = g_rptr_focus;
+        rv.target       = target_copy;
+        rv.login_state  = login_copy.state;
+        rv.password_len = g_rptr_pw_len;
+        rv.password_dots = "";
+        rv.remember     = om::rptrlink::rememberEnabled();
+        rv.status       = &status_copy;
+        rv.status_pending = pending;
+        rv.status_age_s = status_copy.valid && g_rptr_status_ms != 0
+                              ? (uint32_t)((esp_timer_get_time() / 1000 - g_rptr_status_ms) / 1000)
+                              : 0;
+        if (g_rptr_mode == 1) {
+            if (g_rptr_note[0] != '\0')
+                rv.note = g_rptr_note;
+            else if (login_copy.state == om::rptr::LoginState::Sending)
+                rv.note = "waiting for the answer…";
+            else if (login_copy.state == om::rptr::LoginState::NoAnswer)
+                rv.note = "no answer (wrong password, or out of range)";
+            else if (login_copy.state == om::rptr::LoginState::Refused)
+                rv.note = "refused by the repeater";
+        }
+        om::ui::drawRptr(g_screen, rv);
     };
     for (;;) {
         bsp_input_event_t ev = {};
@@ -2200,6 +2456,107 @@ extern "C" void app_main(void) {
                         handled = true;
                         dirty   = true;
                     }
+                } else if (page_now == tm::Page::Rptr) {
+                    // S514/EST-453: RPTR part 1. The page has three levels (list -> login -> status); the link owns
+                    // the radio and NVS, this branch only feeds it keys and moves the cursor.
+                    if (tm::is_symbol(k)) {
+                        handled = false;   // the core's page switch wins
+                    } else {
+                        handled = true;
+                        const bool is_char = (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD);
+                        const char ch      = is_char ? (char)ev.args_keyboard.ascii : '\0';
+                        if (g_rptr_mode == 0) {
+                            int n = 0;
+                            {
+                                om::rptrlink::lock();
+                                n = om::rptrlink::found().count;
+                                om::rptrlink::unlock();
+                            }
+                            if (k == tm::Key::Up) {
+                                if (g_rptr_focus > 0) --g_rptr_focus;
+                                dirty = true;
+                            } else if (k == tm::Key::Down) {
+                                if (n > 0 && g_rptr_focus + 1 < n) ++g_rptr_focus;
+                                dirty = true;
+                            } else if (is_char && ch == 's') {
+                                if (om::rptrlink::scanStart()) {
+                                    g_rptr_focus = 0;
+                                    om::ui::noticeSet("Scanning for repeaters", 2000);
+                                } else {
+                                    om::ui::noticeSet("Scan not sent (radio busy)", 3000);
+                                }
+                                dirty = true;
+                            } else if (k == tm::Key::Enter && n > 0) {
+                                char name[40] = "";
+                                {
+                                    om::rptrlink::lock();
+                                    if (g_rptr_focus >= 0 && g_rptr_focus < om::rptrlink::found().count) {
+                                        const om::rptr::Found& f = om::rptrlink::found().rows[g_rptr_focus];
+                                        if (f.name[0] != '\0')
+                                            snprintf(name, sizeof(name), "%s", f.name);
+                                        else
+                                            snprintf(name, sizeof(name), "%02x%02x%02x", f.prefix[0],
+                                                     f.prefix[1], f.prefix[2]);
+                                    }
+                                    om::rptrlink::unlock();
+                                }
+                                // The L2 remembers the password per repeater: a known one is pre-filled and the
+                                // page only shows its dots. passwordFor() is the one reader and it never logs.
+                                g_rptr_pw[0] = '\0';
+                                g_rptr_pw_len = 0;
+                                if (name[0] != '\0' && om::rptrlink::hasRemembered(name)) {
+                                    char pw[om::rptr::kPasswordMax + 1];
+                                    if (om::rptrlink::passwordFor(name, pw, sizeof(pw)))
+                                        g_rptr_pw_len = (size_t)om::rptr::passwordFilter(pw, g_rptr_pw, sizeof(g_rptr_pw));
+                                }
+                                g_rptr_mode = 1;
+                                g_rptr_note[0] = '\0';
+                                dirty = true;
+                            } else if (k == tm::Key::Esc) {
+                                handled = false;   // the normal OM Lite back path
+                            }
+                        } else if (g_rptr_mode == 1) {
+                            if (k == tm::Key::Esc) {
+                                g_rptr_mode = 0;
+                                g_rptr_pw[0] = '\0';
+                                g_rptr_pw_len = 0;
+                                om::rptrlink::logout();
+                                dirty = true;
+                            } else if (k == tm::Key::Backspace) {
+                                if (g_rptr_pw_len > 0) g_rptr_pw[--g_rptr_pw_len] = '\0';
+                                dirty = true;
+                            } else if (k == tm::Key::Enter) {
+                                if (g_rptr_pw_len == 0) {
+                                    snprintf(g_rptr_note, sizeof(g_rptr_note), "type the password first");
+                                } else if (om::rptrlink::loginStart(g_rptr_focus, g_rptr_pw)) {
+                                    snprintf(g_rptr_note, sizeof(g_rptr_note), "sending…");
+                                } else {
+                                    snprintf(g_rptr_note, sizeof(g_rptr_note), "not sent (no key or radio busy)");
+                                }
+                                dirty = true;
+                            } else if (is_char && om::rptr::passwordChar(ch) &&
+                                       g_rptr_pw_len < (size_t)om::rptr::kPasswordMax) {
+                                g_rptr_pw[g_rptr_pw_len++] = ch;
+                                g_rptr_pw[g_rptr_pw_len]   = '\0';
+                                dirty = true;
+                            }
+                        } else {
+                            if (k == tm::Key::Esc) {
+                                g_rptr_mode = 0;
+                                g_rptr_pw[0] = '\0';
+                                g_rptr_pw_len = 0;
+                                om::rptrlink::logout();
+                                dirty = true;
+                            } else if (is_char && ch == 'r') {
+                                if (om::rptrlink::statusRequest()) {
+                                    g_rptr_status_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                                } else {
+                                    om::ui::noticeSet("Status request not sent", 3000);
+                                }
+                                dirty = true;
+                            }
+                        }
+                    }
                 } else if (page_now == tm::Page::Settings) {
                     // EST-445: the frame + General. core/settings.h decides; this branch only feeds it the
                     // keys and performs the row actions against the real stores.
@@ -2272,6 +2629,9 @@ extern "C" void app_main(void) {
                                         om::ui::noticeSet("Contact not removed", 3000);
                                     }
                                     closeNodesPage();
+                                } else if (g_confirm_target == ConfirmTarget::ForgetRptr) {
+                                    om::rptrlink::forgetAllPasswords();
+                                    om::ui::noticeSet("Remembered passwords forgotten", 3000);
                                 } else if (g_confirm_target == ConfirmTarget::ClearContacts) {
                                     const size_t removed = om::mc::contactsClear();
                                     if (removed > 0)
@@ -2518,7 +2878,18 @@ extern "C" void app_main(void) {
                                     // Two rows need the SHEET or the map's own state, which live in this scope:
                                     // Clear all contacts raises the shared confirm, and a MAP start row
                                     // re-places the map so the next Map draw uses the new choice.
-                                    if (row != nullptr && row->id == kNodesRowClear) {
+                                    if (row != nullptr && row->id == kRptrRowForget) {
+                                        // S514/EST-453: the shared confirm sheet; Cancel changes nothing.
+                                        g_confirm_target = ConfirmTarget::ForgetRptr;
+                                        snprintf(g_confirm_title, sizeof(g_confirm_title),
+                                                 "Forget all passwords");
+                                        snprintf(g_confirm_text, sizeof(g_confirm_text),
+                                                 "Forget every remembered repeater password? The repeaters "
+                                                 "themselves are not changed.");
+                                        snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Forget all");
+                                        g_confirm_danger = true;
+                                        settings_frame.beginConfirm(r.row);
+                                    } else if (row != nullptr && row->id == kNodesRowClear) {
                                         raiseClearContacts(r.row);
                                     } else {
                                         if (row != nullptr && row->on_enter != nullptr)
@@ -2586,6 +2957,73 @@ extern "C" void app_main(void) {
 
                     if (tm::is_symbol(k)) {
                         handled = false;   // the core's page switch wins
+                    } else if (settings_frame.confirmOpen() &&
+                               g_confirm_target == ConfirmTarget::RemoveContact) {
+                        // S514/EST-455: Remove's EST-447 question, raised on THIS page. The shared sheet owns
+                        // every key: Enter = Apply, Esc = Cancel, everything else is swallowed so a held arrow
+                        // cannot move the list behind the question.
+                        handled = true;
+                        dirty   = true;
+                        const tm::SetKey sk = (k == tm::Key::Enter) ? tm::SetKey::Enter
+                                               : (k == tm::Key::Esc) ? tm::SetKey::Esc
+                                                                     : tm::SetKey::None;
+                        const tm::SettingsKeyResult r = tm::settingsKey(settings_frame, sk, nullptr, 0);
+                        if (r.event == tm::SettingsEvent::ConfirmApplied) {
+                            if (g_confirm_target == ConfirmTarget::RemoveContact) {
+                                if (g_confirm_contact >= 0 &&
+                                    om::mc::contactsRemove((size_t)g_confirm_contact)) {
+                                    om::ui::noticeSet("Contact removed; its DM history stays", 3000);
+                                } else {
+                                    om::ui::noticeSet("Contact not removed", 3000);
+                                }
+                                g_confirm_contact = -1;
+                                closeNodesPage();   // also closes the menu; a cancel below leaves it open
+                            }
+                        } else if (r.event == tm::SettingsEvent::ConfirmCancelled) {
+                            ESP_LOGI(TAG, "nodes: remove cancelled; nothing changed");
+                        }
+                    } else if (node_menu_open) {
+                        // S514/EST-455: the node menu owns the keys while it is up. The rows come from
+                        // core/node_menu.h; every action here works on the CAPTURED store row, never on
+                        // whatever happens to be focused after a re-sort.
+                        handled = true;
+                        dirty   = true;
+                        om::ui::NodeMenuRow rows[om::ui::kMaxNodeMenuRows];
+                        const int             row_count =
+                            nodeMenuRowCount(node_menu_index, rows, om::ui::kMaxNodeMenuRows);
+                        if (k == tm::Key::Esc) {
+                            node_menu_open  = false;
+                            node_menu_index = -1;
+                        } else if (k == tm::Key::Up) {
+                            node_menu_focus = om::ui::nodeMenuFocusMove(node_menu_focus, -1, row_count);
+                        } else if (k == tm::Key::Down) {
+                            node_menu_focus = om::ui::nodeMenuFocusMove(node_menu_focus, 1, row_count);
+                        } else if (k == tm::Key::Enter) {
+                            switch (om::ui::nodeMenuActionAt(rows, row_count, node_menu_focus)) {
+                                case om::ui::NodeAction::DirectMessage:
+                                    openDmThread(node_menu_index);
+                                    node_menu_open  = false;
+                                    node_menu_index = -1;
+                                    break;
+                                case om::ui::NodeAction::Info:
+                                    // The detail pane behind the sheet IS the info view; choosing it closes
+                                    // the sheet and leaves the focus on this node.
+                                    node_menu_open  = false;
+                                    node_menu_index = -1;
+                                    break;
+                                case om::ui::NodeAction::Favourite:
+                                    // The list re-sorts at once; the focus follows. The sheet stays up so a
+                                    // second press can undo it.
+                                    toggleFavourite(node_menu_index);
+                                    break;
+                                case om::ui::NodeAction::RemoveContact:
+                                    // The EST-447 question; a Cancel brings this sheet back unchanged.
+                                    raiseRemoveContactConfirm(node_menu_index);
+                                    break;
+                                case om::ui::NodeAction::None:
+                                    break;
+                            }
+                        }
                     } else if (nodes_bar) {
                         handled = true;
                         dirty   = true;
@@ -2621,14 +3059,31 @@ extern "C" void app_main(void) {
                                  nodesShownCount());
                     } else {
                         // The LIST has the focus. Up/Down move; Up from the FIRST row goes to the bar; `/`
-                        // opens it from anywhere. Every other key keeps its old meaning (the `!handled`
-                        // block below: ',' = Settings, 'a' = advert, Esc = back).
+                        // opens it from anywhere; Enter opens this node's menu; `f` toggles favourite without
+                        // the menu. Every other key keeps its old meaning (the `!handled` block below:
+                        // ',' = Settings, 'a' = advert, Esc = back).
                         if (k == tm::Key::Up) {
                             om::ui::nodesFocusUp(&nodes_bar, &nodes_focus);
                             handled = true;
                             dirty   = true;
                         } else if (k == tm::Key::Down) {
                             om::ui::nodesFocusDown(&nodes_bar, &nodes_focus, nodesShownCount());
+                            handled = true;
+                            dirty   = true;
+                        } else if (k == tm::Key::Enter) {
+                            // S514/EST-455: the node menu belongs to the FOCUSED contact, captured by its
+                            // STORE index so the sheet cannot act on a row that moved under it.
+                            const int ci = nodesFocusedStoreIndex();
+                            if (ci >= 0) {
+                                node_menu_index = ci;
+                                node_menu_focus = 0;
+                                node_menu_open  = true;
+                            }
+                            handled = true;
+                            dirty   = true;
+                        } else if (is_char && ch == 'f') {
+                            // The ticket's shortcut: the same toggle the menu row runs, no sheet.
+                            toggleFavourite(nodesFocusedStoreIndex());
                             handled = true;
                             dirty   = true;
                         } else if (is_char && om::ui::nodesSlashOpensSearch(ch)) {
@@ -2647,6 +3102,12 @@ extern "C" void app_main(void) {
                         // (An open Chat composer consumed the comma above, so this cannot steal a typed ','.)
                         openSettings(page_now);
                     } else if (tm::is_symbol(k)) {
+                        // S514/EST-455: a symbol key navigates away, so a node menu left open on this page
+                        // closes with it instead of reappearing on the next visit.
+                        if (page_now == tm::Page::Nodes) {
+                            node_menu_open  = false;
+                            node_menu_index = -1;
+                        }
                         core.handleKey(k);   // the core's route: a module never sees a symbol key
                         dirty = true;
                     } else if (page_now == tm::Page::Launcher) {
@@ -2784,6 +3245,35 @@ extern "C" void app_main(void) {
         // S513/EST-439: the DM retry rule, on the MAIN task — it composes the next attempt and QUEUES it, and
         // marks "no confirmation" when the attempts are spent. True = a message's state moved, so repaint.
         if (om::mc::dmTick()) dirty = true;
+        // S514/EST-453: the scan window and the login/status deadlines. Also a repaint when a login answer
+        // moved the state, so the page cannot sit on "sending" after it was answered.
+        {
+            const om::rptr::LoginState before = om::rptrlink::login().state;
+            om::rptrlink::tick();
+            if (om::rptrlink::login().state != before) dirty = true;
+            if (g_rptr_mode == 1 && om::rptrlink::login().loggedIn()) {
+                // Logged in: the STATUS view opens and asks for the repeater's own counters once.
+                g_rptr_mode = 2;
+                g_rptr_note[0] = '\0';
+                om::rptrlink::statusRequest();
+                g_rptr_status_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                dirty = true;
+            }
+            if (g_rptr_mode == 2) {
+                static uint32_t last_status_serial = 0;
+                const uint32_t ss = om::rptrlink::statusSerial();
+                if (ss != last_status_serial) {
+                    last_status_serial = ss;
+                    g_rptr_status_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                    dirty = true;
+                }
+            }
+            static uint32_t last_scan_serial = 0;
+            if (om::rptrlink::found().serial != last_scan_serial) {
+                last_scan_serial = om::rptrlink::found().serial;
+                dirty = true;
+            }
+        }
 
         if (dirty) {
             switch (core.router().current()) {
@@ -2804,6 +3294,9 @@ extern "C" void app_main(void) {
                     break;
                 case tm::Page::Map:
                     drawMapPage();
+                    break;
+                case tm::Page::Rptr:
+                    drawRptrPage();
                     break;
                 case tm::Page::Settings:
                     drawSettingsPage();

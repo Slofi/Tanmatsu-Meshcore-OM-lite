@@ -19,8 +19,8 @@ StopResult Core::stop(const char* id) {
 bool Core::handleKey(Key k) {
   if (is_symbol(k)) {
     // Core-level route: a module never sees a symbol key through onKey(). If it is the OWN key of the
-    // page on screen (S514/EST-444), the page's module closes its inner level; the key is consumed
-    // either way, and at the top nothing changes.
+    // page on screen (S514/EST-444), the page's module closes its inner level; at the top it instead
+    // resets its selection to the first row (S514/EST-454). The key is consumed either way.
     const RouteResult r = router_.symbol(k, registry_);
     if (r.action == RouteAction::Top) {
       const Module* m = registry_.moduleForPage(router_.current());

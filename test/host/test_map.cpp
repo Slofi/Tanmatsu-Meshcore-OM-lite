@@ -766,8 +766,26 @@ void test_clmt_ownership_frees_once() {
 }  // namespace
 
 
+
+void test_clmt_reuse() {
+    // S514 (Claude): a finished map of a contiguous pack: used 4 DWORDs (2 + one fragment), fragment of
+    // 1000 clusters starting at cluster 77, allocated 514 DWORDs, file 3,590,722,268 B.
+    uint32_t t[8] = {4, 1000, 77, 0, 0, 0, 0, 0};
+    const uint32_t size = 3590722268u;
+    CHECK(om::map::clmtReusable(t, 514, size, 77, size));            // the same file: reuse
+    CHECK(!om::map::clmtReusable(t, 514, size, 78, size));           // another start cluster: rebuild
+    CHECK(!om::map::clmtReusable(t, 514, size, 77, size - 1));       // the file changed size: rebuild
+    CHECK(!om::map::clmtReusable(t, 514, size, 0, size));            // no start cluster: rebuild
+    CHECK(!om::map::clmtReusable(nullptr, 514, size, 77, size));     // nothing cached
+    uint32_t unfinished[8] = {600, 1000, 77, 0, 0, 0, 0, 0};         // "needs 600": never finished
+    CHECK(!om::map::clmtReusable(unfinished, 514, size, 77, size));
+    uint32_t empty[4] = {2, 0, 0, 0};                                // no fragment at all
+    CHECK(!om::map::clmtReusable(empty, 514, 0, 0, 0));
+}
+
 int main() {
     test_decode_entry();
+    test_clmt_reuse();
     test_zoom_to_pack();
     test_binary_search();
     test_coordinates();

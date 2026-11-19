@@ -133,6 +133,27 @@ uint32_t readBlockRecords(void* ctx, uint32_t first, om::map::Entry* out, uint32
     return n;
 }
 
+#if FF_USE_FASTSEEK
+// S514 (Claude): one finished link map per pack, kept across pack switches (see core/map_clmt.h clmtReusable).
+// A table is owned by EXACTLY one place: the open pack (g_pack.clmt) or this cache, never both, so it is freed
+// once at most. Three packs x ~2 KB of PSRAM.
+struct CachedLinkMap {
+    uint32_t* table = nullptr;
+    uint32_t  items = 0;
+    uint32_t  size  = 0;   // the pack's file size when the map was built
+};
+CachedLinkMap g_map_cache[3];
+
+int packSlot(int z) {
+    const char* dir = om::map::packDirForZoom(z);
+    if (dir == nullptr) return -1;
+    if (strcmp(dir, "slo") == 0) return 0;
+    if (strcmp(dir, "slo16") == 0) return 1;
+    if (strcmp(dir, "slo17") == 0) return 2;
+    return -1;
+}
+#endif
+
 void closePack() {
     // S514/EST-452: the link map is OURS, not FatFs's. Detach it from the FIL before the FIL goes away and take
     // it back from the owner, so this close path (which runs on every reopen) frees it exactly once and a second
@@ -140,10 +161,26 @@ void closePack() {
 #if FF_USE_FASTSEEK
     g_pack.pack.cltbl = nullptr;   // detach before the FIL goes away (the field exists only with fast seek on)
 #endif
-    uint32_t* const clmt = g_pack.clmt.drop();
+    const uint32_t  clmt_items = g_pack.clmt.items;
+    uint32_t* const clmt       = g_pack.clmt.drop();
+#if FF_USE_FASTSEEK
+    // S514 (Claude): keep the finished map for the next time this pack opens, instead of freeing it.
+    const int      slot = (clmt != nullptr && g_pack.pack_open) ? packSlot(g_pack.z) : -1;
+    const uint32_t size = g_pack.pack_open ? (uint32_t)f_size(&g_pack.pack) : 0u;
+#endif
     if (g_pack.idx) fclose(g_pack.idx);
     if (g_pack.pack_open) f_close(&g_pack.pack);
+#if FF_USE_FASTSEEK
+    if (slot >= 0 && g_map_cache[slot].table == nullptr) {
+        g_map_cache[slot].table = clmt;
+        g_map_cache[slot].items = clmt_items;
+        g_map_cache[slot].size  = size;
+    } else {
+        heap_caps_free(clmt);
+    }
+#else
     heap_caps_free(clmt);
+#endif
     // S514: the block cache is owned by the open pack; free it with it, so a zoom across a band boundary does not
     // leak 132 KB of PSRAM per pack.
     heap_caps_free(g_pack.block_key_storage);
@@ -187,6 +224,22 @@ char probeDrive(const char* dir) {
 // Not fatal on any failure: without a table the pack reads exactly as it did in v48, only slower. The FIL is
 // never left pointing at a table that has been freed.
 void attachLinkMap(int z) {
+    // S514 (Claude): a map this pack had before, if it still fits the file, is attached without a new FAT walk.
+    const int slot = packSlot(z);
+    if (slot >= 0 && g_map_cache[slot].table != nullptr) {
+        CachedLinkMap& c = g_map_cache[slot];
+        if (om::map::clmtReusable(c.table, c.items, c.size, (uint32_t)g_pack.pack.obj.sclust,
+                                  (uint32_t)f_size(&g_pack.pack)) &&
+            g_pack.clmt.adopt(c.table, c.items)) {
+            g_pack.pack.cltbl = c.table;
+            ESP_LOGI(TAG, "z%d: fast seek on, link map reused (%u fragment(s), no FAT walk)", z,
+                     (unsigned)om::map::clmtFragmentsForItems(c.table[0]));
+            c = CachedLinkMap{};   // ownership moved to the open pack
+            return;
+        }
+        heap_caps_free(c.table);   // stale or not adoptable: build a fresh one below
+        c = CachedLinkMap{};
+    }
     uint32_t items = om::map::clmtItemsForFragments(om::map::kClmtFirstTryFragments);
     for (int attempt = 1; attempt <= 2; attempt++) {
         const size_t bytes = (size_t)items * sizeof(uint32_t);

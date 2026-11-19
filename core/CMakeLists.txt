@@ -48,6 +48,8 @@ idf_component_register(
          # S514/EST-446: adding/removing a channel — the L2's hashtag normalisation and base64 rules, the
          # duplicate refusal, and the NVS rewrite ORDER that makes a power cut at any step loadable.
          "channel_admin.cpp"
+         # S514/EST-453: RPTR part 1 — the found list / login / status rules and the four upstream packets.
+         "rptr_model.cpp" "rptr_wire.cpp"
          # S514/EST-450: the L2's shared phrase library, compiled from ITS OWN source (never copied or
          # forked), exactly as mc_history uses the L2's history format. core/sound_events.h is the policy;
          # this one file is the synth both devices play.

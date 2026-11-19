@@ -47,6 +47,8 @@ constexpr uint8_t kRouteTransportFlood = 0x00;   // flood + two transport codes 
 constexpr uint8_t kRouteFlood     = 0x01;
 constexpr uint8_t kTypeGrpTxt     = 0x05;
 constexpr uint8_t kTypeAdvert     = 0x04;
+constexpr uint8_t kTypeResponse   = 0x01;   // Packet.h:20 (an answer to REQ or ANON_REQ)
+constexpr uint8_t kTypeControl    = 0x0B;   // Packet.h:30 (discovery / control data)
 constexpr uint8_t kTxtTypePlain   = 0x00;
 
 // A MeshCore group channel. `secret` is the 32-byte buffer MeshCore keeps; `hash` is the 1-byte

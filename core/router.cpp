@@ -46,7 +46,8 @@ RouteResult Router::symbol(Key key, Registry& registry) {
 
   // S514/EST-444 (Filip): the symbol key of the page you are ALREADY on goes to that page's top
   // level. The router only DECIDES that it is the page's own key; the module that owns the inner
-  // level closes it (Core calls Module::onTop). No page change, so at the top this is a no-op.
+  // level closes it (Core calls Module::onTop). No page change; at the top the module resets its own
+  // selection to the first row (S514/EST-454), so the router still names no page and no row.
   if (target != Page::Count && is_own_symbol(key, current_)) {
     const Module* m = registry.moduleForPage(current_);
     if (m != nullptr && m->available && registry.isRunning(m->id)) {

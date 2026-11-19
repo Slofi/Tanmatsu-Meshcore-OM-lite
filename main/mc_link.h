@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include "advert_rule.h"
+#include "mc_identity.h"
 #include "mc_store.h"
 
 namespace om {
@@ -113,6 +114,13 @@ void serviceRequests();
 // Our own public key as hex, cut to 8 bytes — the thing other nodes identify us by, for the log.
 const char* publicKeyHex();
 
+// S514/EST-453: RPTR part 1's two doors into the radio. selfIdentity() copies the node's keypair (false before
+// the first begin()), and queueRptrFrame() puts a COMPLETE frame into the same FOUR-slot queue a DM uses — the
+// RPTR page never calls the radio itself. The receive hooks live in main/rptr_link.* and are called from
+// onPacket() on the radio task.
+bool selfIdentity(meshcore::Identity* out);
+bool queueRptrFrame(const uint8_t* frame, size_t len);
+
 // "mc 1ch" for the status bar.
 const char* statusText();
 
@@ -146,6 +154,11 @@ void contactsPersistTick();
 // history stays on the card, as the confirm sheet says.
 bool   contactsRemove(size_t index);   // false for an out-of-range index (a stale row must remove nobody)
 size_t contactsClear();                // returns how many rows were removed; 0 changes nothing
+
+// S514/EST-455: set one contact's favourite flag. It is a STRUCTURAL change — the flag is part of the contact
+// record in the `mcct` blob — so it raises the same dirty flag and contactsPersistTick() rewrites NVS on this
+// loop's pass, exactly like remove/clear. False for an out-of-range index (a stale row must mark nobody).
+bool contactsSetFavourite(size_t index, bool on);
 
 // The "New node: ..." notice (NVS "mcset"/"newnode", default On). The radio task reads the cached value when it
 // raises the notice; the MAIN task flips it. A corrupt stored byte reads as On.

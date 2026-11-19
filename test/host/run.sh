@@ -31,11 +31,15 @@ SET="$(mktemp /tmp/tm-settings.XXXXXX)"
 CHANADMIN="$(mktemp /tmp/tm-channel-admin.XXXXXX)"
 NODESMAP="$(mktemp /tmp/tm-nodes-map.XXXXXX)"
 NODESSEARCH="$(mktemp /tmp/tm-nodes-search.XXXXXX)"
+NODEMENU="$(mktemp /tmp/tm-node-menu.XXXXXX)"
 SOUND="$(mktemp /tmp/tm-sound-events.XXXXXX)"
+RPTR="$(mktemp /tmp/tm-rptr.XXXXXX)"
+RPTRASAN="$(mktemp /tmp/tm-rptr-asan.XXXXXX)"
+RPTRED="$(mktemp -d /tmp/tm-rptr-ed.XXXXXX)"
 CHANORACLE="$(mktemp -d /tmp/tm-chan-oracle.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$SOUND"; rm -rf "$ED" "$EDASAN" "$CHANORACLE"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -289,6 +293,45 @@ PYORACLE
     ../../core/mc_store.cpp \
     -o "$NODESSEARCH"
 "$NODESSEARCH"
+
+# NODE MENU + FAVOURITES (S514/EST-455): the rows each node type gets (client DM only; Ping/Trace/Map/Reset never
+# offered), the favourite value/accent, the focus clamp and the action Enter runs, the notice's exact words, the
+# favourites-first order with STABLE ties, the EST-449 filter keeping that order, the focus-follows-the-node rule,
+# and the flag through the REAL `mcct` blob codec. The rules are headers; mc_store/contact_blob are the device's.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_node_menu.cpp \
+    ../../core/mc_store.cpp ../../core/contact_blob.cpp \
+    -o "$NODEMENU"
+"$NODEMENU"
+
+# RPTR part 1 (S514/EST-453): the four packets ported from upstream (scan, ANON_REQ login, REQ status and its
+# RESPONSE), the found list, the login state machine + deadline, the 56-byte RepeaterStats decode and every unit
+# on the page. Expected frames come from an independent Python oracle quoted in test_rptr.cpp; the parsers then
+# run under AddressSanitizer with a 4000-round junk pass (every length there came off the air).
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core -I ../../core/ed25519 \
+    test_rptr.cpp \
+    ../../core/rptr_model.cpp ../../core/rptr_wire.cpp \
+    ../../core/mc_wire.cpp ../../core/mc_crypto_psa.cpp ../../core/mc_identity.cpp \
+    "$ED"/*.o \
+    -lmbedcrypto \
+    -o "$RPTR"
+"$RPTR"
+
+# The vendored Ed25519 C is built with ASan ONLY here: its own UBSan reports (left shifts of negative
+# values, present since S501) are not our code and would bury this parser stage in noise. Our files still get
+# both sanitizers, which is what the junk pass is for.
+for f in ../../core/ed25519/*.c; do
+    "$CC" -O1 -g -fsanitize=address -fno-omit-frame-pointer -c "$f" -o "$RPTRED/$(basename "$f" .c).o"
+done
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I ../../core -I ../../core/ed25519 \
+    test_rptr.cpp \
+    ../../core/rptr_model.cpp ../../core/rptr_wire.cpp \
+    ../../core/mc_wire.cpp ../../core/mc_crypto_psa.cpp ../../core/mc_identity.cpp \
+    "$RPTRED"/*.o \
+    -lmbedcrypto \
+    -o "$RPTRASAN"
+ASAN_OPTIONS=detect_leaks=1 "$RPTRASAN"
 
 # SOUNDS (S514/EST-450): the event -> L2 default mapping (including Boot Off here vs the L2's Bell
 # TK-TK), the 400 ms rate gate at exact instants and across the 32-bit wrap, the echo/duplicate/restored

@@ -15,6 +15,163 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S514 (EST-455) · node menu + favourites
+
+> Written by **DeepSeek** for ticket **EST-455**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed or committed. Starts after EST-454 is in the tree and keeps its work. **Version: 50.** The ticket
+> asked for this entry FIRST; the results below are filled in after the real runs.
+
+### What this builds
+
+1. **Enter on a node in the Nodes list opens its NODE MENU** — a modal sheet in the confirm sheet's house style.
+   Only actions that work on the Tanmatsu today, in the L2's order: **Direct message** (clients only; opens that
+   contact's DM thread in Chat, including an empty thread view), **Info** (the existing detail pane), **Favourite**
+   (value `on`/`off`; Enter toggles), **Remove contact** (the EST-447 confirm and removal). Ping, Trace, Map and
+   Reset path are NOT offered until they exist. Esc closes the menu; `f` on a focused node toggles favourite
+   without opening it.
+2. **Favourite toggling** is a structural contact change: the RAM row changes under the store lock and raises the
+   structural flag, so the same `contactsPersistTick()` writes the `mcct` NVS blob on this loop's pass (EST-437).
+   A short notice says `<name>: favourite` / `<name>: not favourite`; the list re-sorts at once and the focus
+   follows the node to its new row. The row mark is a **small gold dot**, because the generated faces carry
+   ASCII + U+00A0..U+017F only and therefore have **no U+2605 star glyph** (tools/mkfonts.py).
+3. **The order rule** — favourites at the top by last heard (newest first), then everyone else by last heard,
+   ties stable, and the EST-449 search filter keeps that order inside its matches — is pinned in the host tests.
+
+### Results (real exit codes, 2026-11-19)
+
+- **Host tests: `sh test/host/run.sh` exit 0** — **26 compiled suite summaries, 14,575 checks, 0 failures**
+  (`paperclip-pilot/sweep/est455-host.log`; the ASan/UBSan repeats are included in that count, as in the previous
+  entries). The new stage is `test_node_menu`: **95 checks, 0 failure(s)**.
+- **ARMED — two mutations, both red, reverted before the final runs above:**
+  - `core/mc_store.cpp` tie-break `>` → `>=` (a later row wins an equal `heard_at`) →
+    `FAIL .../est455-arm/test_node_menu.cpp:205  order[0] == 3 (got 5, want 3)`, 77 checks, 1 failure.
+  - `core/node_menu.h` DM condition `hasKey && advType == kNodeMenuAdvChat` → `hasKey` (a repeater gets DM) →
+    `FAIL .../est455-arm/test_node_menu.cpp:104  om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows) == 3 (got 4, want 3)`,
+    76 checks, 1 failure.
+- **Build: `make build` exit 0.** `application.bin` **0x17b190 = 1,552,784 B**; `make size`: **Flash
+  1,442,278 B used**, total image **1,552,376 B**, **1,724,016 B free (52.6 %)** of the **3,200 KiB
+  (3,276,800 B)** budget. Versus EST-454: **+3,936 B** in the bin. `kAppVersion` stays `50` (the ticket's number).
+- **Preview:** `shots/2026-11-19-nodes-favourites.png`, **800×480**, rendered by the one tool
+  (`python3 tools/preview_tanmatsu.py nodes_favourites`): two favourites at the top with the gold dot and the menu
+  open on the third node (a client, so all four rows are honest). Every fixture is invented (rule 9).
+- **Files (new):** `core/node_menu.h` (rows per type, favourite notice, focus follow), `test/host/test_node_menu.cpp`,
+  `shots/2026-11-19-nodes-favourites.png`.
+  **Files (edited):** `main/main.cpp` (menu state/keys and the DM/remove/toggle side effects, the on-page confirm),
+  `main/nodes_page.{h,cpp}` (the sheet, the gold dot, the hints/detail words), `main/mc_link.{h,cpp}`
+  (`contactsSetFavourite`, the structural dirty flag), `core/contact_admin.h` (`contactSetFavourite`), `test/host/run.sh`,
+  `tools/preview_tanmatsu.py`, `docs/PROGRESS.md` (this entry).
+- **NOT checked (named):** nothing was flashed, installed or committed; the sheet, the re-sort and the focus follow
+  were host-tested and rendered, not yet seen on glass. The NVS write is the EST-437 rule, not a write inside the key
+  handler: the toggle changes RAM under the store lock and raises the structural flag, and the main loop's
+  `contactsPersistTick()` rewrites the `mcct` blob on that pass (the same path remove/clear use). The row mark is
+  the gold **dot**, not a star: `tools/mkfonts.py` ships ASCII + U+00A0..U+017F only and U+2605 is not in the faces.
+
+## 2026-11-19 · S514 (EST-454) · own key at the top = first row
+
+> Written by **DeepSeek** for ticket **EST-454**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed or committed. Starts after EST-453 (v49) is in the tree and keeps its work. **Version: 50.** The ticket
+> asked for this entry FIRST; the results below are filled in after the real runs.
+
+### The rule
+
+Filip's extension of EST-444: the page's own symbol key, pressed while that page is ALREADY at its top level,
+now moves the selection to the FIRST row and scrolls the list to the top. Inside an inner level the same key
+still only closes that level (one press, one step) and does not also jump.
+
+- **Nodes** (square): the first node in the filtered list (row 0); the search bar is NOT focused and the typed
+  query stays. Inside the search bar the key leaves the bar (the inner level) and keeps the focus where it was.
+- **Chat** (circle): the first channel card — Channels column (0), row 0 — and BOTH column scrolls reset to 0.
+  Inside an open channel/DM the key closes it and leaves the focus alone; a second press goes to row 0.
+- **RPTR** (diamond): the same rule because it has a list — the first found/contact row; inside login/status the
+  key returns to the list (one step) without jumping.
+- **Map** (cloud): no list, so unchanged. **Settings**: reachable from `,` and the Launcher bar, not from a
+  symbol key, so it has no own key to change; its frame is unchanged.
+
+### Where it lives
+
+The router stays generic. EST-444's `Module::onTop` answer already says whether an inner level was closed; the
+`false` ("already at the top") branch is now where the module resets its own focus. The reset arithmetic is a
+pure core header, `core/own_top.h`, so the host test drives the SAME rule the panel runs; `main/main.cpp`'s
+`g_om_lite.onTop` only copies its local state in and out and performs the close side effects (mark read, logout).
+
+### Results (real exit codes, 2026-11-19)
+
+- **Host tests: `sh test/host/run.sh` exit 0** — **26 compiled suites, 16,558 checks, 0 failures** (the sum of
+  every stage's own summary in `paperclip-pilot/sweep/est454/host-final.log`; the ASan repeats included). The
+  core/router suite is **275 checks, 0 failures** (was 229, so the new test adds 46).
+- **ARMED (the EST-444 no-op is what fails):** the same `test_core.cpp` built against an
+  `own_top.h` whose two functions only close an inner level and never reset the focus (`sweep/est454/arm/`) →
+  **exit 1**, `FAIL test_core.cpp:512  g_om_col == om::mc::kColChannels (got 1, want 0)`, 235 checks,
+  1 failure. With the real header: 275 checks, 0.
+- **Build: `make build` exit 0.** `application.bin` **0x17a230 = 1,548,848 B**; `make size`: **Flash
+  1,438,350 B used**, total image **1,548,448 B**, **548,304 B free (`0x85dd0`, 26 %)** of the 2 MiB
+  (`0x200000`) app partition. Versus EST-453: +364 B flash/image, +352 B bin. `kAppVersion` is `50`.
+- **Files (new):** `core/own_top.h` (the two reset rules).
+  **Files (edited):** `main/main.cpp` (the onTop hook and the state it now resets), `test/host/test_core.cpp`
+  (the rule through the module hook), `core/settings.h` (`kAppVersion` 50), `core/module.h`, `core/router.h`,
+  `core/router.cpp`, `core/core.cpp` (comments only: the old "at the top nothing changes" text is no longer
+  true; the router still only names the page), `docs/PROGRESS.md` (this entry).
+- **NOT checked (named):** nothing was flashed, installed or committed; the focus jump and the scroll are
+  host-tested, not seen on glass. Settings has no own symbol key in the five-key table, so the "same rule" has
+  nothing to act on there; Map has no list.
+
+## 2026-11-19 · S514 (EST-453) · RPTR part 1: scan, login, status
+
+> Written by **DeepSeek** for ticket **EST-453**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed or committed. Starts on `fc9b199` (v48) plus EST-452's uncommitted tree. **Version: 49.** The ticket
+> asked for this entry FIRST. Part 1 is READ-ONLY: no `set` command is built, sent or reachable from the page.
+
+### What this builds (items in the ticket's order)
+
+1. **Pure core** `core/rptr_model.*` (found list, login state machine + deadline, status fields and units,
+   formatting) and `core/rptr_wire.*` (the four packets, ported byte for byte from upstream). Host tests in
+   `test/host/test_rptr.cpp`, with the expected frames from an independent Python oracle, plus a junk-input pass
+   under AddressSanitizer/UBSan.
+2. **Page::Rptr**: the diamond key's page — the found/contact list, Enter -> login sub-page (password shown as
+   dots), then the STATUS view with the repeater's own fields. All radio work goes through the existing tx queue
+   and the radio task; the page only queues requests.
+3. **Settings > OM Lite > RPTR**: `Remember passwords` On/Off (default On) and `Forget all passwords` behind the
+   shared confirm sheet.
+4. **Preview shots** `shots/2026-11-19-rptr-list.png` and `shots/2026-11-19-rptr-status.png`.
+
+### Results (real exit codes, 2026-11-19)
+
+- **Host tests: `sh test/host/run.sh` exit 0** — 25 compiled suites, **14,434 checks, 0 failures**. The new stage
+  is `test_rptr`: **101 checks, 0 failure(s)** in both the -O2 build and under AddressSanitizer/UBSan (the
+  vendored Ed25519 C is ASan-only there, so its own S501-era UBSan left-shift reports cannot bury our parsers;
+  our files get both sanitizers). The junk pass feeds 4,000 arbitrary byte strings into the frame decoder and
+  every parser.
+- **ARMED (the old code is what fails):**
+  - scan header mutated from DIRECT to FLOOD → `FAIL test_rptr.cpp:104  frameEquals(frame, n, kScan)`
+  - `statusParse` uptime offset 20 → 16 → `FAIL test_rptr.cpp:201  st.uptimeSec == 90061u (got 3600, want 90061)`
+  Both mutations were reverted before the final runs above.
+- **Build: `make build` exit 0.** `make size`: **Flash 1,437,986 B used**, total image **1,548,084 B**
+  (`application.bin` 0x17a0d0 = 1,548,496 B), **vs the 3,200 KiB (3,276,800 B) budget: 1,728,816 B free
+  (52.8 %)**. `kAppVersion` is `49`.
+- **Preview:** `shots/2026-11-19-rptr-list.png` and `shots/2026-11-19-rptr-status.png`, both 800×480, rendered by
+  the one tool `tools/preview_tanmatsu.py rptr_list rptr_status`; every fixture is invented (rule 9).
+- **Files (new):** `core/rptr_model.{h,cpp}`, `core/rptr_wire.{h,cpp}`, `main/rptr_page.{h,cpp}`,
+  `main/rptr_link.{h,cpp}`, `test/host/test_rptr.cpp`.
+  **Files (edited):** `core/mc_wire.h` (kTypeResponse/kTypeControl), `core/CMakeLists.txt`, `main/mc_link.{h,cpp}`
+  (two doors + the receive hooks), `main/main.cpp` (RPTR page state/draw/keys, the two Settings rows and the
+  confirm target), `main/CMakeLists.txt`, `test/host/run.sh`, `tools/preview_tanmatsu.py`.
+- **NOT checked (named):** nothing was flashed, installed or committed. No login or status has been on the air
+  yet — that is Claude's test with Filip. The login/status deadline uses a fixed 8 s + 2.5 s estimate because
+  this app has no upstream `getEstAirtimeFor` model; it is deliberately slower than a guess, never shorter than
+  the L2's 8 s floor. The password is stored in NVS `mcrp` exactly as the L2 stores it (plain, because auto-login
+  must read it back); it is never logged or drawn. Repeater CONTACTS from adverts are merged into the same found
+  list every 2 s, so their row index and a scan answer's row index are the same one loginStart() uses.
+- **Nothing of part 2 is here:** no `set` command is built, sent or reachable.
+
+| Packet | Built / read from |
+|---|---|
+| Scan request (zero-hop CONTROL) | `Mesh.cpp:621-633` createControlData, `Mesh.cpp:717-726` sendZeroHop, `rptr_link.cpp:478-491` payload |
+| Scan answer | `rptr_link.cpp:536-556` (type 0x90, snr x4, tag, key) |
+| Login (ANON_REQ) | `BaseChatMesh.cpp:603-629` sendLogin, `Mesh.cpp:512-538` createAnonDatagram |
+| Login answer | `rptr_model.cpp:168-193` loginParse (RESP_SERVER_LOGIN_OK layout) |
+| Status request (REQ) | `BaseChatMesh.cpp:690-715` sendRequest(req_type), `Mesh.cpp:490-509` createDatagram |
+| Status reply | `rptr_model.cpp:248-292` statusParse (56-byte RepeaterStats) |
+
 ## 2026-11-19 · S514 (EST-452) · FatFs fast seek for the packs: a z16/z17 fill stops re-walking the FAT per tile
 
 > Written by **DeepSeek** for ticket **EST-452**: fenced Paperclip run, no session start/end, nothing

@@ -645,6 +645,124 @@ def nodes_search():
     return save(img, '2026-11-19-nodes-search.png')
 
 
+# S514/EST-455: the favourites preview. Two favourites at the top (TEST-Vera, RPT-Kamera), then the rest by
+# last heard; the menu is open on the THIRD node (TEST-B2, a client, so all four actions are honest).
+NODES_FAV = [
+    ('client', 'TEST-Vera', 'direct', '8m', '4.1', True),
+    ('repeater', 'RPT-Kamera', 'path 2', '18m', '7.5', True),
+    ('client', 'TEST-B2', 'direct', '49m', '6.1', False),
+    ('repeater', 'RPT-Vzhod', 'path 3', '9h', '-1.4', False),
+    ('repeater', 'RPT-Zahod', 'path 3', '9h', '0.2', False),
+    ('client', 'LOCAL-KB', 'direct', '2d', '4.4', False),
+]
+
+
+def nodes_favourites():
+    """OM Lite > Nodes, S514/EST-455: favourites on top, and one node's menu.
+
+    The two favourites carry the SAME mark the device draws: a small gold DOT, because the generated
+    faces (tools/mkfonts.py) carry ASCII + U+00A0..U+017F only and have no U+2605 star. The menu is the
+    bottom sheet in the confirm sheet's house style: scrim, gold outline, the node's name and facts, and
+    only the rows that work today. The focused row is Direct message (a client).
+    """
+    img, d = new_screen()
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    status_bar(d)
+
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Nodes', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    fm = font(FONT_MONO, TM['f_meta'])
+    text(d, (W - pad, y + TM['head_h'] // 2), '6 nodes heard · 2 in the last hour', fm, P['Dim'],
+         anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+    work_top = y + TM['head_h'] + 1
+
+    list_x0, list_x1 = pad, pad + TM['list_w']
+    bar_x1 = list_x1 - TM['ring_inset']
+    bar_y, bar_h = work_top + 4, 30
+    d.rectangle([list_x0, bar_y, bar_x1, bar_y + bar_h], fill=P['FieldBg'])
+    d.rectangle([list_x0, bar_y, bar_x1, bar_y + bar_h], outline=P['Line'], width=1)
+    text(d, (list_x0 + 12, bar_y + bar_h // 2), 'search nodes', font(FONT_SANS, TM['f_body']),
+         P['Dimmer'], anchor='lm')
+    text(d, (bar_x1 - 12, bar_y + bar_h // 2), '6 of 6', font(FONT_MONO, TM['f_hint']), P['Dim'],
+         anchor='rm')
+
+    rows_top = bar_y + bar_h + 6
+    row_h = 46
+    row_right = list_x1 - TM['ring_inset']
+    focus_row = 2          # the third node: its menu is the sheet below
+    for i, (kind, name, hops, age, snr, fav) in enumerate(NODES_FAV):
+        y0 = rows_top + i * row_h
+        y1 = y0 + row_h
+        if i == focus_row:
+            focus_band(d, list_x0, list_x1, y0, y1)
+        else:
+            hline(d, list_x0, row_right, y1, P['RowLine'])
+        col = P['Client'] if kind == 'client' else P['Green']
+        d.ellipse([list_x0 + 6, y0 + row_h // 2 - 4, list_x0 + 14, y0 + row_h // 2 + 4], fill=col)
+        nc = P['AccInk'] if i == focus_row else P['Ink']
+        text(d, (list_x0 + 24, y0 + 10), name, font(FONT_SANS, 16), nc)
+        meta = font(FONT_MONO, TM['f_meta'])
+        text(d, (list_x0 + 24, y0 + 29), hops, meta, P['Dimmer'])
+        text(d, (row_right - 6, y0 + 11), age, meta, P['Dim'], anchor='ra')
+        text(d, (row_right - 6, y0 + 29), snr + ' dB', meta, P['Dim'], anchor='ra')
+        if fav:
+            # the device's mark: a 3 px gold dot, in the name's reserve, clear of the age column
+            d.ellipse([row_right - 77, y0 + 13, row_right - 71, y0 + 19], fill=P['Acc'])
+
+    scroll_indicator(d, (list_x0, rows_top, list_x1, rows_top + len(NODES_FAV) * row_h),
+                     total=6, visible=len(NODES_FAV))
+
+    # detail pane: the focused (third) node
+    vline(d, list_x1 + 8, work_top, H - TM['hint_h'] - 8, P['Line'])
+    x = list_x1 + 8 + 24
+    yy = work_top + 18
+    text(d, (x, yy), 'TEST-B2', font(FONT_SANS, 26), P['Ink'])
+    yy += 34
+    text(d, (x, yy), 'client · key ' + NODE_KEY, fm, P['Dim'])
+    yy += 26
+    fk = font(FONT_MONO, TM['f_kv'])
+    for label, value in (('TYPE', 'client (companion)'), ('HOPS', 'direct · 0 hops'),
+                         ('SNR / RSSI', '6.1 dB / -74 dBm'), ('LAST HEARD', '49 m ago'),
+                         ('PUBLIC KEY', NODE_KEY), ('PATH', 'direct')):
+        text(d, (x, yy), label, fk, P['Dimmer'])
+        text(d, (x + 130, yy), value, fk, P['Ink'])
+        yy += 28
+    yy += 8
+    text(d, (x, yy), 'Enter: actions for this node.', font(FONT_SANS, TM['f_body']), P['Dimmer'])
+    text(d, (x, yy + 22), 'f: favourite. DM from the menu or the Chat page.',
+         font(FONT_SANS, TM['f_body']), P['Dimmer'])
+
+    # ---- the node menu sheet (the confirm sheet's house style) ----
+    img = Image.blend(img, Image.new('RGB', img.size, '#000000'), 0.62)
+    d = ImageDraw.Draw(img)
+    sheet_w, row_h, head_h, spad = 560, 42, 64, 16
+    rows = [('Direct message', ''), ('Info', ''), ('Favourite', 'off'), ('Remove contact', '')]
+    sheet_h = 2 * spad + head_h + len(rows) * row_h
+    x0 = (W - sheet_w) // 2
+    x1 = x0 + sheet_w
+    y0 = H - TM['hint_h'] - 8 - sheet_h
+    plate(d, [x0, y0, x1, y0 + sheet_h], P['Panel'], P['Acc'], r=0, w=2)
+    text(d, (x0 + 20, y0 + spad), 'TEST-B2', font(FONT_SANS, 22), P['Ink'])
+    text(d, (x0 + 20, y0 + spad + 34), 'client · last heard 49m ago', fm, P['Dim'])
+    hline(d, x0 + 1, x1 - 1, y0 + spad + head_h - 1, P['Line'])
+    ry = y0 + spad + head_h
+    for i, (label, value) in enumerate(rows):
+        if i == 0:
+            focus_band(d, x0 + 8, x1 - 8, ry + 1, ry + row_h - 2)
+        text(d, (x0 + 24, ry + row_h // 2), label, font(FONT_SANS, 17),
+             P['AccInk'] if i == 0 else P['Ink'], anchor='lm')
+        if value:
+            text(d, (x1 - 24, ry + row_h // 2), value, font(FONT_MONO, TM['f_hint']), P['Dim'],
+                 anchor='rm')
+        if i + 1 < len(rows):
+            hline(d, x0 + 8, x1 - 8, ry + row_h - 1, P['RowLine'])
+        ry += row_h
+
+    hint_bar(d, 'nodes', [('↑↓', 'move'), ('↵', 'choose'), ('esc', 'close')])
+    return save(img, '2026-11-19-nodes-favourites.png')
+
+
 CHATS = [
     ('#', 'test-a', 'TEST-A1: morning, radio check', '3m', 2),
     ('#', 'test-b', 'LOCAL-KB: history save check', '12m', 0),
@@ -1785,8 +1903,124 @@ def dm_enter():
     return save(img, '2026-11-19-dm-enter.png')
 
 
-RENDERERS = dict(launcher=launcher, menu=menu, nodes=nodes, nodes_search=nodes_search, chat=chat, chat2=chat_cards,
-                 chat_dm=chat_dm_column, dm_enter=dm_enter, map=map_page, rptr=rptr, settings=settings,
+
+# ------------------------------------------------------------------ RPTR part 1 (S514/EST-453)
+# Same two-pane shape as the device's main/rptr_page.cpp. Every name and key is an INVENTED fixture
+# (public-repo rule 9): no real repeater, operator or password appears here.
+RPTR_FIXTURES = [
+    ('TEST-RPT-A', 'direct · 6.75 dB', '11 22 33 … a1', '32 B', True),
+    ('TEST-RPT-B', 'direct · 2.25 dB', '44 55 66 … b2', '32 B', True),
+    ('TEST-RPT-C', 'path · no snr', '77 88 99 … c3', '6 B', False),
+]
+
+
+def _rptr_list_pane(d, W, pad, work_top, focus, live=False):
+    list_x0, list_x1 = pad, pad + TM['list_w']
+    row_right = list_x1 - TM['ring_inset']
+    spaced(d, (list_x0, work_top + 16), 'REPEATERS', font(FONT_MONO, TM['f_label']), P['Dim'])
+    fchip = font(FONT_MONO, TM['f_label'])
+    cw = tw(fchip, 'SCAN  s') + 14
+    plate(d, [row_right - cw, work_top + 8, row_right, work_top + 30], P['Panel2'], P['Line'], r=3)
+    text(d, (row_right - cw / 2, work_top + 19), 'SCAN  s', fchip, P['Dim'], anchor='mm')
+    rows_top = work_top + 44
+    for i, (name, meta, key, klen, saved) in enumerate(RPTR_FIXTURES):
+        y0 = rows_top + i * TM['row_h']
+        y1 = y0 + TM['row_h']
+        if i == focus:
+            focus_band(d, list_x0 - 8, list_x1, y0, y1)
+        else:
+            hline(d, list_x0, row_right, y1, P['RowLine'])
+        d.ellipse([list_x0 + 2, y0 + TM['row_h'] // 2 - 4,
+                   list_x0 + 10, y0 + TM['row_h'] // 2 + 4], fill=P['Green'])
+        text(d, (list_x0 + 22, y0 + 22), name, font(FONT_SANS, 16),
+             P['AccInk'] if i == focus else P['Ink'])
+        text(d, (list_x0 + 22, y0 + 42), meta, font(FONT_MONO, TM['f_meta']), P['Dimmer'])
+        if saved:
+            text(d, (row_right - 6, y0 + 20), 'saved', font(FONT_MONO, TM['f_label']),
+                 P['Acc'] if i == focus else P['Dim'], anchor='ra')
+    vline(d, list_x1 + 8, work_top, TM['H'] - TM['hint_h'] - 8, P['Line'])
+    return list_x1 + 8 + 24, W - pad - (list_x1 + 8 + 24)
+
+
+def rptr_list():
+    """RPTR part 1, the found list: scan is manual ('s'), Enter opens the login."""
+    img, d = new_screen()
+    W, pad = TM['W'], TM['pad']
+    status_bar(d)
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'RPTR', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    fm = font(FONT_MONO, TM['f_meta'])
+    text(d, (W - pad, y + TM['head_h'] // 2), 'manual scan · 3 found', fm, P['Dim'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+    work_top = y + TM['head_h'] + 1
+    x, rw = _rptr_list_pane(d, W, pad, work_top, 0)
+
+    yy = work_top + 16
+    text(d, (x, yy + 24), 'Repeaters', font(FONT_SANS, 26), P['Ink'])
+    yy += 58
+    text(d, (x, yy), 'Scan asks every repeater in range (zero hop).', font(FONT_MONO, TM['f_meta']),
+         P['Dim'])
+    yy += 18
+    text(d, (x, yy), 'Enter opens the login; a remembered password is filled in.', font(FONT_MONO, TM['f_meta']),
+         P['Dim'])
+    yy += 30
+    hline(d, x, x + rw, yy, P['Line'])
+    yy += 22
+    text(d, (x, yy + 14), 'TEST-RPT-A', font(FONT_SANS, 17), P['Ink'])
+    yy += 36
+    for lab, val in [('Key', '11 22 33 … a1'), ('SNR', 'in 4.25 dB · out 6.75 dB'),
+                     ('Hops', '0 · in contacts')]:
+        text(d, (x, yy), lab, font(FONT_MONO, TM['f_kv']), P['Dim'])
+        text(d, (x + 70, yy), val, font(FONT_MONO, TM['f_kv']), P['Ink'])
+        yy += 20
+    yy += 8
+    text(d, (x, yy), 'Enter = log in', font(FONT_MONO, TM['f_hint']), P['Acc'])
+    hint_bar(d, 'rptr', [('↑↓', 'move'), ('↵', 'log in'), ('s', 'scan'), ('esc', 'back')])
+    return save(img, '2026-11-19-rptr-list.png')
+
+
+def rptr_status():
+    """RPTR part 1, the STATUS view: the repeater's own counters, every value with its unit."""
+    img, d = new_screen()
+    W, pad = TM['W'], TM['pad']
+    status_bar(d)
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'RPTR', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    fm = font(FONT_MONO, TM['f_meta'])
+    text(d, (W - pad, y + TM['head_h'] // 2), 'status', fm, P['Dim'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+    work_top = y + TM['head_h'] + 1
+    x, rw = _rptr_list_pane(d, W, pad, work_top, 0)
+
+    yy = work_top + 16
+    text(d, (x, yy + 24), 'TEST-RPT-A', font(FONT_SANS, 26), P['Ink'])
+    yy += 58
+    text(d, (x, yy), 'The repeater\'s own counters', font(FONT_MONO, TM['f_meta']), P['Dim'])
+    yy += 24
+    cells = [('UPTIME', '1d 01:01'), ('BATTERY', '4.11 V (92%)'),
+             ('NOISE FLOOR', '-117 dBm'), ('LAST RSSI', '-83 dBm'),
+             ('LAST SNR', '8.25 dB'), ('TX QUEUE', '2'),
+             ('PACKETS RX', '123456'), ('PACKETS TX', '7890'),
+             ('AIRTIME', '3600 s'), ('RX AIRTIME', '7200 s'),
+             ('EVENTS', '5'), ('CRC ERRORS', '2')]
+    col_w = rw // 2
+    for i, (lab, val) in enumerate(cells):
+        cx = x + (i % 2) * col_w
+        cy = yy + (i // 2) * 34
+        text(d, (cx, cy), lab, font(FONT_MONO, TM['f_label']), P['Dimmer'])
+        text(d, (cx, cy + 15), val, font(FONT_SANS, 16), P['Ink'])
+    yy += 6 * 34 + 6
+    text(d, (x, yy), 'Clock 1750000100 (repeater\'s own) · RTT 431 ms', font(FONT_MONO, TM['f_meta']),
+         P['Dim'])
+    yy += 22
+    text(d, (x, yy), '12 s ago · r refreshes · Esc logs out', font(FONT_MONO, TM['f_hint']), P['Dimmer'])
+    hint_bar(d, 'rptr', [('↑↓', 'move'), ('r', 'refresh'), ('esc', 'log out')])
+    return save(img, '2026-11-19-rptr-status.png')
+
+
+RENDERERS = dict(launcher=launcher, menu=menu, nodes=nodes, nodes_search=nodes_search,
+                 nodes_favourites=nodes_favourites, chat=chat, chat2=chat_cards,
+                 chat_dm=chat_dm_column, dm_enter=dm_enter, map=map_page, rptr=rptr, rptr_list=rptr_list, rptr_status=rptr_status, settings=settings,
                  settings_general=settings_general, settings_omlite=settings_omlite,
                  settings_opstoc=settings_opstoc, settings_chat=settings_chat,
                  settings_nodes=settings_nodes, settings_map=settings_map,

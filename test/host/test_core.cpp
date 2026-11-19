@@ -10,6 +10,8 @@
 //      OfferStart (not an auto-start), and Esc goes back;
 //   4b. the symbol key of the page already on screen goes to that page's top (S514/EST-444): the
 //      owner closes its inner level, at the top it is a no-op, and another page's key routes as before.
+//   4c. at that top the own key now selects the FIRST row (S514/EST-454): Chat column 0 row 0 + both
+//      column scrolls, the Nodes/RPTR list row 0; inside an inner level it only closes one step.
 // The fifth test covers the Launcher-never-beside-a-module rule and the three registry states.
 //
 // Build/run: sh test/host/run.sh (g++ -std=c++17 -Wall -Wextra -Werror).
@@ -17,6 +19,7 @@
 #include <string.h>
 
 #include "core.h"
+#include "own_top.h"
 #include "radio_plan.h"
 #include "keys.h"
 #include "module.h"
@@ -121,18 +124,68 @@ bool om_key(tm::Core&, tm::Key) {
   return true;
 }
 
-// S514/EST-444: a fake inner level, so the router test can prove "own key inside -> top" and
-// "own key at top -> no-op" without the shell (the real Chat state lives in main.cpp). Like the real
-// Chat hook, only the CHAT page's key may close it: OM Lite owns five pages.
-int      g_om_tops     = 0;
-bool     g_om_inner    = false;
-tm::Page g_om_top_page = tm::Page::Count;
+// S514/EST-444 + EST-454: the module's own-top hook, modelling the three pages that have a list, and
+// driving the SAME core/own_top.h arithmetic main.cpp uses. Only the page the hook is told about may
+// close its own level: OM Lite owns five pages.
+int      g_om_tops      = 0;
+bool     g_om_inner     = false;   // Chat: an open channel/DM
+int      g_om_col       = om::mc::kColChannels;
+int      g_om_row       = 0;
+int      g_om_scroll[om::mc::kCardCols] = {0, 0};
+bool     g_om_nodes_bar = false;   // Nodes: the search bar has the focus
+int      g_om_nodes_row = 0;
+int      g_om_rptr_mode = 0;       // RPTR: 0 list, 1 login, 2 status
+int      g_om_rptr_row  = 0;
+tm::Page g_om_top_page  = tm::Page::Count;
+
+void om_top_reset_focus() {
+  g_om_tops      = 0;
+  g_om_inner     = false;
+  g_om_col       = om::mc::kColChannels;
+  g_om_row       = 0;
+  g_om_scroll[0] = g_om_scroll[1] = 0;
+  g_om_nodes_bar = false;
+  g_om_nodes_row = 0;
+  g_om_rptr_mode = 0;
+  g_om_rptr_row  = 0;
+  g_om_top_page  = tm::Page::Count;
+}
+
 bool om_top(tm::Core&, tm::Page page) {
   ++g_om_tops;
   g_om_top_page = page;
-  if (page != tm::Page::Chat || !g_om_inner) return false;   // not this page's level: nothing to close
-  g_om_inner = false;
-  return true;
+  if (page == tm::Page::Chat) {
+    tm::CardListTop top;
+    top.inner = g_om_inner;
+    top.col   = g_om_col;
+    top.row   = g_om_row;
+    for (int i = 0; i < om::mc::kCardCols; ++i) top.scroll[i] = g_om_scroll[i];
+    const bool closed = tm::ownTopCardList(top);
+    g_om_inner = top.inner;
+    g_om_col   = top.col;
+    g_om_row   = top.row;
+    for (int i = 0; i < om::mc::kCardCols; ++i) g_om_scroll[i] = top.scroll[i];
+    return closed;
+  }
+  if (page == tm::Page::Nodes) {
+    tm::ListTop top;
+    top.inner = g_om_nodes_bar;
+    top.row   = g_om_nodes_row;
+    const bool closed = tm::ownTopList(top);
+    g_om_nodes_bar = top.inner;
+    g_om_nodes_row = top.row;
+    return closed;
+  }
+  if (page == tm::Page::Rptr) {
+    tm::ListTop top;
+    top.inner = g_om_rptr_mode != 0;
+    top.row   = g_om_rptr_row;
+    const bool closed = tm::ownTopList(top);
+    g_om_rptr_row = top.row;
+    if (closed) g_om_rptr_mode = 0;
+    return closed;
+  }
+  return false;   // Map has no list; Settings has no own symbol key
 }
 
 bool probe_start(tm::Core&) {
@@ -433,6 +486,96 @@ void test_own_symbol_key_returns_to_the_page_top() {
   CHECK_EQ(g_om_tops, 4);
 }
 
+// ------------------------------------------- 4c. own key AT the top -> the first row (S514/EST-454)
+void test_own_key_at_the_top_selects_the_first_row() {
+  printf("test  own key at the top selects the first row; inside a level it only closes one step\n");
+  om_top_reset_focus();
+  g_om_starts = g_om_draws = g_om_keys = 0;
+  g_om_block  = nullptr;
+
+  static const tm::Module om = {"om-lite", "OM Lite", "mesh client", kAllOmPages, true,
+                                tm::Resource::Radio, om_start, om_stop_clean, nullptr, om_draw,
+                                om_key, om_top, nullptr};
+  tm::Core core;
+  CHECK(core.registry().add(om));
+  CHECK(core.start("om-lite"));
+  CHECK_EQ(core.goPage(tm::Page::Chat).action == tm::RouteAction::Switched, true);
+
+  // Chat list, focus on row 5 in the DM column with both columns scrolled: the own key goes to the
+  // first CHANNEL card (column 0, row 0) and resets BOTH column scrolls.
+  g_om_col       = om::mc::kColDms;
+  g_om_row       = 5;
+  g_om_scroll[0] = 3;
+  g_om_scroll[1] = 4;
+  CHECK_EQ(core.handleKey(tm::Key::SymCircle), true);
+  CHECK_EQ(g_om_tops, 1);
+  CHECK_EQ(g_om_col, om::mc::kColChannels);
+  CHECK_EQ(g_om_row, 0);
+  CHECK_EQ(g_om_scroll[0], 0);
+  CHECK_EQ(g_om_scroll[1], 0);
+  CHECK_EQ(g_om_inner, false);
+  CHECK_EQ(core.page() == tm::Page::Chat, true);
+
+  // Inside an open channel: the first press only closes it; the focus and the column scrolls stay put.
+  g_om_inner     = true;
+  g_om_col       = om::mc::kColChannels;
+  g_om_row       = 5;
+  g_om_scroll[0] = 3;
+  g_om_scroll[1] = 4;
+  CHECK_EQ(core.handleKey(tm::Key::SymCircle), true);
+  CHECK_EQ(g_om_tops, 2);
+  CHECK_EQ(g_om_inner, false);
+  CHECK_EQ(g_om_col, om::mc::kColChannels);
+  CHECK_EQ(g_om_row, 5);
+  CHECK_EQ(g_om_scroll[0], 3);
+  CHECK_EQ(g_om_scroll[1], 4);
+
+  // The second press is now at the top: first row again.
+  CHECK_EQ(core.handleKey(tm::Key::SymCircle), true);
+  CHECK_EQ(g_om_tops, 3);
+  CHECK_EQ(g_om_col, om::mc::kColChannels);
+  CHECK_EQ(g_om_row, 0);
+  CHECK_EQ(g_om_scroll[0], 0);
+  CHECK_EQ(g_om_scroll[1], 0);
+
+  // Nodes: row 4 -> the first node. The search bar is the inner level, so there one press only closes it.
+  CHECK_EQ(core.goPage(tm::Page::Nodes).action == tm::RouteAction::Switched, true);
+  g_om_nodes_bar = false;
+  g_om_nodes_row = 4;
+  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
+  CHECK_EQ(g_om_tops, 4);
+  CHECK_EQ(g_om_nodes_row, 0);
+  CHECK_EQ(g_om_nodes_bar, false);
+  g_om_nodes_bar = true;
+  g_om_nodes_row = 4;
+  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
+  CHECK_EQ(g_om_tops, 5);
+  CHECK_EQ(g_om_nodes_bar, false);
+  CHECK_EQ(g_om_nodes_row, 4);   // one step, no jump
+  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
+  CHECK_EQ(g_om_nodes_row, 0);   // the next press is at the top
+
+  // RPTR: the same rule because it has a list; login/status is its inner level.
+  CHECK_EQ(core.goPage(tm::Page::Rptr).action == tm::RouteAction::Switched, true);
+  g_om_rptr_mode = 0;
+  g_om_rptr_row  = 3;
+  CHECK_EQ(core.handleKey(tm::Key::SymDiamond), true);
+  CHECK_EQ(g_om_rptr_row, 0);
+  g_om_rptr_mode = 1;
+  g_om_rptr_row  = 3;
+  CHECK_EQ(core.handleKey(tm::Key::SymDiamond), true);
+  CHECK_EQ(g_om_rptr_mode, 0);
+  CHECK_EQ(g_om_rptr_row, 3);    // one step
+  CHECK_EQ(core.handleKey(tm::Key::SymDiamond), true);
+  CHECK_EQ(g_om_rptr_row, 0);
+
+  // Map has no list: the hook is asked and answers false, and there is no row to move.
+  CHECK_EQ(core.goPage(tm::Page::Map).action == tm::RouteAction::Switched, true);
+  const int tops_before_map = g_om_tops;
+  CHECK_EQ(core.handleKey(tm::Key::SymCloud), true);
+  CHECK_EQ(g_om_tops, tops_before_map + 1);
+}
+
 // ------------------------------------------------------------------- 5. states + one drawing owner
 void test_states_and_one_drawing_owner() {
   printf("test  states (running/stopped/later) and one drawing owner\n");
@@ -570,6 +713,7 @@ int main() {
   test_second_radio_owner_is_refused();
   test_symbol_keys_route_and_are_not_swallowed();
   test_own_symbol_key_returns_to_the_page_top();
+  test_own_key_at_the_top_selects_the_first_row();
   test_states_and_one_drawing_owner();
   test_radio_plan_matches_the_mesh();
   test_beacon_roundtrips();
