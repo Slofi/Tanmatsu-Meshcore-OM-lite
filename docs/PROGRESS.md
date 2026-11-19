@@ -15,6 +15,92 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S514 (EST-451) · Volume with +/-, and the picker keeps its gold frame on screen
+
+> Written by **DeepSeek** for ticket **EST-451**: fenced Paperclip run, no session start/end, nothing
+> installed, flashed or committed. Starts on `38e78e7` ("Sound volume: the L2 curve"); the curve is
+> untouched. **Version: 48.** The ticket asked for this entry first; this run wrote it after the code and
+> tests, with the real results below.
+
+### What this builds (items in the ticket's order)
+
+1. **Volume by '+' / '-'** on Settings > General > SOUND > Volume. '+' (and '=' where '+' needs Shift)
+   raises ten, '-' lowers ten, clamped 0..100 (`soundcfg::stepVolume`). Each real change writes the store,
+   applies `audioout::setVolume`, and previews the "Sent" sound through the existing 400 ms gate
+   (`audioout::playEvent`, which reads the just-stored level). At a clamp nothing is written and no
+   preview plays. Enter still cycles 0→10→…→100→0. The row now reads `- 60 % +`, and its hint bar shows
+   `+/- volume`.
+2. **The picker's scroll is the root's scroll.** The defect was the body HEIGHT, not a second rule: the
+   three list sub-pages (sound picker, Remove a contact, the chat channel/scope lists) passed
+   `kSetBodyH + kSetTabH` = 386 px to `settingsSubPageKey`, while `drawSettingsRows` drew a sub-page body
+   of `kTmH - kTmHintH - (head_bottom + 1)` = 385 px. The frame at the bottom was scrolled 1 px past the
+   drawn body and then skipped ("no text on the chrome"), so the gold frame vanished. One function pair now
+   owns the window (`settingsListBodyTop` / `settingsListBodyHeight` in core/settings.h), the renderer and
+   all three key sites use `kSetSubBodyTop` / `kSetSubBodyH`, and the picker (which already called
+   `settingsSubPageKey`) now gets the same 385 px it draws.
+3. **Host test + ARM:** a 26-element list (2 sections) longer than 385 px: Down from the last fully visible
+   row moves one row and scrolls just enough for its bottom to BE the drawn bottom; a second Down advances
+   exactly 34 px; Up mirrors it at the top; the last row is fully inside the window. The ARM restored the
+   old 386 px arithmetic and failed on the symptom (`got 386, want 385`).
+
+### Results (real exit codes)
+
+- **Host:** `sh test/host/run.sh` → **exit 0**, **13,805 checks, 0 failures**. Touched stages: Settings
+  **291 checks** (was 275; +16), sound **183** (was 174 after the L2-curve ticket; +9). Log:
+  `paperclip-pilot/sweep/est451/host-final2.log`.
+- **ARMED** (copy in `sweep/est451/arm-scroll/`, only the `+ 1` in `settingsListBodyTop` removed; the
+  production file was not touched): red → `FAIL test_settings.cpp:739
+  tm::settingsRowTop(...) - scroll + 34 == kDrawH (got 386, want 385)`, 280 checks, 1 failure, exit 1.
+  Green after restoring: 291 checks, 0 failures, exit 0.
+- **Build:** `make build` → **exit 0**. `application.bin` **0x175bf0 = 1,530,864 B (1,495.0 KiB)** —
+  **46.7 % of the 3,200 KiB ceiling**; the build says `0x8a410` (**27 %**) free in the 2 MB app partition.
+  `main.cpp`, `settings_page.cpp` and the audio code compiled with no warnings. Log:
+  `sweep/est451/build-final2.log`.
+- **Preview:** `python3 tools/preview_tanmatsu.py settings_sound_picker` → exit 0,
+  `shots/2026-11-19-sound-picker-scrolled.png` (800×480). The Message picker is scrolled into DUO; the
+  focused "Wood Warm" row (value `preview`) has its gold frame ON the last visible line with more rows
+  below and the thumb showing the position. `settings_general` and `settings_sound` were re-rendered so
+  their Volume row reads `- 60 % +` and the version is 48.
+
+### Why the hint bar drops two generic chips on that row
+
+Measured from `sans_hint11.bin` advances: the five standard Settings chips already run to x=460 while the
+symbol cluster starts at x=397, so `esc back` is clipped today. Six chips cannot fit. On the Volume row the
+bar therefore carries the four that matter there — `, settings`, `+/- volume`, `ret change`, `esc back`
+(361 px, all inside the limit). The other rows keep the standard five-chip set unchanged.
+
+### Files
+
+- `core/sound_events.h` — `stepVolume()`: ten at a time, clamped 0..100; `nextVolume()` untouched.
+- `core/settings.h` — `settingsListBodyTop()` / `settingsListBodyHeight()`, the one LIST-sub-page window.
+- `main/settings_page.h` — `kSetSubBodyTop` / `kSetSubBodyH`, and `SettingsView::volume_row`.
+- `main/settings_page.cpp` — the list sub-page uses the shared metrics; the Volume row's hint bar.
+- `main/main.cpp` — `- N % +` value, `adjustSoundVolume()` (store → setVolume → Sent preview through the
+  gate), '+'/'='/'-' handled only on the Volume row, all three sub-page key calls use `kSetSubBodyH`.
+- `test/host/test_settings.cpp` — `test_sub_page_list_scroll` (16 checks incl. the geometry pin).
+- `test/host/test_sound_events.cpp` — 9 `stepVolume` checks.
+- `tools/preview_tanmatsu.py` — `settings_sound_picker`, Volume value/version in the two existing shots.
+- `shots/2026-11-19-sound-picker-scrolled.png` (**new**), `2026-11-19-settings-general.png`,
+  `2026-11-19-settings-sound.png` (re-rendered).
+- `docs/PROGRESS.md` — this entry.
+
+### What could NOT be checked
+
+- **Nothing was installed, flashed or committed.** No device, no serial port, no server.
+- The '+' / '=' / '-' key codes on Filip's keyboard: the handler accepts `'+'`, `'='` and `'-'` as ASCII,
+  but only the glass can show which of them the Tanmatsu sends.
+- The 400 ms preview gate and the new level were not heard: the store/curve path is the same one EST-450
+  and the L2-curve ticket already use, but the perceived level after `bsp_audio_set_rate(16000)` needs ears.
+- The hint-bar fit is arithmetic over the real font's advances, not a panel render.
+- Every other Settings list shares the fixed height, but only the picker has a host test; the chat/contact
+  lists are the same call with the same constant.
+
+### Next step
+
+A device session: on the Volume row press '+' and '-' through 0 and 100 (preview once per change, clamped at
+both ends), then scroll the Message picker to the Off row and confirm the gold frame stays on the last
+visible line; check the same on Remove a contact and a long channel list.
+
 ## 2026-11-19 · S514 (EST-450) · Sounds: message, DM, sent, new node, error
 
 > Written by **DeepSeek** for ticket **EST-450**: fenced Paperclip run, no session start/end, nothing

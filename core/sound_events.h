@@ -182,6 +182,16 @@ inline uint8_t nextVolume(uint8_t v) {
   return (uint8_t)(((v / 10) + 1) * 10 > 100 ? 0 : ((v / 10) + 1) * 10);
 }
 
+// S514/EST-451: '+' / '-' on the Volume row, ten at a time and CLAMPED at both ends (no wrap: 100 then
+// '+' stays 100, 0 then '-' stays 0). Enter keeps nextVolume() above. A corrupt stored value is treated
+// as 100 before the step, so the row can always be recovered with '-'.
+inline uint8_t stepVolume(uint8_t v, int delta) {
+  int n = (int)(v > 100 ? 100 : v) + delta;
+  if (n < 0) n = 0;
+  if (n > 100) n = 100;
+  return (uint8_t)n;
+}
+
 // --------------------------------------------------------------------------------------------- policy
 // A stored choice that can actually make a sound: master on, not Off, a real library sound.
 inline bool choiceAudible(const SoundSettings& s, Event ev) {

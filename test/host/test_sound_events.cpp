@@ -188,11 +188,22 @@ void test_unknown_id_redirect() {
 }
 
 void test_volume_steps() {
-  printf("test  volume walks 0..100 in tens and wraps\n");
+  printf("test  volume walks 0..100 in tens and wraps; +/- steps ten and clamps\n");
   CHECK_EQ(tm::soundcfg::nextVolume(0), 10);
   CHECK_EQ(tm::soundcfg::nextVolume(50), 60);
   CHECK_EQ(tm::soundcfg::nextVolume(90), 100);
   CHECK_EQ(tm::soundcfg::nextVolume(100), 0);
+
+  // S514/EST-451: '+' / '-' are the same ten steps but CLAMP instead of wrapping, at both ends.
+  CHECK_EQ(tm::soundcfg::stepVolume(60, 10), 70);
+  CHECK_EQ(tm::soundcfg::stepVolume(60, -10), 50);
+  CHECK_EQ(tm::soundcfg::stepVolume(90, 10), 100);
+  CHECK_EQ(tm::soundcfg::stepVolume(10, -10), 0);
+  CHECK_EQ(tm::soundcfg::stepVolume(100, 10), 100);   // no wrap at the top
+  CHECK_EQ(tm::soundcfg::stepVolume(0, -10), 0);      // no wrap at the bottom
+  CHECK_EQ(tm::soundcfg::stepVolume(100, -10), 90);
+  CHECK_EQ(tm::soundcfg::stepVolume(0, 10), 10);
+  CHECK_EQ(tm::soundcfg::stepVolume(200, -10), 90);   // a corrupt value is treated as 100, then stepped
 }
 
 }  // namespace

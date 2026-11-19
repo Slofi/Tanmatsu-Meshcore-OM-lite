@@ -195,6 +195,17 @@ constexpr int settingsMaxScroll(const SettingsSection* secs, int count, int body
   return total > body_h ? total - body_h : 0;
 }
 
+// A LIST sub-page (the sound picker, channels, contacts) draws from one pixel below the page head's line
+// to the hint bar. Its key arithmetic must use the SAME window: EST-451's picker passed the TAB body height
+// plus the tab row (386 px) while the renderer drew 385 px, so the focused row could be scrolled one pixel
+// past the bottom and was then skipped as "partly on the chrome" — the gold frame vanished at the end of
+// the list. These two functions are that one window; the shell uses them for both drawing and keys.
+constexpr int settingsListBodyTop(int head_top, int head_h) { return head_top + head_h + 1; }
+
+constexpr int settingsListBodyHeight(int panel_h, int hint_h, int head_top, int head_h) {
+  return panel_h - hint_h - settingsListBodyTop(head_top, head_h);
+}
+
 // First / last focusable element, or -1 when there are no rows. Section headers are skipped, so a tab
 // with only sections can never leave Enter pointing at a header.
 constexpr int settingsFirstFocusable(const SettingsSection* secs, int count) {

@@ -25,6 +25,12 @@ constexpr int kSetTabH   = 30;   // the L2's tab row, at 800 px
 constexpr int kSetBodyTop = kTmStatusH + kTmHeadH + kSetTabH;   // 26 + 44 + 30 = 100
 constexpr int kSetBodyH   = kTmH - kTmHintH - kSetBodyTop;      // 480 - 24 - 100 = 356
 
+// S514/EST-451: a LIST sub-page has no tab row. Its body starts one pixel below the page head's line and
+// runs to the hint bar; BOTH the renderer and the key arithmetic use these, so the scroll's window and the
+// drawn window can never differ by a pixel again (the picker used to pass the TAB body + tab row = 386).
+constexpr int kSetSubBodyTop = tm::settingsListBodyTop(kTmStatusH, kTmHeadH);           // 71
+constexpr int kSetSubBodyH   = tm::settingsListBodyHeight(kTmH, kTmHintH, kTmStatusH, kTmHeadH);  // 385
+
 struct SettingsView {
   // Chrome (the caller fills these from the app's one sources).
   char clock[8] = "--:--";
@@ -44,6 +50,10 @@ struct SettingsView {
   // The getter needs the core, and only the core: the panel never reaches a store by itself.
   tm::Core* core = nullptr;
   bool tab_running = false;
+
+  // S514/EST-451: the Volume row is focused, so the hint bar carries the '+' / '-' keys. The shell sets
+  // this from the focused row's id; the panel only chooses the hints.
+  bool volume_row = false;
 
   int focus = -1;    // flat element index (section header or row), as core/settings.h numbers them
   int scroll = 0;    // px

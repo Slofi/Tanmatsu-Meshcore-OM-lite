@@ -1368,7 +1368,7 @@ def settings_general():
         ('row', 'Automatic advert', 'Off', False),
         ('sect', 'SOUND', None, None),
         ('row', 'Sound', 'On', False),
-        ('row', 'Volume', '60%', False),
+        ('row', 'Volume', '- 60 % +', False),
         ('row', 'Message', 'Soft Hi', False),
         ('row', 'Direct message', 'Wood Warm', False),
         ('row', 'Sent', 'Soft Tick', False),
@@ -1386,7 +1386,7 @@ def settings_general():
         ('row', 'Time', '22:31 · rtc', False),
         ('row', 'SD card', 'mounted · history on', False),
         ('row', 'Contacts', '3 / 32', False),
-        ('row', 'App version', '47', False),
+        ('row', 'App version', '48', False),
         ('row', 'Free internal heap', '120 KB', False),
         ('row', 'Free PSRAM', '26.1 MB', False),
     ]
@@ -1467,7 +1467,7 @@ def settings_sound():
         ('row', 'Automatic advert', 'Off'),
         ('sect', 'SOUND', None),
         ('row', 'Sound', 'On'),
-        ('row', 'Volume', '60%'),
+        ('row', 'Volume', '- 60 % +'),
         ('row', 'Message', 'Soft Hi'),
         ('row', 'Direct message', 'Wood Warm'),
         ('row', 'Sent', 'Soft Tick'),
@@ -1500,6 +1500,84 @@ def settings_sound():
     hint_bar(d, 'settings', [('←→', 'tab'), ('↑↓', 'row'), ('↵', 'open/change'), ('esc', 'back'),
                              (',', 'settings')])
     return save(img, '2026-11-19-settings-sound.png')
+
+
+def settings_sound_picker():
+    """S514/EST-451: the Message event's sound picker, SCROLLED past the first screenful.
+
+    A LIST sub-page has no tab row: page head, then the L2's library grouped by shape (SOLO, DUO, TRIO,
+    MULTI, ALERT) and OFF last. The list is scrolled so the focused row (Wood Warm, previewed) sits ON the
+    last visible line, with more rows below — the Settings-root scroll rule the picker now uses. The gold
+    frame is inside the body, not one pixel under it. Names are the L2 library's own (public:
+    firmware/src/sound_synth.cpp); there is no node or channel text here.
+    """
+    img, d = new_screen()
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    status_bar(d, clock='22:31')
+
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Settings', font(FONT_SANS, TM['f_title']), P['Ink'],
+         anchor='lm')
+    text(d, (W - pad, y + TM['head_h'] // 2), 'Message',
+         font(FONT_MONO, TM['f_meta']), P['Dimmer'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+
+    body_top = TM['status_h'] + TM['head_h'] + 1
+    body_bot = H - TM['hint_h']
+    lx0, lx1 = pad, W - pad
+    row_h, sect_h = 34, 22
+    row_step = row_h + 2
+
+    shapes = [
+        ('SOLO', ['Beep Clean', 'Beep High', 'Soft Tick', 'Bell C6', 'Bell Low',
+                  'Glass Ping', 'Marimba Tock', 'Wood Pluck', 'Organ Mellow', 'Kalimba Tine']),
+        ('DUO', ['Bell TK-TK', 'Soft Hi', 'Marimba Hi', 'Bell Hi', 'Wood Warm',
+                 'Chime Bright', 'Soft Lo', 'Organ Low', 'Kalimba Rise', 'Wood Double']),
+        ('TRIO', ['Glass Trio', 'Chime Arp', 'Bell Rise', 'Bell Fall', 'Marimba Roll',
+                  'Wood Motif', 'Soft Motif', 'Organ Rise', 'Kalimba Turn', 'Glass Top']),
+        ('MULTI', ['Bell Chime', 'Chime Run', 'Marimba Run', 'Wood Groove', 'Soft Chord',
+                   'Organ Chord', 'Kalimba Lick', 'Glass Sparkle', 'Bell Road', 'Wood Alert']),
+        ('ALERT', ['Battery Low']),
+    ]
+    items = []
+    for name, names in shapes:
+        items.append(('sect', name, None))
+        for n in names:
+            tag = 'now' if n == 'Soft Hi' else ('preview' if n == 'Wood Warm' else '')
+            items.append(('row', n, tag))
+    items.append(('sect', 'OFF', None))
+    items.append(('row', 'Off', ''))
+
+    total_h = sum(sect_h if k == 'sect' else row_step for k, *_ in items)
+
+    # Scroll so the focused row's bottom lands exactly on the drawn bottom line.
+    focus_name = 'Wood Warm'
+    focus_top = 0
+    yy = 0
+    for k, label, _ in items:
+        if k == 'sect':
+            yy += sect_h
+        else:
+            if label == focus_name:
+                focus_top = yy
+                break
+            yy += row_step
+    scroll = focus_top + row_h - (body_bot - body_top)
+
+    yy = body_top - scroll
+    for k, label, tag in items:
+        if k == 'sect':
+            if body_top <= yy and yy + sect_h <= body_bot:
+                spaced(d, (lx0 + 4, yy + 5), label, font(FONT_MONO, TM['f_label']), P['Dim'])
+            yy += sect_h
+            continue
+        if body_top <= yy and yy + row_h <= body_bot:
+            setrow(d, lx0, lx1, yy, label, tag, focused=(label == focus_name), chevron=False)
+        yy += row_step
+
+    scroll_indicator(d, (lx0, body_top, W - 8, body_bot), total_h, body_bot - body_top, scroll)
+    hint_bar(d, 'settings', [('↑↓', 'row'), ('↵', 'play/choose'), ('esc', 'back'), (',', 'settings')])
+    return save(img, '2026-11-19-sound-picker-scrolled.png')
 
 
 def _omlite_rows():
@@ -1712,7 +1790,7 @@ RENDERERS = dict(launcher=launcher, menu=menu, nodes=nodes, nodes_search=nodes_s
                  settings_general=settings_general, settings_omlite=settings_omlite,
                  settings_opstoc=settings_opstoc, settings_chat=settings_chat,
                  settings_nodes=settings_nodes, settings_map=settings_map,
-                 settings_sound=settings_sound)
+                 settings_sound=settings_sound, settings_sound_picker=settings_sound_picker)
 
 
 def main(argv):

@@ -675,6 +675,97 @@ void test_sub_page_keys() {
   CHECK(!f.subPage());
 }
 
+// S514/EST-451: a LIST sub-page longer than its body. The key arithmetic must use the SAME window the
+// renderer draws — from one pixel below the page head's line to the hint bar. The sound picker used to pass
+// the TAB body + the tab row (386 px) while the renderer drew 385, so at the end of the list the focused row
+// was scrolled one pixel past the bottom and then skipped (the gold frame vanished). This pins the height
+// AND the one-row-at-a-time scroll at both ends.
+void test_sub_page_list_scroll() {
+  printf("test  a long sub-page list: Down from the last visible row scrolls one, stays visible; Up mirrors\n");
+
+  // The real panel: 800x480, status 26, head 44, hint 24. drawSettingsRows starts a LIST sub-page at
+  // head_bottom + 1 and gives it kTmH - kTmHintH - that = 385 px.
+  constexpr int kPanelH = 480, kHintH = 24, kStatusH = 26, kHeadH = 44;
+  constexpr int kDrawTop = kStatusH + kHeadH + 1;
+  constexpr int kDrawH   = kPanelH - kHintH - kDrawTop;   // 385
+
+  static const tm::SettingRow rows[] = {
+      {tm::SettingKind::Action, 0, "s0", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 1, "s1", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 2, "s2", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 3, "s3", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 4, "s4", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 5, "s5", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 6, "s6", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 7, "s7", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 8, "s8", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 9, "s9", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 10, "s10", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 11, "s11", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 12, "s12", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 13, "s13", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 14, "s14", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 15, "s15", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 16, "s16", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 17, "s17", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 18, "s18", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 19, "s19", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 20, "s20", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 21, "s21", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 22, "s22", "", nullptr, nullptr},
+      {tm::SettingKind::Action, 23, "off", "", nullptr, nullptr},
+  };
+  static const tm::SettingsSection sections[] = {{"SHAPES", rows, 23}, {"OFF", &rows[23], 1}};
+  constexpr int kSectionCount = 2;
+
+  // The key arithmetic and the renderer take this ONE height (the ARM changed it back to 386).
+  const int body = tm::settingsListBodyHeight(kPanelH, kHintH, kStatusH, kHeadH);
+
+  tm::SettingsFrame f;
+  f.setBodyHeight(body);
+  f.reset(0, 1);
+  f.openSubPage();
+  int focus = 10;   // flat 0 = SHAPES header; rows 1..23; flat 10 = s9, the last FULLY visible row
+  int scroll = 0;
+  CHECK(tm::settingsRowTop(sections, kSectionCount, focus) + 34 <= scroll + kDrawH);
+
+  // One Down from the last visible row: the focus moves one row and the list scrolls just enough for that
+  // row to land ON the last visible line (not below the drawn window).
+  tm::SettingsKeyResult r =
+      tm::settingsSubPageKey(f, tm::SetKey::Down, sections, kSectionCount, &focus, &scroll, body);
+  CHECK(r.event == tm::SettingsEvent::FocusMoved);
+  CHECK_EQ(focus, 11);
+  CHECK(tm::settingsRowTop(sections, kSectionCount, focus) >= scroll);
+  CHECK_EQ(tm::settingsRowTop(sections, kSectionCount, focus) - scroll + 34, kDrawH);
+
+  // A second Down advances exactly one row height (34 px), like the Settings root rows.
+  const int before = scroll;
+  r = tm::settingsSubPageKey(f, tm::SetKey::Down, sections, kSectionCount, &focus, &scroll, body);
+  CHECK_EQ(focus, 12);
+  CHECK_EQ(scroll - before, 34);
+  CHECK_EQ(tm::settingsRowTop(sections, kSectionCount, focus) - scroll + 34, kDrawH);
+
+  // Up mirrors it: with the first fully visible row focused, Up lifts the list by one row and the new focus
+  // becomes the window's first line. (Scroll 124 puts s3 at the top; focus 4 is s3.)
+  focus = 4;
+  scroll = tm::settingsRowTop(sections, kSectionCount, focus);
+  r = tm::settingsSubPageKey(f, tm::SetKey::Up, sections, kSectionCount, &focus, &scroll, body);
+  CHECK(r.event == tm::SettingsEvent::FocusMoved);
+  CHECK_EQ(focus, 3);
+  CHECK_EQ(tm::settingsRowTop(sections, kSectionCount, focus) - scroll, 0);
+
+  // The last row is fully inside the window, and the scroll never exceeds the DRAWN max.
+  focus = 25;   // flat 24 = OFF header, flat 25 = the Off row
+  scroll = tm::settingsScrollFor(sections, kSectionCount, focus, 0, body);
+  CHECK(scroll <= tm::settingsMaxScroll(sections, kSectionCount, kDrawH));
+  CHECK(tm::settingsRowTop(sections, kSectionCount, focus) >= scroll);
+  CHECK(tm::settingsRowTop(sections, kSectionCount, focus) + 34 <= scroll + kDrawH);
+
+  // And the one height really is what the renderer draws.
+  CHECK_EQ(tm::settingsListBodyTop(kStatusH, kHeadH), kDrawTop);
+  CHECK_EQ(body, kDrawH);
+}
+
 int main() {
   test_name_chars();
   test_name_trim_and_length();
@@ -691,6 +782,7 @@ int main() {
   test_confirm_sheet();
   test_menu_settings_bar();
   test_sub_page_keys();
+  test_sub_page_list_scroll();
 
   printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;

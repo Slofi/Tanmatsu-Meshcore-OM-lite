@@ -38,8 +38,12 @@ bool writeAll(const tm::soundcfg::SoundSettings& s) {
 }  // namespace
 
 bool begin() {
-    s_settings = tm::soundcfg::defaultSettings();
+    // S514 (Claude): the "already open" check comes FIRST. begin() is called twice (main.cpp and
+    // audio_out.cpp:153), and resetting to the defaults before this check threw the loaded choices away on
+    // every boot (log: "settings loaded: ... volume=100" then "audio up: ... volume 60"); the next change
+    // would then have stored defaults + that one change over the user's choices.
     if (s_opened) return true;
+    s_settings = tm::soundcfg::defaultSettings();
 
     esp_err_t r = nvs_open(kNamespace, NVS_READWRITE, &s_nvs);
     if (r != ESP_OK) {

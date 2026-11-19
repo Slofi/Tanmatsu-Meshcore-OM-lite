@@ -135,9 +135,9 @@ void drawSettings(Screen& s, const SettingsView& v) {
     if (v.sub_page) {
         // No tab row on a sub-page (the L2's setwrap). A LIST sub-page draws the same rows as a tab; the
         // text sub-page draws the shared field, typed on the physical keyboard like the Chat composer.
-        const int body_top = head_bot + 1;
+        const int body_top = kSetSubBodyTop;
         if (v.sections != nullptr && v.section_count > 0) {
-            const int body_h = kTmH - kTmHintH - body_top;
+            const int body_h = kSetSubBodyH;
             drawSettingsRows(s, v.sections, v.section_count, v.focus, v.scroll, body_top, body_h, v.core);
         } else {
         const int field_h  = 52;
@@ -185,6 +185,13 @@ void drawSettings(Screen& s, const SettingsView& v) {
     // ---- the hint bar: the ticket's five keys plus the global Settings key.
     if (v.sub_page) {
         static const HintItem hints[] = {{",", "settings"}, {"type", "write"}, {"ret", "apply"}, {"esc", "back"}};
+        drawHintBar(s, tm::Page::Settings, hints, 4);
+    } else if (v.volume_row) {
+        // S514/EST-451: the Volume row adds '+' / '-'. Six chips do not fit before the symbol cluster
+        // (measured: the five standard chips already end at 460 px, the cluster starts at 397), so on this
+        // row the bar carries the four keys that matter here — including the ticket's "+/- volume".
+        static const HintItem hints[] = {{",", "settings"}, {"+/-", "volume"},
+                                         {"ret", "change"}, {"esc", "back"}};
         drawHintBar(s, tm::Page::Settings, hints, 4);
     } else {
         static const HintItem hints[] = {{",", "settings"}, {"l/r", "tab"}, {"up/dn", "row"},

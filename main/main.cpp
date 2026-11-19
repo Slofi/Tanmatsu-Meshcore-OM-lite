@@ -401,8 +401,9 @@ const char* gsetSoundMaster(tm::Core&) {
     return om::soundstore::settings().master ? "On" : "Off";
 }
 const char* gsetSoundVolume(tm::Core&) {
-    static char buf[8];
-    snprintf(buf, sizeof(buf), "%u%%", (unsigned)om::soundstore::settings().volume);
+    static char buf[16];
+    // S514/EST-451: the row shows the keys themselves so '+' / '-' are discoverable on the glass.
+    snprintf(buf, sizeof(buf), "- %u %% +", (unsigned)om::soundstore::settings().volume);
     return buf;
 }
 const char* gsetSoundChoiceValue(tm::Core&, const tm::SettingRow& row) {
@@ -430,6 +431,24 @@ void generalCycleSoundVolume(tm::Core&, const tm::SettingRow&) {
         om::audioout::setVolume(next);
         ESP_LOGI(TAG, "settings: volume -> %u%%", (unsigned)next);
     }
+}
+
+// S514/EST-451: '+' / '=' / '-' on the Volume row. Ten at a time, clamped 0..100: the store is written
+// first, then the new level is applied and the "Sent" sound previewed THROUGH the 400 ms gate (playEvent
+// reads the store, so the audio task uses the new level). At a clamp there is no change, so nothing is
+// written and no preview plays. Returns true when the value moved.
+bool adjustSoundVolume(int delta) {
+    const uint8_t cur  = om::soundstore::settings().volume;
+    const uint8_t next = tm::soundcfg::stepVolume(cur, delta);
+    if (next == cur) return false;
+    if (!om::soundstore::setVolume(next)) {
+        om::ui::noticeSet("Volume not saved", 3000);
+        return false;
+    }
+    om::audioout::setVolume(next);
+    om::audioout::playEvent(tm::soundcfg::Event::Sent);
+    ESP_LOGI(TAG, "settings: volume -> %u%% (+/-)", (unsigned)next);
+    return true;
 }
 
 static const tm::SettingRow kGeneralNodeRows[] = {
@@ -1324,6 +1343,13 @@ extern "C" void app_main(void) {
         sv.focus         = settings_frame.focus;
         sv.scroll        = settings_frame.scroll;
         sv.sub_page      = settings_frame.subPage();
+        // S514/EST-451: the Volume row's hint bar carries '+' / '-'. Only a ROOT row can be the Volume row:
+        // a sub-page has its own focus index into a different list.
+        sv.volume_row = false;
+        if (!settings_frame.subPage() && settings_frame.tab == tm::kSettingsGeneralTab) {
+            const tm::SettingRow* frow = tm::settingsRowAt(sections, n, settings_frame.focus);
+            sv.volume_row = (frow != nullptr && frow->id == kSetRowSoundVolume);
+        }
         sv.sub_title     = "Node name";
         sv.draft         = settings_draft;
         sv.draft_len     = settings_draft_len;
@@ -2184,7 +2210,26 @@ extern "C" void app_main(void) {
                         const bool is_char = (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD);
                         const char ch      = is_char ? (char)ev.args_keyboard.ascii : '\0';
 
-                        if (settings_frame.confirmOpen()) {
+                        // S514/EST-451: '+' (and '=' where '+' needs Shift) raises the Volume row by ten,
+                        // '-' lowers it. The store and the audio are the shell's, so the key is decided here,
+                        // before the frame; it is swallowed even at a clamp. Enter keeps the frame's cycle.
+                        bool volume_key = false;
+                        if (is_char && settings_frame.tab == tm::kSettingsGeneralTab &&
+                            !settings_frame.confirmOpen() && !settings_frame.subPage() &&
+                            (ch == '+' || ch == '=' || ch == '-')) {
+                            int vn = 0;
+                            const tm::SettingsSection* vs = settingsSectionsForTab(settings_frame.tab, &vn);
+                            const tm::SettingRow* vr = tm::settingsRowAt(vs, vn, settings_frame.focus);
+                            if (vr != nullptr && vr->id == kSetRowSoundVolume) {
+                                adjustSoundVolume(ch == '-' ? -10 : 10);
+                                volume_key = true;
+                                dirty      = true;
+                            }
+                        }
+
+                        if (volume_key) {
+                            // Handled above: the focused row did not move.
+                        } else if (settings_frame.confirmOpen()) {
                             // The shared sheet owns every key: Enter = Apply, Esc = Cancel, everything else is
                             // swallowed so a held arrow cannot move the page behind the question.
                             const tm::SetKey sk = (k == tm::Key::Enter) ? tm::SetKey::Enter
@@ -2291,7 +2336,7 @@ extern "C" void app_main(void) {
                             const tm::SettingsKeyResult r =
                                 tm::settingsSubPageKey(settings_frame, sk, ss, sn, &g_sound_sub_focus,
                                                        &g_sound_sub_scroll,
-                                                       om::ui::kSetBodyH + om::ui::kSetTabH);
+                                                       om::ui::kSetSubBodyH);
                             const tm::soundcfg::Event ev =
                                 (tm::soundcfg::Event)g_sound_event;
                             if (r.event == tm::SettingsEvent::CloseSubPage) {
@@ -2360,7 +2405,7 @@ extern "C" void app_main(void) {
                             const tm::SettingsKeyResult r =
                                 tm::settingsSubPageKey(settings_frame, sk, ss, sn, &g_nodes_sub_focus,
                                                        &g_nodes_sub_scroll,
-                                                       om::ui::kSetBodyH + om::ui::kSetTabH);
+                                                       om::ui::kSetSubBodyH);
                             if (r.event == tm::SettingsEvent::CloseSubPage) {
                                 closeNodesPage();
                             } else if (r.event == tm::SettingsEvent::ActionRow) {
@@ -2383,7 +2428,7 @@ extern "C" void app_main(void) {
                             const tm::SettingsKeyResult r =
                                 tm::settingsSubPageKey(settings_frame, sk, ss, sn, &g_chat_sub_focus,
                                                        &g_chat_sub_scroll,
-                                                       om::ui::kSetBodyH + om::ui::kSetTabH);
+                                                       om::ui::kSetSubBodyH);
                             if (r.event == tm::SettingsEvent::CloseSubPage) {
                                 closeChatPage();
                             } else if (r.event == tm::SettingsEvent::OpenSubPage ||
