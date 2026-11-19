@@ -56,6 +56,46 @@ const char* packDirForZoom(int z);
 // called O(log2 count) times, which is what makes a 900,000-tile index usable straight from the card.
 int findTile(uint32_t count, RecordReader read, void* ctx, uint8_t z, uint32_t x, uint32_t y);
 
+// ----------------------------------------------------------------------------------------------- block search (S514)
+// The plain binary search costs ~14-18 24-byte card reads per tile (measured S514), because every probe is a
+// separate seek+read. This search does it in two levels:
+//   1. a binary search over FIXED BLOCKS of the index, comparing the block's first record;
+//   2. one read of the whole 4 KB block (170 records), searched in RAM.
+// The first record of every block is cached in PSRAM lazily: the top of the block search tree is the same for every
+// tile, so the expensive part stops touching the card after it has been visited once. A few whole blocks are kept in
+// a small LRU, so neighbouring tiles (the normal case: a column, a row) cost no card read at all.
+//
+// Opening a pack does NOT read the index: the caller sizes the arrays from `count` and they start invalid. Budget:
+// z17 has ~5,300 blocks -> ~130 KB of keys; z16 ~33 KB; the z9-15 pack ~11 KB, well under 512 KB for all three.
+constexpr uint32_t kBlockRecords = 170;   // 170 * 24 B = 4080 B, one 4 KB card read
+constexpr int      kBlockLruSlots = 4;
+
+// Read up to `cap` consecutive records starting at `first` in ONE card read. Returns how many were decoded
+// (0 = short read/failure). This is the whole-block read; `RecordReader` above stays the one-record read.
+using BlockReader = uint32_t (*)(void* ctx, uint32_t first, Entry* out, uint32_t cap);
+
+// Caller-owned storage. Set every field before the first call; keep the arrays alive while the cache is used.
+struct BlockCache {
+    Entry*    key       = nullptr;   // [key_cap] first record of each block, filled lazily
+    uint8_t*  key_valid = nullptr;   // [key_cap]
+    uint32_t  key_cap   = 0;
+    Entry*    block     = nullptr;   // [lru_slots * kBlockRecords]
+    uint32_t* block_id  = nullptr;   // [lru_slots], 0xFFFFFFFF = empty
+    uint32_t* block_got = nullptr;   // [lru_slots], how many records the block read returned
+    uint8_t*  block_valid = nullptr; // [lru_slots]
+    int       lru_slots = 0;
+    int       next      = 0;
+};
+
+// How many blocks an index of `count` records has.
+uint32_t blockCount(uint32_t count);
+
+// The block-level search. Same answer as findTile for every key, with far fewer card reads once the block-key cache
+// is warm. A null/mis-sized cache still gives correct answers, just more reads. `blockRead` may be null: then the
+// final block is read through `read` record by record (correct, slower).
+int findTileBlocks(uint32_t count, RecordReader read, BlockReader blockRead, void* ctx, BlockCache& cache,
+                   uint8_t z, uint32_t x, uint32_t y);
+
 // Slippy-map tile coordinates for a coordinate, in degrees (lon positive east, lat positive north).
 uint32_t tileXForLon(double lon, int z);
 uint32_t tileYForLat(double lat, int z);

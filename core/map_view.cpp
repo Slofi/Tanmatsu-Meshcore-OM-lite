@@ -105,6 +105,61 @@ int zoomTo(int from_z, int to_z, int64_t* wx, int64_t* wy, int w, int h) {
     return to_z;
 }
 
+// ----------------------------------------------------------------------------------------------- placeholders
+
+int parentPlaceholder(int z, uint32_t x, uint32_t y, Placeholder* out) {
+    if (out == nullptr) return 0;
+    // z9 is the lowest pack zoom: a parent would be z8, which the pack does not have.
+    if (z <= kMinZoom) return 0;
+    Placeholder p;
+    p.z  = (uint8_t)(z - 1);
+    p.x  = x >> 1;
+    p.y  = y >> 1;
+    p.sx = (int)(x & 1u) * (kTilePx / 2);
+    p.sy = (int)(y & 1u) * (kTilePx / 2);
+    p.sw = kTilePx / 2;
+    p.sh = kTilePx / 2;
+    p.dx = 0;
+    p.dy = 0;
+    p.dw = kTilePx;
+    p.dh = kTilePx;
+    *out = p;
+    return 1;
+}
+
+int childPlaceholder(int z, uint32_t x, uint32_t y, Placeholder* out, int cap) {
+    if (out == nullptr || cap <= 0) return 0;
+    // z17 is the highest zoom: children would be z18, which the pack does not have.
+    if (z >= kMaxZoom) return 0;
+    if (cap > kPlaceholderMax) cap = kPlaceholderMax;
+
+    const uint32_t child_z    = (uint32_t)(z + 1);
+    const uint32_t last_child = (1u << child_z) - 1u;   // z+1 <= 17, so this cannot overflow
+    int            n          = 0;
+    for (int row = 0; row < 2; row++) {
+        for (int col = 0; col < 2; col++) {
+            const uint32_t cx = x * 2u + (uint32_t)col;
+            const uint32_t cy = y * 2u + (uint32_t)row;
+            if (cx > last_child || cy > last_child) continue;   // belt and braces at the world edge
+            if (n >= cap) return n;
+            Placeholder p;
+            p.z  = (uint8_t)child_z;
+            p.x  = cx;
+            p.y  = cy;
+            p.sx = 0;
+            p.sy = 0;
+            p.sw = kTilePx;
+            p.sh = kTilePx;
+            p.dx = col * (kTilePx / 2);
+            p.dy = row * (kTilePx / 2);
+            p.dw = kTilePx / 2;
+            p.dh = kTilePx / 2;
+            out[n++] = p;
+        }
+    }
+    return n;
+}
+
 // ----------------------------------------------------------------------------------------------- tile cache
 
 int TileCache::find(uint8_t z, uint32_t x, uint32_t y) {
@@ -125,6 +180,14 @@ SlotState TileCache::stateOf(uint8_t z, uint32_t x, uint32_t y) const {
         }
     }
     return SlotState::Empty;
+}
+
+int TileCache::peek(uint8_t z, uint32_t x, uint32_t y) const {
+    for (int i = 0; i < kCacheSlots; i++) {
+        // No ++tick, no use[] write: a placeholder must not disturb the eviction order.
+        if (key[i].state == SlotState::Ready && key[i].z == z && key[i].x == x && key[i].y == y) return i;
+    }
+    return -1;
 }
 
 int TileCache::take(uint8_t z, uint32_t x, uint32_t y) {

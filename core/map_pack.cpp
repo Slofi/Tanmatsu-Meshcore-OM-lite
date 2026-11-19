@@ -80,6 +80,126 @@ int findTile(uint32_t count, RecordReader read, void* ctx, uint8_t z, uint32_t x
     return -1;
 }
 
+// ----------------------------------------------------------------------------------------------- block search (S514)
+
+uint32_t blockCount(uint32_t count) { return (count + kBlockRecords - 1) / kBlockRecords; }
+
+namespace {
+
+// The first record of block `b`, from the PSRAM cache when it has been seen before, else one card read that also
+// fills the cache. A null/mis-sized cache is not an error: it just means the read is repeated next time.
+bool blockKey(uint32_t b, uint32_t count, RecordReader read, void* ctx, BlockCache& cache, Entry* out) {
+    if (b < cache.key_cap && cache.key != nullptr && cache.key_valid != nullptr && cache.key_valid[b]) {
+        *out = cache.key[b];
+        return true;
+    }
+    const uint32_t rec = b * kBlockRecords;
+    if (rec >= count || !read(ctx, rec, out)) return false;
+    if (b < cache.key_cap && cache.key != nullptr && cache.key_valid != nullptr) {
+        cache.key[b]       = *out;
+        cache.key_valid[b] = 1;
+    }
+    return true;
+}
+
+// Binary search inside [first, last] using the one-record reader (the no-cache fallback).
+int findInRange(uint32_t first, uint32_t last, RecordReader read, void* ctx, uint8_t z, uint32_t x, uint32_t y) {
+    uint32_t lo = first;
+    uint32_t hi = last;
+    while (lo <= hi) {
+        const uint32_t mid = lo + (hi - lo) / 2;
+        Entry          e;
+        if (!read(ctx, mid, &e)) return -1;
+        const int c = compare(e, z, x, y);
+        if (c == 0) return (int)mid;
+        if (c < 0) {
+            lo = mid + 1;
+        } else {
+            if (mid == 0) break;
+            hi = mid - 1;
+        }
+    }
+    return -1;
+}
+
+// Binary search inside one cached block. `first` is the block's global record number.
+int findInBlock(const Entry* recs, uint32_t n, uint32_t first, uint8_t z, uint32_t x, uint32_t y) {
+    uint32_t lo = 0;
+    uint32_t hi = n;
+    while (lo < hi) {
+        const uint32_t mid = lo + (hi - lo) / 2;
+        const int      c   = compare(recs[mid], z, x, y);
+        if (c == 0) return (int)(first + mid);
+        if (c < 0) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return -1;
+}
+
+}  // namespace
+
+int findTileBlocks(uint32_t count, RecordReader read, BlockReader blockRead, void* ctx, BlockCache& cache, uint8_t z,
+                   uint32_t x, uint32_t y) {
+    if (read == nullptr || count == 0) return -1;
+    const uint32_t blocks = blockCount(count);
+
+    // 1. The last block whose first record is <= the target. The top of this tree is the same for every tile, so
+    // this is where the PSRAM key cache turns the expensive part into zero card reads.
+    uint32_t lo    = 0;
+    uint32_t hi    = blocks - 1;
+    uint32_t best  = 0;
+    bool     found = false;
+    while (lo <= hi) {
+        const uint32_t mid = lo + (hi - lo) / 2;
+        Entry          k;
+        if (!blockKey(mid, count, read, ctx, cache, &k)) return -1;
+        const int c = compare(k, z, x, y);
+        if (c <= 0) {
+            best  = mid;
+            found = true;
+            lo    = mid + 1;
+        } else {
+            if (mid == 0) break;
+            hi = mid - 1;
+        }
+    }
+    if (!found) return -1;   // smaller than the first record: not in the pack
+
+    const uint32_t first = best * kBlockRecords;
+    const uint32_t want  = (count - first) < kBlockRecords ? (count - first) : kBlockRecords;
+
+    // 2. One whole-block read, from the LRU when the block is already there.
+    if (blockRead != nullptr && cache.block != nullptr && cache.block_id != nullptr && cache.block_valid != nullptr &&
+        cache.block_got != nullptr && cache.lru_slots > 0) {
+        int slot = -1;
+        for (int i = 0; i < cache.lru_slots; i++) {
+            if (cache.block_valid[i] && cache.block_id[i] == best) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0) {
+            slot       = cache.next;
+            cache.next = (cache.next + 1) % cache.lru_slots;
+            Entry* dst = cache.block + (size_t)slot * kBlockRecords;
+            const uint32_t got = blockRead(ctx, first, dst, want);
+            if (got == 0 || got > want) return -1;
+            cache.block_valid[slot] = 1;
+            cache.block_id[slot]    = best;
+            cache.block_got[slot]   = got;
+            return findInBlock(dst, got, first, z, x, y);
+        }
+        const uint32_t got = cache.block_got[slot] > want ? want : cache.block_got[slot];
+        return findInBlock(cache.block + (size_t)slot * kBlockRecords, got, first, z, x, y);
+    }
+
+    // No block storage: still correct, just one record read per binary-search step inside the block.
+    return findInRange(first, first + want - 1, read, ctx, z, x, y);
+}
+
 uint32_t tileXForLon(double lon, int z) {
     const double n = (double)(1u << z);
     double       v = (lon + 180.0) / 360.0 * n;

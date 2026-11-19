@@ -27,6 +27,14 @@ bool ready();
 using TileBlit = void (*)(const uint16_t* px, int tw, int th, int dx, int dy, void* ctx);
 bool drawTile(uint8_t z, uint32_t x, uint32_t y, int dx, int dy, TileBlit blit, void* ctx);
 
+// S514: a placeholder blit. Draw a REGION of a decoded tile into a destination rectangle, NEAREST NEIGHBOUR,
+// without touching the cache's LRU: a stand-in must never evict a tile the fill still needs. Returns false when
+// the source tile is not Ready or every argument is empty.
+using TileBlitScaled = void (*)(const uint16_t* px, int tw, int th, int sx, int sy, int sw, int sh, int dx, int dy,
+                                int dw, int dh, void* ctx);
+bool drawTileScaled(uint8_t z, uint32_t x, uint32_t y, int sx, int sy, int sw, int sh, int dx, int dy, int dw,
+                    int dh, TileBlitScaled blit, void* ctx);
+
 // Hand the worker the tiles this view is missing, centre-out. Cheap and idempotent, so the page calls it on every
 // compose. Returns how many tiles were queued, or -1 when the view needs more than the queue holds.
 int showView(uint8_t z, const om::map::ViewTiles& vt);

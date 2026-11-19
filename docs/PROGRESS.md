@@ -15,6 +15,208 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S514 (EST-444) · own symbol key = page top; Enter key cap
+
+> Written by **DeepSeek** for ticket **EST-444**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed or committed. Starts AFTER EST-443 and keeps its uncommitted work as it is (this is the second half of the
+> same **Version: 43** image, not a new version). Read `BRIEF.md`, `docs/PLAN.md` §5, `core/router.*`,
+> `core/keys.h`, `core/core.*`, `core/module.h`, `main/main.cpp` (the symbol-key route and the Chat open state),
+> `main/chat_page.cpp` (the composer), `test/host/test_core.cpp`, `tools/preview_tanmatsu.py`. This entry is written
+> FIRST, as the ticket asks. Note: the date line says 2026-11-19 as the ticket does; the clock on this machine also
+> reads 2026-11-19.
+
+### 1. The rule and where it lives
+
+**Filip's rule (EST-444):** pressing the symbol key of the page you are ALREADY on returns to that page's top
+level — Chat closes an open channel or DM to the two-column list; Nodes/Map/RPTR close an inner level if one is
+open; at the top (and on the Launcher) nothing changes. Another page's key routes as before.
+
+- The decision is in **`core/router.cpp::Router::symbol`**: a symbol key whose page is the current page returns the
+  new `RouteAction::Top` and never calls `go()`. This is still the ONE place the five-key table is read
+  (`core/keys.h::page_for_symbol`).
+- The effect is in **`core/core.cpp::Core::handleKey`**: on `Top` it calls the page owner's new
+  `Module::onTop(Core&, Page)`. The Page matters: OM Lite owns five pages, so the hook may only close the level of
+  the page whose key was pressed (the Chat level must not vanish because the Nodes key was pressed). A module
+  returns `true` when it had an inner level and closed it, `false` at the top — so "own key at top = no-op" is the
+  module's own answer, not a guess by the router. The module that owns the level is the only object that can close
+  it (the same split `router.h` already documents for Esc).
+- `Module::onTop` is an optional pointer; `nullptr` means "no inner level", which is today's Nodes, Map, RPTR and
+  Settings (no search field or sheet is built on these pages yet). The Launcher has no module, so its own triangle
+  key is a `Noop`.
+- Chat's one implementation (`main/main.cpp`) closes the open level **exactly as Esc does today**: it first checks
+  `page == Page::Chat` (so the Nodes/Map/RPTR keys cannot close the Chat level), then marks the channel or DM read
+  (`noteChannelRead` / `noteDmRead`), `chat_open = false`, scroll and seen-count reset, and the composer text is left
+  untouched (it is one buffer per shell session, as before). The six open-level variables are `static` in `app_main`
+  so the hook can be a captureless lambda in the module record.
+
+### The L2 check (cited, and it DIFFERS)
+
+- `firmware/src/main.cpp:3899-3905` (`showTab`): `if (tab == g_tab) { ... plain redraw ... return; }` — a tap on the
+  active tab on the L2 is a plain redraw. It does **not** close the open chat.
+- The L2's Chat is one window with a selector (`firmware/src/main.cpp:1417 handleChatTap`, `ChatHit::Head` opens the
+  selector), not a list level above an open chat, so "tap the active tab inside a chat" has no list to go back to.
+- **So the L2 differs from Filip's rule.** As the ticket says, Filip's rule wins: the Tanmatsu's own key goes to the
+  page's top. This is recorded here, not silently copied from the L2.
+
+### 2. The composer: "Send" button -> Enter key cap
+
+- The filled gold "Send" plate is gone. The right end of the composer is now a **key cap in the hint bar's style**:
+  the same dark plate + 1 px outline as a hint chip (`main/chrome.cpp::drawKeyCap`, now the ONE cap drawing used by
+  both), with a small vector **↵** (the generated font has no U+21B5 glyph) followed by the word **Enter**.
+- **Dim when the draft is empty (`kDimmer`), normal when there is text (`kInk`)**, in channels and DMs alike; the
+  behaviour is unchanged (`Enter` sends).
+- `tools/preview_tanmatsu.py` draws the same cap (its `key_cap` helper, the hint bar's own `Panel2`/`KeyLine`), and
+  the DM preview is re-rendered as `shots/2026-11-19-dm-enter.png`.
+
+### Results (real exit codes)
+
+- `sh test/host/run.sh` → **exit 0**. The core/router suite is now **229 checks, 0 failures** (was 192, so the new
+  rule adds 37): own key inside → `RouteAction::Top`, the owner's `onTop` closes the level, the page stays Chat,
+  and the module's `onKey` never sees a symbol key; own key at the top → consumed, `onTop` answers false, nothing
+  changes; the Nodes key while a Chat level is open → the hook is told Nodes and leaves the Chat level alone;
+  another page's key → `Switched` as before; the Launcher's own triangle → `Noop`.
+  Every other suite unchanged: clock 91, store 127, history 84, layout 62, mc 115, dm 45, mc-ASan 115, dm-ASan 45,
+  dm_send 140, dm_send-ASan 140, map 10,393, txqueue 93, cards 99, advert 162, contact_blob 1,190, channel_scope 94,
+  dm guard 169. Full log: `paperclip-pilot/sweep/est444-host-final.log`.
+- **ARMED** (the ticket's "ARM it"): the same new test built against the pre-fix `core/router.cpp` + `core/core.cpp`
+  from `HEAD` (`paperclip-pilot/sweep/est444/arm/`) → **exit 1**, `FAIL test/host/test_core.cpp:389
+  own.action == tm::RouteAction::Top` (199 checks, 1 failure). With the fix: 229 checks, 0. The test catches the bug.
+- `make build` → **exit 0**. `application.bin` **0x167370 = 1,470,320 B**, **30 %** of the 2 MB app partition free
+  (`0x98c90`). Log: `paperclip-pilot/sweep/est444-build-final.log`.
+- `python3 tools/preview_tanmatsu.py dm_enter` → **exit 0**, wrote
+  `shots/2026-11-19-dm-enter.png` (800×480).
+
+### Files changed
+
+- `core/router.h`, `core/router.cpp`: `RouteAction::Top`; `symbol()` answers Top for the page's own key and never
+  calls `go()`; the comment states the one-place rule.
+- `core/keys.h`: `is_own_symbol(Key, Page)` — one predicate for "the page's own key", tested.
+- `core/module.h`: the optional `Module::onTop(Core&, Page)` hook (nullptr = no inner level; the Page keeps one
+  page's level from being closed by another page's key).
+- `core/core.cpp`: `Core::handleKey` dispatches Top to the page owner's `onTop`; a symbol key is still always the
+  core's.
+- `main/main.cpp`: `g_om_lite.onTop` installed next to the Chat state; it closes exactly like Esc (mark read, list
+  returns, scroll/seen reset, composer kept). The six open-level variables are `static` so the hook can be a
+  captureless lambda; the other two module rows gained the `nullptr` field.
+- `main/chrome.h`, `main/chrome.cpp`: `drawKeyCap` (now the hint bar's own cap drawing) and `drawEnterKeyCap` (the
+  same cap with a stroke-drawn ↵, since the font has no U+21B5).
+- `main/chat_page.cpp`: the composer's filled Send button is replaced by the Enter key cap, dim when the draft is
+  empty and normal ink when there is text (channels and DMs share this composer).
+- `test/host/test_core.cpp`: the new router test (4b) and the onTop fixtures.
+- `tools/preview_tanmatsu.py`: `key_cap` helper (the hint bar uses it too), the channel and DM composers draw it,
+  and the DM renderer is renamed `dm_enter` → `2026-11-19-dm-enter.png`.
+- `docs/PROGRESS.md`: this entry.
+
+### What could NOT be checked
+
+- **Nothing was installed, flashed or committed.** The own-key behaviour and the cap's look are for the next glass
+  test; the host test proves the router/core decision and the preview is a host render, not a panel frame.
+- **The ↵ is stroke-drawn on the device, not a font glyph.** The generated faces carry Latin-1 + Latin Extended-A,
+  so U+21B5 does not exist in them; the preview can use DejaVu's glyph, the panel gets the same shape in three
+  short lines. The exact pixel weight has not been seen on glass.
+- **The channel preview was updated in the tool but only the DM PNG was re-rendered**, because the ticket names that
+  one file; `shots/2026-11-13-chat.png` is still the older render of the list-and-chat page.
+- The composer's placeholder line still says "Enter sends" next to the new cap. That is deliberate (the ticket only
+  replaces the button); if Filip wants the line shortened, it is a one-line change in `main/chat_page.cpp`.
+
+## 2026-11-19 · S514 (EST-443) · map: no black squares, fewer card reads
+
+> Written by **DeepSeek** for ticket **EST-443**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed or committed. Read `BRIEF.md`, this file's S506 map entries and S513, `core/map_view.*`,
+> `core/map_pack.*`, `main/map_link.cpp`, `main/map_page.cpp`, `test/host/test_map.cpp`, `test/host/run.sh`.
+> **Version: 43.** This entry is written FIRST, as the ticket asks.
+
+### The evidence, read from the log — not from a memory of it
+
+`measurements/tanmatsu-v42-air-test-2026-11-19-S514.log`, the `fill:` lines: one zoom step fills 5-12 tiles in
+193-640 ms with 66-87 card reads — e.g. `5 tile(s) in 217 ms (69 card reads)` is ~14 index reads per tile — and
+each tile that has not landed yet leaves a void-coloured square on the glass. The reads are the binary search over
+`tiles.idx` (24-byte records, ~log2(900,000) ≈ 20 probes), which is what item 2 attacks.
+
+### 1. PLACEHOLDERS (the visible fix)
+
+**Rules in `core/map_view.*`, pixels in `main/map_page.cpp`, cache access in `main/map_link.*`.**
+
+- New pure geometry `parentPlaceholder()` / `childPlaceholder()`: for a target tile (z,x,y) that is still
+  Pending or Empty, name the source tile and the source/destination rectangles.
+  - **Zooming IN:** the parent (z-1) tile, source rectangle `(x&1)*128, (y&1)*128, 128x128`, drawn into the whole
+    256x256 target tile (2x upscale).
+  - **Zooming OUT:** the four children (z+1), `(2x+i, 2y+j)`, each whole 256x256 tile drawn into its 128x128
+    quadrant of the target (1/2 downscale); a child that is not Ready leaves its quadrant void, as the ticket says.
+  - **Bounds:** no parent at z9 (there are no z8 records) and no children at z17 (there are no z18 records);
+    children are also refused past the last tile of z+1.
+- **Scaling choice: nearest neighbour.** One source pixel per destination pixel, no per-channel arithmetic: a 2x
+  upscale repeats each pixel, a 1/2 downscale takes the top-left of each 2x2 block. It is the cheapest correct
+  shape and the placeholder is replaced by the real tile on the next repaint after it lands.
+- **A placeholder never changes cache state.** The page reads it through a new read-only `TileCache::peek()` and
+  `maplink::drawTileScaled()`, which never call `find()`/`take()`/`commit()` and never touch the LRU stamps, so a
+  stand-in cannot evict a tile the fill still needs. `peek()` is host-tested against exactly that.
+- The page chooses the direction from the previous composed zoom (first draw / same zoom = `Same`, which uses the
+  parent); only the direction's source is tried, so a zoom out follows the ticket's "missing child quadrant stays
+  void" rule rather than mixing resolutions.
+
+### 2. FEWER CARD READS
+
+**Shape (decided, not suggested blindly):** a two-level search in `core/map_pack.*`, `findTileBlocks()`.
+
+- **Blocks of 170 records = 4080 B = one 4 KB card read.** Level 1 binary-searches the block's FIRST record; level 2
+  reads the whole winning block once and searches its records in RAM.
+- **Block-boundary keys in PSRAM, filled lazily.** `BlockCache` holds one 24-byte `Entry` + one valid byte per block;
+  the caller sizes it from `count` at pack open (allocation only, **no index read at open**, so opening stays fast)
+  and records are fetched on first visit. For the real packs: z17 ≈ 5,295 blocks ≈ **132 KB**, z16 ≈ 1,324 ≈ 33 KB,
+  the z9-15 pack ≈ ≤447 ≈ 11 KB — **~176 KB for all three together, under the 512 KB budget**.
+- **4 whole blocks in a round-robin LRU** (4 × 170 × 24 B = **16 KB**), so neighbouring tiles in a column/row read no
+  card at all once their block is in.
+- **The old per-column `RowHint` is removed.** Host measurement below: the block search is 0.0 reads/tile warm,
+  while a hint adds one 24-byte record read on every hit and is no cheaper than a block-cache hit. Keeping it "just
+  in case" would have added card traffic, so it is gone rather than silently left.
+- **Fallbacks:** if the PSRAM arrays do not fit, `findRecord()` uses the old `findTile()`; `findTileBlocks()` with a
+  null/mis-sized cache or a null `BlockReader` is still correct (record-by-record inside the chosen block), just
+  slower. A failed block-key read is a failure, never a false hit.
+- **Opening a pack adds one log line** with the block count and bytes, so the budget is visible on the glass:
+  `z17: block index 5295 block(s), ... B keys + ... B LRU`.
+
+**Host test (`test_block_search`):** a 5,000-record synthetic index; `findTileBlocks` must return the SAME record
+index as `findTile` for **every one of the 5,000 records** and for three misses (wrong y, wrong x, wrong z), the
+partial last block included. Read counters run through the same callbacks the device uses. Measured on a 15-tile
+view (5×3, 30-block index): plain search **166 reads**, block search **cold 9**, **warm 0 (0.0/tile)** — the
+ticket's ≤ 2/tile is met with margin once the block-key cache is warm; the cold number is much lower than the old
+search too. The absolute cold count on z17 will be higher (a 5,295-block tree), which is why the block keys persist
+for the life of the open pack and the LRU covers neighbouring tiles.
+
+### 3. THE `fill:` LOG LINE
+
+`logFill()` now prints the zoom and reads per tile, exactly the ticket's shape:
+`fill z15: 12 tile(s) in 309 ms (73 card reads, 6.1/tile, hardware decode)`. `g_fill_z` is set when a new fill
+starts. The page compose line also gained `N stand-in`, so the placeholder path is visible in the log next to
+`N drawn`.
+
+### Results (real exit codes)
+
+- `sh test/host/run.sh` → **exit 0**; map suite **10,393 checks, 0 failures** (was 347 before this run's additions).
+  Full log: `paperclip-pilot/sweep/est443-host-final2.log`.
+- `make build` → **exit 0**; `application.bin` **0x167090 = 1,470,608 B**, **30 %** of the 2 MB app partition free.
+  Log: `paperclip-pilot/sweep/est443-build-final2.log`.
+
+### Files changed
+
+- new code: `core/map_pack.*` (`BlockCache`, `BlockReader`, `blockCount`, `findTileBlocks`), `core/map_view.*`
+  (`Placeholder`, `ZoomDir`, `parentPlaceholder`, `childPlaceholder`, `TileCache::peek`).
+- changed: `main/map_link.*` (block cache storage + `readBlockRecords`, `drawTileScaled`, arming, `fill z…` line;
+  RowHint removed), `main/map_page.cpp` (scaled nearest-neighbour blit, stand-ins, `N stand-in` in the compose log),
+  `test/host/test_map.cpp` (block-search equality + read counts, placeholder geometry, `peek` LRU arm).
+- `docs/PROGRESS.md`: this entry.
+
+### What could NOT be checked
+
+- **Nothing was installed, flashed or committed.** The placeholder look, the real card-read count and the
+  `fill z…` line are for the next glass test; I have measured only the host callbacks.
+- **The z17 block-key memory is arithmetic, not an allocation on the device.** 5,295 blocks comes from the 21.6 MB
+  index; the `heap_caps_malloc` path in `ensurePack()` has not run on hardware. The fallback is deliberate.
+- **The 4 KB read latency is not measured on this card.** It replaces ~14 small random reads with one sequential
+  read plus one 24-byte record read, which is the intended win, but the glass log is the proof.
+- **Rules 9:** no coordinates, SSIDs or keys were added; the test index is synthetic (x 1000+, y 2000+).
+
 ## 2026-11-18 · S513 (EST-441) · DM fixes from the air
 
 > Written by **DeepSeek** for ticket **EST-441**: fenced Paperclip run, no session start/end, nothing installed,

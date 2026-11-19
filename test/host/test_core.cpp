@@ -7,7 +7,9 @@
 //   2. a module that leaks on stop is reported BY NAME (and the report is one line);
 //   3. a second owner of the radio is refused, and the refusal names the resource;
 //   4. each symbol key reaches its page, a module never sees a symbol key, a stopped target gets
-//      OfferStart (not an auto-start), and Esc goes back.
+//      OfferStart (not an auto-start), and Esc goes back;
+//   4b. the symbol key of the page already on screen goes to that page's top (S514/EST-444): the
+//      owner closes its inner level, at the top it is a no-op, and another page's key routes as before.
 // The fifth test covers the Launcher-never-beside-a-module rule and the three registry states.
 //
 // Build/run: sh test/host/run.sh (g++ -std=c++17 -Wall -Wextra -Werror).
@@ -119,6 +121,20 @@ bool om_key(tm::Core&, tm::Key) {
   return true;
 }
 
+// S514/EST-444: a fake inner level, so the router test can prove "own key inside -> top" and
+// "own key at top -> no-op" without the shell (the real Chat state lives in main.cpp). Like the real
+// Chat hook, only the CHAT page's key may close it: OM Lite owns five pages.
+int      g_om_tops     = 0;
+bool     g_om_inner    = false;
+tm::Page g_om_top_page = tm::Page::Count;
+bool om_top(tm::Core&, tm::Page page) {
+  ++g_om_tops;
+  g_om_top_page = page;
+  if (page != tm::Page::Chat || !g_om_inner) return false;   // not this page's level: nothing to close
+  g_om_inner = false;
+  return true;
+}
+
 bool probe_start(tm::Core&) {
   ++g_probe_starts;
   return true;
@@ -131,7 +147,7 @@ void test_start_stop_start_keeps_memory() {
 
   static const tm::Module mod = {"alpha", "Alpha", "test module", tm::page_bit(tm::Page::Nodes), true,
                                  tm::Resource::Settings | tm::Resource::Clock,
-                                 alpha_start, alpha_stop, alpha_tick, alpha_draw, alpha_key};
+                                 alpha_start, alpha_stop, alpha_tick, alpha_draw, alpha_key, nullptr};
   tm::Core core;
   CHECK(core.registry().add(mod));
 
@@ -182,7 +198,7 @@ void test_leak_is_reported_by_name() {
 
   static const tm::Module mod = {"leaky", "Leaky", "leaks on stop", tm::page_bit(tm::Page::Chat), true,
                                  tm::Resource::None, leaky_start, leaky_stop, nullptr, nullptr,
-                                 nullptr};
+                                 nullptr, nullptr};
   tm::Core core;
   CHECK(core.registry().add(mod));
 
@@ -223,9 +239,9 @@ void test_second_radio_owner_is_refused() {
 
   static const tm::Module om = {"om-lite", "OM Lite", "mesh client", kAllOmPages, true,
                                 tm::Resource::Radio | tm::Resource::SdCard, om_start, om_stop_clean,
-                                nullptr, om_draw, om_key};
+                                nullptr, om_draw, om_key, nullptr};
   static const tm::Module probe = {"probe", "Probe", "also wants the radio", 0, true, tm::Resource::Radio,
-                                   probe_start, nullptr, nullptr, nullptr, nullptr};
+                                   probe_start, nullptr, nullptr, nullptr, nullptr, nullptr};
   tm::Core core;
   CHECK(core.registry().add(om));
   CHECK(core.registry().add(probe));
@@ -265,7 +281,7 @@ void test_symbol_keys_route_and_are_not_swallowed() {
 
   static const tm::Module om = {"om-lite", "OM Lite", "mesh client", kAllOmPages, true,
                                 tm::Resource::Radio, om_start, om_stop_clean, nullptr, om_draw,
-                                om_key};
+                                om_key, nullptr};
   tm::Core core;
   CHECK(core.registry().add(om));
 
@@ -347,6 +363,76 @@ void test_symbol_keys_route_and_are_not_swallowed() {
   CHECK_EQ(g_om_keys, 1);
 }
 
+// ------------------------------------------- 4b. own symbol key -> the page's own top (S514/EST-444)
+void test_own_symbol_key_returns_to_the_page_top() {
+  printf("test  own symbol key goes to the page's top; at the top it is a no-op\n");
+  g_om_starts = g_om_draws = g_om_keys = 0;
+  g_om_tops = 0;
+  g_om_inner = false;
+  g_om_block = nullptr;
+
+  static const tm::Module om = {"om-lite", "OM Lite", "mesh client", kAllOmPages, true,
+                                tm::Resource::Radio, om_start, om_stop_clean, nullptr, om_draw,
+                                om_key, om_top};
+  tm::Core core;
+  CHECK(core.registry().add(om));
+  CHECK(core.start("om-lite"));
+  CHECK_EQ(core.goPage(tm::Page::Chat).action == tm::RouteAction::Switched, true);
+
+  // the table itself: only the circle is the Chat page's own key
+  CHECK_EQ(tm::is_own_symbol(tm::Key::SymCircle, tm::Page::Chat), true);
+  CHECK_EQ(tm::is_own_symbol(tm::Key::SymSquare, tm::Page::Chat), false);
+  CHECK_EQ(tm::is_own_symbol(tm::Key::SymTriangle, tm::Page::Launcher), true);
+
+  // INSIDE a level: the router says Top and the core hands it to the page's owner, which closes it.
+  // The page does NOT move, and the module's ordinary onKey never sees a symbol key.
+  g_om_inner = true;
+  const tm::RouteResult own = core.router().symbol(tm::Key::SymCircle, core.registry());
+  CHECK(own.action == tm::RouteAction::Top);
+  CHECK_EQ(own.page == tm::Page::Chat, true);
+  CHECK(own.module != nullptr && strcmp(own.module, "om-lite") == 0);
+  CHECK_EQ(core.handleKey(tm::Key::SymCircle), true);
+  CHECK_EQ(g_om_tops, 1);
+  CHECK_EQ(g_om_top_page == tm::Page::Chat, true);   // the module was told WHICH page
+  CHECK_EQ(g_om_inner, false);                     // the inner level is closed
+  CHECK_EQ(core.page() == tm::Page::Chat, true);   // still the same page
+  CHECK_EQ(g_om_keys, 0);
+
+  // AT THE TOP: consumed, the owner is asked, and it answers "nothing to close" — a no-op.
+  CHECK_EQ(core.handleKey(tm::Key::SymCircle), true);
+  CHECK_EQ(g_om_tops, 2);
+  CHECK_EQ(g_om_inner, false);
+  CHECK_EQ(core.page() == tm::Page::Chat, true);
+
+  // A DIFFERENT page's own key must NOT close the Chat level: OM Lite owns five pages. Put the fake
+  // level back, go to Nodes and press square (Nodes' own key); the hook is told Nodes and leaves it.
+  g_om_inner = true;
+  CHECK_EQ(core.goPage(tm::Page::Nodes).action == tm::RouteAction::Switched, true);
+  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
+  CHECK_EQ(core.page() == tm::Page::Nodes, true);
+  CHECK_EQ(g_om_tops, 3);
+  CHECK_EQ(g_om_top_page == tm::Page::Nodes, true);
+  CHECK_EQ(g_om_inner, true);                        // the Chat level is untouched
+  // … and back on Chat, the circle does close it.
+  CHECK_EQ(core.goPage(tm::Page::Chat).action == tm::RouteAction::Switched, true);
+  CHECK_EQ(core.handleKey(tm::Key::SymCircle), true);
+  CHECK_EQ(g_om_tops, 4);
+  CHECK_EQ(g_om_top_page == tm::Page::Chat, true);
+  CHECK_EQ(g_om_inner, false);
+
+  // ANOTHER page's key routes as before and does not touch this page's level hook.
+  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
+  CHECK_EQ(core.page() == tm::Page::Nodes, true);
+  CHECK_EQ(g_om_tops, 4);
+
+  // The Launcher's own key (triangle) has no module: it is consumed and changes nothing.
+  core.router().home();
+  CHECK(core.router().symbol(tm::Key::SymTriangle, core.registry()).action == tm::RouteAction::Noop);
+  CHECK_EQ(core.handleKey(tm::Key::SymTriangle), true);
+  CHECK_EQ(core.page() == tm::Page::Launcher, true);
+  CHECK_EQ(g_om_tops, 4);
+}
+
 // ------------------------------------------------------------------- 5. states + one drawing owner
 void test_states_and_one_drawing_owner() {
   printf("test  states (running/stopped/later) and one drawing owner\n");
@@ -355,9 +441,9 @@ void test_states_and_one_drawing_owner() {
 
   static const tm::Module om = {"om-lite", "OM Lite", "mesh client", kAllOmPages, true,
                                 tm::Resource::Radio, om_start, om_stop_clean, nullptr, om_draw,
-                                om_key};
+                                om_key, nullptr};
   static const tm::Module later = {"mesh-torry", "Mesh-Torry", "game", 0, false, tm::Resource::None,
-                                   nullptr, nullptr, nullptr, nullptr, nullptr};
+                                   nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
   tm::Core core;
   CHECK(core.registry().add(om));
   CHECK(core.registry().add(later));
@@ -483,6 +569,7 @@ int main() {
   test_leak_is_reported_by_name();
   test_second_radio_owner_is_refused();
   test_symbol_keys_route_and_are_not_swallowed();
+  test_own_symbol_key_returns_to_the_page_top();
   test_states_and_one_drawing_owner();
   test_radio_plan_matches_the_mesh();
   test_beacon_roundtrips();

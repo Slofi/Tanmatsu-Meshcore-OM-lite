@@ -83,6 +83,13 @@ struct Module {
   void (*tick)(Core&);         // called only while running
   void (*draw)(Canvas&);       // called only while running AND on screen
   bool (*onKey)(Core&, Key);   // non-symbol keys only; true = the module used the key
+  // S514/EST-444 (Filip): this module's symbol key OF THE PAGE ON SCREEN, pressed while that page is
+  // current. Go to the page's top level — close an open chat, a search field or a sheet. `page` says
+  // WHICH of the module's pages owns the level (OM Lite owns five, and a level on Chat must not be
+  // closed by the Nodes key). true = an inner level was open and is now closed; false = already at
+  // the top (nothing changes, the key is still consumed). nullptr = no page of this module has an
+  // inner level today. A symbol key is NEVER passed to onKey().
+  bool (*onTop)(Core&, Page page);
 };
 
 }  // namespace tm

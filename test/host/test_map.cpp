@@ -44,6 +44,8 @@ struct FakeIdx {
     uint8_t* bytes;
     uint32_t count;
     uint32_t fail_at;        // simulate a short read on one record (9999 = never)
+    uint32_t rec_reads;      // S514: how many one-record reads the search issued
+    uint32_t block_reads;    // S514: how many whole-block reads it issued
 };
 
 uint8_t* g_buf = nullptr;
@@ -52,9 +54,23 @@ FakeIdx g_idx;
 
 bool readRec(void* ctx, uint32_t i, om::map::Entry* out) {
     FakeIdx* f = static_cast<FakeIdx*>(ctx);
+    ++f->rec_reads;
     if (i == f->fail_at) return false;
     if (i >= f->count) return false;
     return om::map::decodeEntry(f->bytes + (size_t)i * om::map::kIdxRecordBytes, out);
+}
+
+// S514: the block search's one-read-per-block callback.
+uint32_t readBlock(void* ctx, uint32_t first, om::map::Entry* out, uint32_t cap) {
+    FakeIdx* f = static_cast<FakeIdx*>(ctx);
+    ++f->block_reads;
+    if (first >= f->count || out == nullptr || cap == 0) return 0;
+    uint32_t n = f->count - first;
+    if (n > cap) n = cap;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!om::map::decodeEntry(f->bytes + (size_t)(first + i) * om::map::kIdxRecordBytes, &out[i])) return 0;
+    }
+    return n;
 }
 
 void put32(uint8_t* p, uint32_t v) {
@@ -82,6 +98,8 @@ void buildIndex(uint32_t count, uint8_t z, uint32_t y_per_x) {
     g_idx.bytes        = g_buf;
     g_idx.count        = count;
     g_idx.fail_at = 9999;
+    g_idx.rec_reads   = 0;
+    g_idx.block_reads = 0;
 }
 
 void test_decode_entry() {
@@ -313,6 +331,199 @@ void test_cache_pending_is_untouchable() {
     CHECK_EQ(f.isFailed(16, 5, 5), false);                // a new pack forgets the holes
 }
 
+// S514/EST-443 item 2: the block search must give the SAME answer as findTile, and once its block-key cache is warm
+// it must cost <= 2 card reads per tile for a view (the ticket's number). The callbacks count reads exactly as the
+// device does: one for a block key, one for a whole block.
+void test_block_search() {
+    const uint32_t count = 5000;   // 200 columns of 25 tiles, 30 blocks (last one partial)
+    buildIndex(count, 16, 25);
+
+    const uint32_t blocks = om::map::blockCount(count);
+    CHECK_EQ(blocks, (count + om::map::kBlockRecords - 1) / om::map::kBlockRecords);
+    CHECK_EQ(om::map::blockCount(0), 0);
+    CHECK_EQ(om::map::blockCount(1), 1);
+    CHECK_EQ(om::map::blockCount(om::map::kBlockRecords), 1);
+    CHECK_EQ(om::map::blockCount(om::map::kBlockRecords + 1), 2);
+
+    om::map::Entry* key    = new om::map::Entry[blocks];
+    uint8_t*        key_ok = new uint8_t[blocks]();
+    om::map::Entry* lru    = new om::map::Entry[om::map::kBlockLruSlots * om::map::kBlockRecords];
+    uint32_t*       lru_id = new uint32_t[om::map::kBlockLruSlots]();
+    uint32_t*       lru_n  = new uint32_t[om::map::kBlockLruSlots]();
+    uint8_t*        lru_ok = new uint8_t[om::map::kBlockLruSlots]();
+    om::map::BlockCache bc;
+    bc.key         = key;
+    bc.key_valid   = key_ok;
+    bc.key_cap     = blocks;
+    bc.block       = lru;
+    bc.block_id    = lru_id;
+    bc.block_got   = lru_n;
+    bc.block_valid = lru_ok;
+    bc.lru_slots   = om::map::kBlockLruSlots;
+    bc.next        = 0;
+
+    // Every record, and keys that are not in the index: the two searches must never disagree.
+    for (uint32_t i = 0; i < count; i++) {
+        const uint32_t x = 1000 + i / 25;
+        const uint32_t y = 2000 + i % 25;
+        CHECK_EQ(om::map::findTile(count, readRec, &g_idx, 16, x, y), i);
+        CHECK_EQ(om::map::findTileBlocks(count, readRec, readBlock, &g_idx, bc, 16, x, y), i);
+    }
+    CHECK_EQ(om::map::findTileBlocks(count, readRec, readBlock, &g_idx, bc, 16, 1000, 2099), -1);
+    CHECK_EQ(om::map::findTileBlocks(count, readRec, readBlock, &g_idx, bc, 16, 1199, 2025), -1);
+    CHECK_EQ(om::map::findTileBlocks(count, readRec, readBlock, &g_idx, bc, 15, 1000, 2000), -1);
+
+    // The last block is partial: its last record is still found, and one past it is not.
+    CHECK_EQ(om::map::findTileBlocks(count, readRec, readBlock, &g_idx, bc, 16, 1199, 2024), (int)(count - 1));
+
+    // A 12-tile view (5 columns x 3 rows), the shape a zoom fills. Plain binary search first, for the baseline.
+    g_idx.rec_reads = g_idx.block_reads = 0;
+    int got_plain = 0;
+    for (uint32_t row = 0; row < 3; row++) {
+        for (uint32_t col = 0; col < 5; col++) {
+            got_plain += om::map::findTile(count, readRec, &g_idx, 16, 1010 + col, 2010 + row) >= 0 ? 1 : 0;
+        }
+    }
+    const uint32_t plain_reads = g_idx.rec_reads + g_idx.block_reads;
+
+    // Cold block search: forget every cached key and block, so this is the first fill after opening the pack.
+    memset(key_ok, 0, blocks);
+    memset(lru_ok, 0, om::map::kBlockLruSlots);
+    bc.next = 0;
+    g_idx.rec_reads = g_idx.block_reads = 0;
+    for (uint32_t row = 0; row < 3; row++) {
+        for (uint32_t col = 0; col < 5; col++) {
+            CHECK(om::map::findTileBlocks(count, readRec, readBlock, &g_idx, bc, 16, 1010 + col, 2010 + row) >= 0);
+        }
+    }
+    const uint32_t cold_reads = g_idx.rec_reads + g_idx.block_reads;
+
+    // Warm: the same view again. The ticket's budget: <= 2 card reads per tile.
+    g_idx.rec_reads = g_idx.block_reads = 0;
+    for (uint32_t row = 0; row < 3; row++) {
+        for (uint32_t col = 0; col < 5; col++) {
+            CHECK(om::map::findTileBlocks(count, readRec, readBlock, &g_idx, bc, 16, 1010 + col, 2010 + row) >= 0);
+        }
+    }
+    const uint32_t warm_reads = g_idx.rec_reads + g_idx.block_reads;
+
+    CHECK_EQ(got_plain, 15);
+    printf("block search: 15-tile view, plain %u reads, cold %u, warm %u (%.1f/tile)\n", plain_reads, cold_reads,
+           warm_reads, (double)warm_reads / 15.0);
+    CHECK(plain_reads > 0);
+    CHECK(cold_reads < plain_reads);          // the block tree is already an improvement on the first fill
+    CHECK(warm_reads <= 2 * 15);              // and <= 2 reads per tile once warm (15 tiles here)
+
+    // A cache-less call is still correct (falls back to record-by-record inside one block).
+    om::map::BlockCache empty;
+    g_idx.fail_at = 9999;
+    CHECK_EQ(om::map::findTileBlocks(count, readRec, nullptr, &g_idx, empty, 16, 1020, 2010), 510);
+    CHECK_EQ(om::map::findTileBlocks(count, readRec, nullptr, &g_idx, empty, 16, 1199, 2024), (int)(count - 1));
+
+    // A failed block-key read is a failure, not a false hit. Forget the cached keys first: a hit would not read.
+    memset(key_ok, 0, blocks);
+    g_idx.fail_at = 0;
+    CHECK_EQ(om::map::findTileBlocks(count, readRec, readBlock, &g_idx, bc, 16, 1010, 2010), -1);
+    g_idx.fail_at = 9999;
+
+    delete[] key;
+    delete[] key_ok;
+    delete[] lru;
+    delete[] lru_id;
+    delete[] lru_n;
+    delete[] lru_ok;
+    delete[] g_buf;
+    g_buf = nullptr;
+}
+
+// S514/EST-443: the stand-in geometry. It is pure and it has two ways to be wrong on the glass: the wrong quarter
+// of the parent (a tile that jumps sideways at a zoom) and children past the world edge at z9/z17.
+void test_placeholders() {
+    om::map::Placeholder p[om::map::kPlaceholderMax];
+
+    // Zooming IN: tile (z16, 2/3) comes from the BOTTOM-RIGHT quarter of parent (z15, 1/1).
+    CHECK_EQ(om::map::parentPlaceholder(16, 2, 3, p), 1);
+    CHECK_EQ(p[0].z, 15);
+    CHECK_EQ(p[0].x, 1);
+    CHECK_EQ(p[0].y, 1);
+    CHECK_EQ(p[0].sx, 0);
+    CHECK_EQ(p[0].sy, 128);
+    CHECK_EQ(p[0].sw, 128);
+    CHECK_EQ(p[0].sh, 128);
+    CHECK_EQ(p[0].dx, 0);
+    CHECK_EQ(p[0].dy, 0);
+    CHECK_EQ(p[0].dw, 256);   // upscaled 2x into the whole target tile
+    CHECK_EQ(p[0].dh, 256);
+
+    // The other diagonal: (3,2) is the TOP-RIGHT quarter.
+    CHECK_EQ(om::map::parentPlaceholder(16, 3, 2, p), 1);
+    CHECK_EQ(p[0].z, 15);
+    CHECK_EQ(p[0].x, 1);
+    CHECK_EQ(p[0].y, 1);
+    CHECK_EQ(p[0].sx, 128);
+    CHECK_EQ(p[0].sy, 0);
+
+    // z9 is the lowest pack zoom (no z8 records), and a null out pointer is refused, not written.
+    CHECK_EQ(om::map::parentPlaceholder(9, 0, 0, p), 0);
+    CHECK_EQ(om::map::parentPlaceholder(16, 0, 0, nullptr), 0);
+
+    // Zooming OUT: tile (z16, 2/3) is the four z17 children, row-major, each whole tile into its 1/2 quadrant.
+    CHECK_EQ(om::map::childPlaceholder(16, 2, 3, p, om::map::kPlaceholderMax), 4);
+    static const uint32_t cx[4] = {4, 5, 4, 5};
+    static const uint32_t cy[4] = {6, 6, 7, 7};
+    static const int      qx[4] = {0, 128, 0, 128};
+    static const int      qy[4] = {0, 0, 128, 128};
+    for (int i = 0; i < 4; i++) {
+        CHECK_EQ(p[i].z, 17);
+        CHECK_EQ(p[i].x, cx[i]);
+        CHECK_EQ(p[i].y, cy[i]);
+        CHECK_EQ(p[i].sx, 0);
+        CHECK_EQ(p[i].sy, 0);
+        CHECK_EQ(p[i].sw, 256);   // the whole child, downscaled 1/2
+        CHECK_EQ(p[i].sh, 256);
+        CHECK_EQ(p[i].dx, qx[i]);
+        CHECK_EQ(p[i].dy, qy[i]);
+        CHECK_EQ(p[i].dw, 128);
+        CHECK_EQ(p[i].dh, 128);
+    }
+
+    // z17 is the highest zoom (no z18 records); a small cap returns a prefix, not a write past the array.
+    CHECK_EQ(om::map::childPlaceholder(17, 0, 0, p, om::map::kPlaceholderMax), 0);
+    CHECK_EQ(om::map::childPlaceholder(16, 2, 3, p, 2), 2);
+    CHECK_EQ(om::map::childPlaceholder(16, 2, 3, p, 0), 0);
+    CHECK_EQ(om::map::childPlaceholder(16, 2, 3, nullptr, 4), 0);
+
+    // The world edge: the last tile of z9 has the last tile of z10 as its bottom-right child, never 1024.
+    CHECK_EQ(om::map::childPlaceholder(9, 511, 511, p, om::map::kPlaceholderMax), 4);
+    CHECK_EQ(p[3].x, 1023u);
+    CHECK_EQ(p[3].y, 1023u);
+}
+
+// The placeholder path uses peek(), not find(): a stand-in must not touch the LRU and evict a tile the fill
+// still needs. This is the arm against a "helpful" find() call in drawTileScaled().
+void test_peek_does_not_touch_lru() {
+    om::map::TileCache c;
+    c.reset();
+    for (uint32_t i = 0; i < (uint32_t)om::map::kCacheSlots; i++) c.commit(c.take(16, i, 0), true);
+
+    CHECK_EQ(c.peek(16, 0, 0), 0);
+    CHECK_EQ(c.peek(16, 5, 0), 5);
+    CHECK_EQ(c.peek(16, 99, 0), -1);
+
+    // Slot 0 is still the least recently used, because peek() did not stamp it; take() must choose it.
+    const int victim = c.take(16, 99, 0);
+    CHECK_EQ(victim, 0);
+    c.commit(victim, true);
+    CHECK_EQ(c.peek(16, 0, 0), -1);
+    CHECK_EQ(c.peek(16, 1, 0), 1);   // untouched, still there
+
+    // A Pending slot is not peekable (its pixels are being written), a Ready one is.
+    const int pending = c.take(17, 3, 3);
+    CHECK_EQ(c.peek(17, 3, 3), -1);
+    c.commit(pending, true);
+    CHECK(c.peek(17, 3, 3) >= 0);
+}
+
 void test_plan_tiles_order() {
     // A 4x3 view (the panel's 800x386 at some offsets) starting at tile (10, 20). Nothing cached.
     om::map::ViewTiles vt;
@@ -445,6 +656,9 @@ int main() {
     test_pan_and_zoom();
     test_tile_cache();
     test_cache_pending_is_untouchable();
+    test_block_search();
+    test_placeholders();
+    test_peek_does_not_touch_lru();
     test_plan_tiles_order();
     test_read_range_above_2gib();
 

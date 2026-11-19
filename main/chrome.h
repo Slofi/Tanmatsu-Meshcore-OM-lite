@@ -31,6 +31,15 @@ int drawPageHead(Screen& s, const char* title, const char* right_text);
 // S513/EST-435: it also draws the app's ONE notice, just above itself, when one is live — see noticeSet().
 void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_count);
 
+// One key cap, the hint bar's own style (S514/EST-444): dark plate, 1 px outline, dim ink. The bar's chips and
+// the Chat composer's Enter cap both call this, so "the same key-cap style" is one function, not two lookalikes.
+void drawKeyCap(Screen& s, int x, int y, int w, int h, const char* text, uint16_t ink);
+
+// The composer's Enter cap: the same cap with a drawn return arrow before the word (the generated font carries
+// Latin-1 + Latin Extended-A only, so there is no U+21B5 glyph), centred as one group. `ink` is the whole cap's
+// ink: kDimmer while the draft is empty, kInk once there is text.
+void drawEnterKeyCap(Screen& s, int x, int y, int w, int h, uint16_t ink);
+
 // --------------------------------------------------------------------------------- the one notice (S513/EST-435)
 // Short-lived texts ("Advert already sent, wait 4 s", later "New node: …") appear on EVERY page, so they cannot
 // belong to a page's view: they belong to the chrome. One slot for the whole app, the newest wins, and it is

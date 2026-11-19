@@ -104,4 +104,10 @@ constexpr Page page_for_symbol(Key k) {
   }
 }
 
+// S514/EST-444 (Filip): the symbol key OF THE PAGE ALREADY ON SCREEN returns to that page's top level.
+// One predicate, so the router and a test cannot disagree about what "own key" means.
+constexpr bool is_own_symbol(Key k, Page page) {
+  return is_symbol(k) && page_for_symbol(k) == page;
+}
+
 }  // namespace tm

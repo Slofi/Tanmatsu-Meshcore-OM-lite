@@ -43,6 +43,15 @@ struct OpenPack {
     bool     pack_open = false;
     char     drive     = 0;         // the FatFs drive the pack was found on ('0'..'9'), for the log and errors
     uint32_t count     = 0;
+    // S514: the block search's PSRAM storage. Sized from `count` when the pack opens (NO index read at open);
+    // the block keys fill lazily as searches visit them. ~132 KB for z17, well under the 512 KB budget.
+    om::map::BlockCache block;
+    om::map::Entry*     block_key_storage  = nullptr;
+    uint8_t*            block_key_valid    = nullptr;
+    om::map::Entry*     block_lru_storage  = nullptr;
+    uint32_t*           block_lru_id       = nullptr;
+    uint32_t*           block_lru_got      = nullptr;
+    uint8_t*            block_lru_valid    = nullptr;
 };
 
 OpenPack           g_pack;
@@ -68,27 +77,20 @@ volatile bool g_landed = false;
 jpeg_decoder_handle_t g_hw          = nullptr;
 bool                  g_hw_rejected = false;
 
-// Where one tile of the index sits, remembered per visible COLUMN. The index is sorted by (x, y), so once one
-// tile of a column is located the rest of that column is a fixed distance away, and a binary search (S503
-// measured ~18 card reads, ~30 ms) is paid once per column instead of once per tile. Keyed by the column on
-// purpose: the centre-out plan alternates between neighbouring columns inside a row, so a row-keyed hint was
-// overwritten by the next request and saved nothing (measured S506: 249 reads for 14 tiles).
-// Every use is verified against the record it lands on, so a stale hint costs one read, never a wrong tile.
-struct RowHint {
-    bool     used   = false;
-    uint32_t x      = 0;
-    uint32_t y      = 0;
-    uint32_t record = 0;
-};
-constexpr int kHints = 8;   // a 386 px view is at most 5 columns wide; 8 slots means no two of them collide
-RowHint       g_hint[kHints];
+// S514/EST-443: the old per-column RowHint is GONE. It was the S506 workaround for the ~18-read binary search
+// (one full search per column, one 24-byte read per tile after that). The block search now answers a tile in at
+// most one 4 KB block read plus the record read, and its key cache makes the tree top free; a hint would ADD a
+// record read on every tile whose block is already cached. Host measurement (test_map.cpp): a 15-tile view is
+// 166 reads with the plain search and 0.0/tile on the block search once warm.
 
 // S513: a card read that failed is logged ONCE per fill, with its offset. Silence is what made the z17 holes
 // invisible for a whole session: the tiles just landed in the failed ring and the map drew void.
 bool g_read_fail_logged = false;
 
-// What one drain of the queue cost, logged once, so the glass gives a number instead of a feel.
+// What one drain of the queue cost, logged once, so the glass gives a number instead of a feel. S514: the line
+// carries the zoom and the reads per tile, so the next glass test reads the improvement directly.
 int      g_fill_tiles    = 0;
+int      g_fill_z        = 0;
 int64_t  g_fill_start_us = 0;
 uint32_t g_card_reads    = 0;   // index records read since the fill started
 
@@ -104,11 +106,37 @@ bool readRecord(void* ctx, uint32_t i, om::map::Entry* out) {
     return om::map::decodeEntry(rec, out);
 }
 
+// S514: one card read for a whole 4 KB block (up to 170 records). This is the block search's second level, so the
+// fill pays one read for the tile's block instead of one per binary-search probe.
+uint32_t readBlockRecords(void* ctx, uint32_t first, om::map::Entry* out, uint32_t cap) {
+    FILE* f = static_cast<FILE*>(ctx);
+    if (f == nullptr || out == nullptr || cap == 0 || cap > om::map::kBlockRecords) return 0;
+    if (first >= g_pack.count) return 0;
+    uint32_t n = g_pack.count - first;
+    if (n > cap) n = cap;
+    ++g_card_reads;
+    if (fseek(f, (long)first * (long)om::map::kIdxRecordBytes, SEEK_SET) != 0) return 0;
+    static uint8_t buf[om::map::kBlockRecords * om::map::kIdxRecordBytes];
+    const size_t   want = (size_t)n * om::map::kIdxRecordBytes;
+    if (fread(buf, 1, want, f) != want) return 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!om::map::decodeEntry(buf + (size_t)i * om::map::kIdxRecordBytes, &out[i])) return 0;
+    }
+    return n;
+}
+
 void closePack() {
     if (g_pack.idx) fclose(g_pack.idx);
     if (g_pack.pack_open) f_close(&g_pack.pack);
+    // S514: the block cache is owned by the open pack; free it with it, so a zoom across a band boundary does not
+    // leak 132 KB of PSRAM per pack.
+    heap_caps_free(g_pack.block_key_storage);
+    heap_caps_free(g_pack.block_key_valid);
+    heap_caps_free(g_pack.block_lru_storage);
+    heap_caps_free(g_pack.block_lru_id);
+    heap_caps_free(g_pack.block_lru_got);
+    heap_caps_free(g_pack.block_lru_valid);
     g_pack = OpenPack{};
-    for (int i = 0; i < kHints; i++) g_hint[i] = RowHint{};
 }
 
 // The FatFs drive the packs are on. This is NOT guessed and it is not the mount point: the drive letter is
@@ -180,6 +208,49 @@ bool ensurePack(int z) {
     g_pack.pack_open = true;
     g_pack.drive     = drive;
     g_pack.count     = (uint32_t)(size / (long)om::map::kIdxRecordBytes);
+
+    // S514: size the block search's PSRAM. This is allocation only — opening a pack reads NO index records, so it
+    // stays fast; the block keys fill lazily as searches visit them. If PSRAM is short, the pack still works: the
+    // search falls back to the old binary search (correct, just more reads).
+    const uint32_t blocks = om::map::blockCount(g_pack.count);
+    g_pack.block_key_storage = (om::map::Entry*)heap_caps_malloc((size_t)blocks * sizeof(om::map::Entry),
+                                                                 MALLOC_CAP_SPIRAM);
+    g_pack.block_key_valid   = (uint8_t*)heap_caps_calloc(blocks, 1, MALLOC_CAP_SPIRAM);
+    g_pack.block_lru_storage = (om::map::Entry*)heap_caps_malloc(
+        (size_t)om::map::kBlockLruSlots * om::map::kBlockRecords * sizeof(om::map::Entry), MALLOC_CAP_SPIRAM);
+    g_pack.block_lru_id    = (uint32_t*)heap_caps_calloc(om::map::kBlockLruSlots, sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+    g_pack.block_lru_got   = (uint32_t*)heap_caps_calloc(om::map::kBlockLruSlots, sizeof(uint32_t), MALLOC_CAP_SPIRAM);
+    g_pack.block_lru_valid = (uint8_t*)heap_caps_calloc(om::map::kBlockLruSlots, 1, MALLOC_CAP_SPIRAM);
+    if (g_pack.block_key_storage && g_pack.block_key_valid && g_pack.block_lru_storage && g_pack.block_lru_id &&
+        g_pack.block_lru_got && g_pack.block_lru_valid) {
+        g_pack.block.key         = g_pack.block_key_storage;
+        g_pack.block.key_valid   = g_pack.block_key_valid;
+        g_pack.block.key_cap     = blocks;
+        g_pack.block.block       = g_pack.block_lru_storage;
+        g_pack.block.block_id    = g_pack.block_lru_id;
+        g_pack.block.block_got   = g_pack.block_lru_got;
+        g_pack.block.block_valid = g_pack.block_lru_valid;
+        g_pack.block.lru_slots   = om::map::kBlockLruSlots;
+        g_pack.block.next        = 0;
+        ESP_LOGI(TAG, "z%d: block index %u block(s), %u B keys + %u B LRU", z, (unsigned)blocks,
+                 (unsigned)(blocks * sizeof(om::map::Entry)),
+                 (unsigned)(om::map::kBlockLruSlots * om::map::kBlockRecords * sizeof(om::map::Entry)));
+    } else {
+        heap_caps_free(g_pack.block_key_storage);
+        heap_caps_free(g_pack.block_key_valid);
+        heap_caps_free(g_pack.block_lru_storage);
+        heap_caps_free(g_pack.block_lru_id);
+        heap_caps_free(g_pack.block_lru_got);
+        heap_caps_free(g_pack.block_lru_valid);
+        g_pack.block_key_storage = nullptr;
+        g_pack.block_key_valid   = nullptr;
+        g_pack.block_lru_storage = nullptr;
+        g_pack.block_lru_id      = nullptr;
+        g_pack.block_lru_got     = nullptr;
+        g_pack.block_lru_valid   = nullptr;
+        g_pack.block             = om::map::BlockCache{};
+        ESP_LOGW(TAG, "z%d: no PSRAM for the block index; binary search per tile", z);
+    }
     ESP_LOGI(TAG, "z%d: pack %s open on drive %c:, %u tiles, %lu B", z, dir, drive, (unsigned)g_pack.count,
              (unsigned long)f_size(&g_pack.pack));
     return true;
@@ -211,27 +282,20 @@ uint16_t* slotPixels(int slot) {
 // ---------------------------------------------------------------------------------------------- index lookup
 
 int findRecord(uint8_t z, uint32_t x, uint32_t y) {
+    // S514: the block search when its PSRAM is there, the old binary search otherwise. Same answer either way;
+    // the host test pins that equality on a synthetic index.
+    if (g_pack.block.key_cap > 0) {
+        return om::map::findTileBlocks(g_pack.count, readRecord, readBlockRecords, g_pack.idx, g_pack.block, z, x, y);
+    }
     return om::map::findTile(g_pack.count, readRecord, g_pack.idx, z, x, y);
 }
 
 bool lookupEntry(uint8_t z, uint32_t x, uint32_t y, om::map::Entry* out) {
-    RowHint& h = g_hint[x & (kHints - 1)];   // per COLUMN: the plan walks a column's tiles one after another
-    if (h.used && h.x == x) {
-        const long rec = (long)h.record + ((long)y - (long)h.y);
-        if (rec >= 0 && (uint32_t)rec < g_pack.count) {
-            if (readRecord(g_pack.idx, (uint32_t)rec, out) && out->z == z && out->x == x && out->y == y) {
-                return true;   // the hint was right: one card read instead of a search
-            }
-        }
-    }
+    // S514: no column hint any more — the block search reads the block once and the key cache makes the tree top
+    // free, so a hint's extra record read would only add card traffic (see the comment above findRecord).
     const int record = findRecord(z, x, y);
     if (record < 0) return false;   // a hole in the pack
-    if (!readRecord(g_pack.idx, (uint32_t)record, out)) return false;
-    h.used   = true;
-    h.x      = x;
-    h.y      = y;
-    h.record = (uint32_t)record;
-    return true;
+    return readRecord(g_pack.idx, (uint32_t)record, out);
 }
 
 // Read the compressed bytes of one tile into a fresh PSRAM buffer. nullptr = the pack does not have it, or the card
@@ -356,8 +420,11 @@ bool decodeInto(uint8_t z, uint32_t x, uint32_t y, uint16_t* out, int* out_w, in
 void logFill() {
     if (g_fill_tiles == 0) return;
     const long total_ms = (long)((esp_timer_get_time() - g_fill_start_us) / 1000);
-    ESP_LOGI(TAG, "fill: %d tile(s) in %ld ms (%u card reads, %s decode)", g_fill_tiles, total_ms,
-             (unsigned)g_card_reads, g_hw ? "hardware" : "software");
+    // S514/EST-443 item 3: the zoom and the reads per tile, so the next glass test reads the improvement directly:
+    // "fill z15: 12 tile(s) in 309 ms (73 card reads, 6.1/tile, hardware decode)".
+    ESP_LOGI(TAG, "fill z%d: %d tile(s) in %ld ms (%u card reads, %.1f/tile, %s decode)", g_fill_z, g_fill_tiles,
+             total_ms, (unsigned)g_card_reads, (double)g_card_reads / (double)g_fill_tiles,
+             g_hw ? "hardware" : "software");
     g_fill_tiles = 0;
 }
 
@@ -479,6 +546,23 @@ bool drawTile(uint8_t z, uint32_t x, uint32_t y, int dx, int dy, TileBlit blit, 
     return true;
 }
 
+bool drawTileScaled(uint8_t z, uint32_t x, uint32_t y, int sx, int sy, int sw, int sh, int dx, int dy, int dw,
+                    int dh, TileBlitScaled blit, void* ctx) {
+    if (!g_ready || g_lock == nullptr || blit == nullptr) return false;
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return false;
+    if (sx < 0 || sy < 0 || sx + sw > kTileSide || sy + sh > kTileSide) return false;
+    if (xSemaphoreTake(g_lock, pdMS_TO_TICKS(50)) != pdTRUE) return false;
+    // peek(), NOT find(): a placeholder must not touch the LRU and evict a tile the fill is about to use.
+    const int slot = g_cache.peek(z, x, y);
+    if (slot < 0 || g_pixels[slot] == nullptr) {
+        xSemaphoreGive(g_lock);
+        return false;
+    }
+    blit(g_pixels[slot], kTileSide, kTileSide, sx, sy, sw, sh, dx, dy, dw, dh, ctx);
+    xSemaphoreGive(g_lock);
+    return true;
+}
+
 int showView(uint8_t z, const om::map::ViewTiles& vt) {
     if (!g_ready || g_lock == nullptr) return 0;
     xSemaphoreTake(g_lock, portMAX_DELAY);
@@ -491,8 +575,9 @@ int showView(uint8_t z, const om::map::ViewTiles& vt) {
     g_req_n = n;
     g_req_i = 0;
     if (n > 0) {
-        if (!g_busy) {   // a new fill starts: reset the accounting
+        if (!g_busy || g_fill_z != z) {   // a new fill (or a zoom mid-fill): reset the accounting
             g_fill_tiles       = 0;
+            g_fill_z           = z;
             g_card_reads       = 0;
             g_read_fail_logged = false;   // one read failure per fill is logged, not one per tile
             g_fill_start_us    = esp_timer_get_time();

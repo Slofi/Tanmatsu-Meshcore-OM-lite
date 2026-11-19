@@ -286,9 +286,19 @@ def hint_bar(d, page, actions):
         text(d, (x, cy), what, f, P['Dimmer'], anchor='rm')
         x -= tw(f, what) + 7
         kw = tw(fm, keys) + 12
-        plate(d, [x - kw, cy - 9, x, cy + 9], P['Panel2'], P['KeyLine'], r=3)
-        text(d, (x - kw / 2, cy), keys, fm, P['Dim'], anchor='mm')
+        key_cap(d, [x - kw, cy - 9, x, cy + 9], keys, P['Dim'], fm)
         x -= kw + 16
+
+
+def key_cap(d, box, label, ink, f=None):
+    """One key cap in the hint bar's own style (S514/EST-444): dark plate, 1 px outline, centred ink.
+
+    The bar's chips and the Chat composer's Enter cap share this, exactly as main/chrome.cpp::drawKeyCap
+    does on the device, so the preview cannot draw a filled "button" the panel no longer has.
+    """
+    plate(d, box, P['Panel2'], P['KeyLine'], r=3)
+    f = f or font(FONT_MONO, TM['f_hint'])
+    text(d, ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), label, f, ink, anchor='mm')
 
 
 def new_screen():
@@ -646,8 +656,10 @@ def chat():
     d.rectangle([x + 12, ch + 12, x + 13, ch + 28], fill=P['Acc'])   # caret, gold like the L2's
     text(d, (x + 22, ch + 20), 'message the channel, Enter sends', font(FONT_MONO, TM['f_meta']),
          P['Dimmer'], anchor='lm')
-    plate(d, [x + rw - 52, ch, x + rw, ch + 40], P['SelBg2'], P['Acc'], r=4)
-    text(d, (x + rw - 26, ch + 20), 'Send', font(FONT_SANS, TM['f_body']), P['AccInk'], anchor='mm')
+    # S514/EST-444: the Enter key cap in the hint bar's style, not a filled "Send" button; the draft is
+    # empty here, so the cap is dim.
+    key_cap(d, [x + rw - 84, ch + 6, x + rw - 8, ch + 34], '↵ Enter', P['Dimmer'],
+            font(FONT_SANS, TM['f_hint']))
 
     hint_bar(d, 'chat', [('↑↓', 'move'), ('↵', 'open'), ('r', 'reply'), ('esc', 'back')])
     return save(img, '2026-11-13-chat.png')
@@ -1230,13 +1242,14 @@ DM_THREAD = [
 ]
 
 
-def dm_send():
-    """OM Lite > Chat > DM thread, SENDING (S513/EST-439, items 3 and 4).
+def dm_enter():
+    """OM Lite > Chat > DM thread, with the Enter key cap (S513/EST-439; S514/EST-444 rework).
 
     The open DM view: our own messages on the right under "you", each with its state AFTER the time — "delivered"
     once the ACK came back, "sending" until it does (and "no confirmation" after the last attempt, which the
     drawing code takes from the L2's DmState words; the font has no check glyph, so the word is drawn). The
-    composer is the channel's own, because a DM now types and sends the same way.
+    composer is the channel's own, because a DM types and sends the same way, and its right end is now the
+    hint bar's "↵ Enter" key cap instead of the old filled Send button (empty draft = dim).
     """
     img, d = new_screen()
     W, H, pad = TM['W'], TM['H'], TM['pad']
@@ -1277,20 +1290,20 @@ def dm_send():
             yy += 20
         yy += 14
 
-    # the composer, the same one a channel has
+    # the composer, the same one a channel has; S514/EST-444: the Enter key cap, dim while the draft is empty
     ch = H - TM['hint_h'] - 56
     plate(d, [pad, ch, W - pad, ch + 44], P['FieldBg'], P['Line'], r=4)
     text(d, (pad + 12, ch + 22), 'message this contact, Enter sends', font(FONT_MONO, TM['f_meta']),
          P['Dimmer'], anchor='lm')
-    plate(d, [W - pad - 94, ch, W - pad - 8, ch + 44], P['SelBg2'], P['Acc'], r=4)
-    text(d, (W - pad - 51, ch + 22), 'Send', font(FONT_SANS, TM['f_body']), P['AccInk'], anchor='mm')
+    key_cap(d, [W - pad - 84, ch + 8, W - pad - 8, ch + 36], '↵ Enter', P['Dimmer'],
+            font(FONT_SANS, TM['f_hint']))
 
     hint_bar(d, 'chat', [('type', 'write'), ('↑↓', 'scroll'), ('↵', 'send'), ('esc', 'back')])
-    return save(img, '2026-11-18-dm-send.png')
+    return save(img, '2026-11-19-dm-enter.png')
 
 
 RENDERERS = dict(launcher=launcher, menu=menu, nodes=nodes, chat=chat, chat2=chat_cards,
-                 chat_dm=chat_dm_column, dm_send=dm_send, map=map_page, rptr=rptr, settings=settings)
+                 chat_dm=chat_dm_column, dm_enter=dm_enter, map=map_page, rptr=rptr, settings=settings)
 
 
 def main(argv):

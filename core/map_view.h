@@ -89,6 +89,10 @@ struct TileCache {
     // Read-only query, no LRU effect: what state is this tile in? Empty when it is in no slot.
     SlotState stateOf(uint8_t z, uint32_t x, uint32_t y) const;
 
+    // Read-only READY lookup, no LRU effect: the slot holding this decoded tile, or -1. The placeholder path
+    // uses this instead of find(), because a stand-in must never evict a tile the fill still needs.
+    int peek(uint8_t z, uint32_t x, uint32_t y) const;
+
     // Reserve a slot to decode into: an empty one if there is, else the least recently used READY one. Returns
     // -1 when every slot is pending, which the caller must treat as "try again in a moment", never as a miss.
     // The slot comes back Pending.
@@ -105,6 +109,40 @@ struct TileCache {
     // Clear (e.g. when the pack changes or the card goes away).
     void reset();
 };
+
+// ----------------------------------------------------------------------------------------------- placeholders
+// While a tile is still Pending/Empty the page draws a scaled stand-in from a tile the cache ALREADY holds,
+// rather than the void colour. This section is geometry only; the caller asks the cache whether the named source
+// is Ready and blits it without touching the cache's LRU (TileCache::peek).
+//
+// Zooming IN the stand-in is the parent (z-1) tile's quarter that covers the target, upscaled 2x. Zooming OUT it
+// is the four children (z+1), each downscaled 1/2 into its quadrant; a missing child leaves its quadrant void.
+constexpr int kPlaceholderMax = 4;
+
+struct Placeholder {
+    uint8_t  z = 0;    // source tile
+    uint32_t x = 0;
+    uint32_t y = 0;
+    int      sx = 0;   // source rectangle inside the source 256x256 tile
+    int      sy = 0;
+    int      sw = 0;
+    int      sh = 0;
+    int      dx = 0;   // destination rectangle inside the target 256x256 tile
+    int      dy = 0;
+    int      dw = 0;
+    int      dh = 0;
+};
+
+// Which way the view is moving decides which stand-in is the right one. Same = first draw or a pan: the
+// parent is used, because it is the cheaper single read.
+enum class ZoomDir : uint8_t { In = 0, Out = 1, Same = 2 };
+
+// The parent stand-in for tile (z,x,y): exactly one entry. Returns 0 at kMinZoom, where no z8 records exist.
+int parentPlaceholder(int z, uint32_t x, uint32_t y, Placeholder* out);
+
+// The four child stand-ins, row-major (top-left, top-right, bottom-left, bottom-right). Returns 0 at kMaxZoom,
+// where no z18 records exist, and skips a child past the last tile of z+1.
+int childPlaceholder(int z, uint32_t x, uint32_t y, Placeholder* out, int cap);
 
 // ----------------------------------------------------------------------------------------------- what to fetch
 // One tile for the worker to decode.

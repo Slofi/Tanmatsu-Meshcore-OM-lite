@@ -40,7 +40,23 @@ RouteResult Router::go(Page target, Registry& registry) {
 }
 
 RouteResult Router::symbol(Key key, Registry& registry) {
-  return go(page_for_symbol(key), registry);
+  const Page target = page_for_symbol(key);
+  RouteResult r;
+  r.page = current_;
+
+  // S514/EST-444 (Filip): the symbol key of the page you are ALREADY on goes to that page's top
+  // level. The router only DECIDES that it is the page's own key; the module that owns the inner
+  // level closes it (Core calls Module::onTop). No page change, so at the top this is a no-op.
+  if (target != Page::Count && is_own_symbol(key, current_)) {
+    const Module* m = registry.moduleForPage(current_);
+    if (m != nullptr && m->available && registry.isRunning(m->id)) {
+      r.action = RouteAction::Top;
+      r.module = m->id;
+    }
+    return r;   // the Launcher (no module) and a stopped owner change nothing
+  }
+
+  return go(target, registry);
 }
 
 RouteResult Router::back(Registry& registry) {

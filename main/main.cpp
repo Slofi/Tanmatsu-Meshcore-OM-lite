@@ -257,7 +257,7 @@ void omStop(tm::Core& core) {
     }
 }
 
-// Field order is core/module.h: id, name, meta, pages, available, owns, start, stop, tick, draw, onKey.
+// Field order is core/module.h: id, name, meta, pages, available, owns, start, stop, tick, draw, onKey, onTop.
 tm::Module g_om_lite = {
     "om-lite",
     "OM Lite",
@@ -270,15 +270,16 @@ tm::Module g_om_lite = {
     nullptr,              // tick
     nullptr,              // draw
     nullptr,              // onKey
+    nullptr,              // onTop — installed in app_main, where the Chat open state lives (S514/EST-444)
 };
 
 // S513/EST-432: the two LATER modules are real registry rows with available = false, so the menu's LATER
 // chip comes from the registry and not from a string in the shell. They own nothing, have no pages and no
 // hooks: listed, never startable, and neither app is built.
 tm::Module g_ops_toc = {"ops-toc", "OPS-TOC", "field ops map & checklists", 0, false, tm::Resource::None,
-                        nullptr, nullptr, nullptr, nullptr, nullptr};
+                        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 tm::Module g_mesh_torry = {"mesh-torry", "Mesh-Torry", "the territory game", 0, false, tm::Resource::None,
-                           nullptr, nullptr, nullptr, nullptr, nullptr};
+                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 
 // --------------------------------------------------------------------------------------------- helpers
 void batteryPoll() {
@@ -586,7 +587,10 @@ extern "C" void app_main(void) {
     // in core/chat_cards.h. `chat_focus` is the row in the Channels column (and therefore the channel index);
     // `chat_dm_focus` is the row in the Direct messages column, which cannot be focused while it has no cards.
     int    chat_col        = om::mc::kColChannels;
-    int    chat_focus      = 0;
+    // S514/EST-444: the six variables below are `static` so the module's onTop hook (installed below,
+    // next to the Chat state it closes) can be a captureless lambda. `chat_focus` doubles as the open
+    // channel's index, which is why the hook needs it.
+    static int chat_focus  = 0;
     int    chat_dm_focus   = 0;
     // The Direct messages column's model. There is no TXT_MSG receive or send in this app yet, so the count is 0
     // and the page draws the L2's "No direct messages yet" line; a DM slice fills this and the view's dms[] and
@@ -594,18 +598,18 @@ extern "C" void app_main(void) {
     int    chat_dm_count   = 0;
     // Each column scrolls by itself to keep its focused card visible (core/chat_cards::cardScroll).
     int    chat_card_scroll[om::mc::kCardCols] = {0, 0};
-    bool   chat_open     = false;
+    static bool chat_open  = false;
     // S513/EST-434: when the open chat is a DM thread, who it is. `chat_dm_pub` is the thread key; a restored thread
     // may still be prefix-only until an advert fills the rest in (mc_link's rebind).
-    bool   chat_dm_open     = false;
-    uint8_t chat_dm_pub[32] = {0};
+    static bool    chat_dm_open     = false;
+    static uint8_t chat_dm_pub[32]  = {0};
     char   chat_dm_name[32] = "";
     // S503: how many messages the open channel is scrolled BACK from the newest (0 = pinned to the bottom), how
     // far it can go (from the last draw — a channel that all fits has nowhere to scroll), and how many messages it
     // had at the last draw, so arriving messages do not drag the view out from under the reader.
-    int    chat_scroll     = 0;
+    static int chat_scroll     = 0;
     int    chat_max_scroll = 0;
-    int    chat_seen_count = -1;
+    static int chat_seen_count = -1;
     // Step 6: the Map page's view. wx/wy are the world pixel at the top-left of the map area; -1 means
     // "not placed yet", which the first draw turns into central Slovenia at z16.
     int64_t map_wx = -1, map_wy = -1;
@@ -897,6 +901,26 @@ extern "C" void app_main(void) {
     // keyboard event). It was actively harmful after that — it ended the app after 90 quiet seconds, which
     // is exactly what a radio test or an unattended listen looks like. Leave by Esc, which works.
     bool dirty = true;
+
+    // S514/EST-444 (Filip): the module's own-symbol-key hook. Pressing the circle key while a channel or a
+    // DM is open is the Chat page's top level, so it closes exactly as Esc does — the channel/DM is marked
+    // read (store and card), the list comes back, the scroll resets, and the composer text is kept. At the
+    // list, or with no channel open, it answers false: the page is already at its top, nothing changes.
+    // A captureless lambda because Module stores a plain function pointer; the state is `static` above.
+    // `page` is why the guard is first: OM Lite owns five pages, and only the Chat page has this level.
+    g_om_lite.onTop = +[](tm::Core&, tm::Page page) -> bool {
+        if (page != tm::Page::Chat || !chat_open) return false;
+        if (chat_dm_open) {
+            om::mc::noteDmRead(chat_dm_pub);
+            chat_dm_open = false;
+        } else {
+            om::mc::noteChannelRead((uint8_t)chat_focus);
+        }
+        chat_open       = false;
+        chat_scroll     = 0;
+        chat_seen_count = -1;
+        return true;
+    };
 
     // S513/EST-435: an advert press either queues one or says why not, and the sentence comes from the rule itself
     // (core/advert_rule.cpp), so the wording the host test pins is the wording on the glass. A refusal is a 3 s

@@ -208,6 +208,37 @@ int drawPageHead(Screen& s, const char* title, const char* right_text) {
     return head_top + kTmHeadH;
 }
 
+void drawKeyCap(Screen& s, int x, int y, int w, int h, const char* text, uint16_t ink) {
+    // The hint bar's own cap: the fill and the outline are the SAME two colours the bar has always used
+    // (S513), so a chip in the bar and the composer's Enter cap cannot drift apart.
+    s.fillRect(x, y, w, h, rgb565(0x232220));
+    s.frame(x, y, w, h, 1, rgb565(0x3a3936));
+    drawTextCentred(s, Face::Hint, x + w / 2, textBaseline(s, Face::Hint, y, h), text, ink);
+}
+
+void drawEnterKeyCap(Screen& s, int x, int y, int w, int h, uint16_t ink) {
+    s.fillRect(x, y, w, h, rgb565(0x232220));
+    s.frame(x, y, w, h, 1, rgb565(0x3a3936));
+
+    // The return arrow (U+21B5 shape) as strokes: rise at the right, bar to the left, head at the left tip.
+    // 10 px wide inside the cap, vertically centred on the hint face. The font has no such glyph.
+    const Font* f  = fontFor(Face::Hint);
+    const int   tw = (f != nullptr && f->ready()) ? f->textWidth("Enter") : 28;
+    const int   gw = 10;
+    const int   total = gw + 4 + tw;
+    int         gx    = x + (w - total) / 2;
+    if (gx < x + 8) gx = x + 8;
+    const int cy = y + h / 2;
+
+    s.hline(gx + 1, gx + gw, cy + 2, ink);        // bar, under the arrow head
+    s.vline(gx + gw - 1, cy - 3, cy + 3, ink);    // the return's rise
+    s.px(gx + 1, cy + 2, ink);                    // the head: the tip plus two short diagonals
+    s.px(gx + 2, cy + 1, ink);
+    s.px(gx + 2, cy + 3, ink);
+
+    drawText(s, Face::Hint, gx + gw + 4, textBaseline(s, Face::Hint, y, h), "Enter", ink);
+}
+
 void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_count) {
     const int W = kTmW, H = kTmH;
 
@@ -215,15 +246,21 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
     // key hints. It is drawn LAST in the frame's order but it is part of the chrome, so every page gets it without
     // knowing it exists. A page that fills this strip with content loses only the 22 px behind the plate.
     if (const char* notice = noticeText()) {
-        const Font* f  = fontFor(Face::Hint);
-        const int   tw = (f != nullptr && f->ready()) ? f->textWidth(notice) : 200;
-        const int   ph = 22;
-        const int   pw = tw + 20;
-        const int   px = W - kTmPad - pw;
-        const int   py = H - kTmHintH - ph - 2;
-        drawRoundedRect(s, px, py, pw, ph, 4, kPanel2);
-        s.frame(px, py, pw, ph, 1, kLine);
-        drawText(s, Face::Hint, px + 10, textBaseline(s, Face::Hint, py, ph), notice, kAccInk);
+        // S514 (Claude, Filip: "those pop-ups are too small, make them bigger and centered"): a panel in the middle
+        // of the screen in the Title face, gold outline, sized to the text (at least 360 px, never wider than the
+        // screen). It is drawn last, over the page, and goes with the next repaint after its 3 s.
+        const Font* f  = fontFor(Face::Title);
+        const int   tw = (f != nullptr && f->ready()) ? f->textWidth(notice) : 300;
+        const int   ph = 72;
+        int         pw = tw + 64;
+        if (pw < 360) pw = 360;
+        if (pw > W - 2 * kTmPad) pw = W - 2 * kTmPad;
+        const int px = (W - pw) / 2;
+        const int py = (H - ph) / 2;
+        drawRoundedRect(s, px, py, pw, ph, 8, kPanel2);
+        s.frame(px, py, pw, ph, 2, kAcc);
+        const int tx = (tw + 64 <= pw) ? px + (pw - tw) / 2 : px + 32;
+        drawText(s, Face::Title, tx, textBaseline(s, Face::Title, py, ph), notice, kAccInk);
     }
 
     s.fillRect(0, H - kTmHintH, W, kTmHintH, kBar);
@@ -236,9 +273,7 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
     for (int i = 0; i < hint_count && hints && i < 4; i++) {
         if (hints[i].key == nullptr || hints[i].key[0] == '\0') continue;
         const int kw = 30;
-        s.fillRect(hx, cy - 9, kw, 18, rgb565(0x232220));
-        s.frame(hx, cy - 9, kw, 18, 1, rgb565(0x3a3936));
-        drawTextCentred(s, Face::Hint, hx + kw / 2, bl, hints[i].key, kDim);
+        drawKeyCap(s, hx, cy - 9, kw, 18, hints[i].key, kDim);
         hx += kw + 6;
         drawText(s, Face::Hint, hx, bl, hints[i].label, kDimmer);
         const Font* f = fontFor(Face::Hint);

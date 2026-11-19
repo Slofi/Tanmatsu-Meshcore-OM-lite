@@ -226,11 +226,11 @@ void drawChat(Screen& s, const ChatView& v) {
             const int   cx = kTmPad + 12 + tw + 3;
             s.fillRect(cx, cy0 + 12, 2, kTmChatComposerH - 24, kAcc);   // caret
         }
-        const int bw = 86, bh = 34;
+        // S514/EST-444 (Filip): no filled "Send" button — the physical key is named in the hint bar's own cap
+        // style, "↵ Enter". Empty draft = dim, text = normal ink; Enter sends exactly as before.
+        const int bw = 76, bh = 26;
         const int bx = W - kTmPad - bw - 8, by = cy0 + (kTmChatComposerH - bh) / 2;
-        s.fillRect(bx, by, bw, bh, kSelBg2);
-        s.frame(bx, by, bw, bh, 1, kAcc);
-        drawTextCentred(s, Face::Hint, bx + bw / 2, textBaseline(s, Face::Hint, by, bh), "Send", kAccInk);
+        drawEnterKeyCap(s, bx, by, bw, bh, empty ? (uint16_t)kDimmer : (uint16_t)kInk);
     }
 
     static const HintItem hints_list[] = {{"up/dn", "move"}, {"l/r", "column"}, {"ret", "open"}, {"esc", "back"}};
