@@ -26,6 +26,10 @@ idf_component_register(
         "map_page.cpp"
         # EST-445: Settings, part 1 (frame + General). The rules are core/settings.h (host-tested).
         "settings_page.cpp"
+        # S514/EST-450: the one owner of the I2S channel and the NVS sound settings. The synth itself
+        # is compiled from the L2's own firmware/src/sound_synth.cpp in the core component.
+        "audio_out.cpp"
+        "sound_store.cpp"
     INCLUDE_DIRS
         "."
     # The six Tanmatsu faces (tools/mkfonts.py -> main/fonts/*.bin, decoded by font.cpp).

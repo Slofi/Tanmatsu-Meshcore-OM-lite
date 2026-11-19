@@ -60,6 +60,9 @@ extern "C" {
 #include "channel_scope.h"   // S513/EST-440: the scope modes and the region-name rule the CHAT rows use
 #include "contact_admin.h"   // S514/EST-447: remove/clear a contact, type words, the notice default
 #include "map_settings.h"    // S514/EST-447: the MAP rows' choices and the last-position write rule
+#include "sound_events.h"    // S514/EST-450: the events, their L2 defaults and every sound rule
+#include "sound_store.h"     // S514/EST-450: the sound settings' NVS blob (mcsnd)
+#include "audio_out.h"       // S514/EST-450: the one owner of I2S (queue-only, never blocks the UI)
 #include "tm_theme.h"
 #include "../../firmware/src/ui/theme.h"   // the L2 palette (kBg/kInk/kDim): one source of truth, never copied
 
@@ -273,6 +276,11 @@ enum : uint16_t {
     kSetRowName = 1,
     kSetRowAdvertNow,
     kSetRowAdvertInterval,
+    // S514/EST-450: the SOUND section. Event rows carry kSetRowSoundEventBase + the Event value, so
+    // the row id can never be mistaken for one of the three rows above.
+    kSetRowSoundMaster = 10,
+    kSetRowSoundVolume,
+    kSetRowSoundEventBase = 20,
 };
 
 static char gset_name[32], gset_pub[32], gset_adv[8], gset_freq[24], gset_bw[16];
@@ -377,6 +385,53 @@ void generalCycleAdvert(tm::Core&, const tm::SettingRow&) {
     }
 }
 
+// S514/EST-450: the SOUND section. Every value is read from the live store (sound_store), never from a
+// copy kept for the panel. The event rows are SubPages; the picker itself is built further down from the
+// L2's own library, grouped by its shapes.
+bool     g_sound_sub          = false;
+int      g_sound_event        = -1;
+int      g_sound_sub_focus    = -1;
+int      g_sound_sub_scroll   = 0;
+uint8_t  g_sound_preview_id   = 0xFE;   // no preview yet (real ids are < 0x100 and Off is 0xFF)
+int      g_sound_preview_row  = -1;
+
+constexpr uint8_t kNoSoundPreview = 0xFE;
+
+const char* gsetSoundMaster(tm::Core&) {
+    return om::soundstore::settings().master ? "On" : "Off";
+}
+const char* gsetSoundVolume(tm::Core&) {
+    static char buf[8];
+    snprintf(buf, sizeof(buf), "%u%%", (unsigned)om::soundstore::settings().volume);
+    return buf;
+}
+const char* gsetSoundChoiceValue(tm::Core&, const tm::SettingRow& row) {
+    const int ev = (int)row.id - (int)kSetRowSoundEventBase;
+    if (ev < 0 || ev >= tm::soundcfg::kEventCount) return "";
+    return tm::soundcfg::choiceName(om::soundstore::settings().ids[ev]);
+}
+
+void generalToggleSound(tm::Core&, const tm::SettingRow&) {
+    const bool on = !om::soundstore::settings().master;
+    if (!om::soundstore::setMaster(on)) {
+        om::ui::noticeSet("Sound setting not saved", 3000);
+    } else {
+        // A phrase already in the queue must not keep playing after "Off"; "On" restores the stored
+        // volume for the next phrase (the audio task applies it again before every play).
+        om::audioout::setVolume(on ? om::soundstore::settings().volume : 0);
+        ESP_LOGI(TAG, "settings: sound master -> %s", on ? "on" : "off");
+    }
+}
+void generalCycleSoundVolume(tm::Core&, const tm::SettingRow&) {
+    const uint8_t next = tm::soundcfg::nextVolume(om::soundstore::settings().volume);
+    if (!om::soundstore::setVolume(next))
+        om::ui::noticeSet("Volume not saved", 3000);
+    else {
+        om::audioout::setVolume(next);
+        ESP_LOGI(TAG, "settings: volume -> %u%%", (unsigned)next);
+    }
+}
+
 static const tm::SettingRow kGeneralNodeRows[] = {
     {tm::SettingKind::SubPage, kSetRowName, "Name", "", gsetName, nullptr},
     {tm::SettingKind::Info, 0, "Public key", "", gsetPublicKey, nullptr},
@@ -384,6 +439,22 @@ static const tm::SettingRow kGeneralNodeRows[] = {
 };
 static const tm::SettingRow kGeneralAdvertRows[] = {
     {tm::SettingKind::Cycle, kSetRowAdvertInterval, "Automatic advert", "", gsetAdvert, generalCycleAdvert},
+};
+static const tm::SettingRow kGeneralSoundRows[] = {
+    {tm::SettingKind::Toggle, kSetRowSoundMaster, "Sound", "", gsetSoundMaster, generalToggleSound},
+    {tm::SettingKind::Cycle, kSetRowSoundVolume, "Volume", "", gsetSoundVolume, generalCycleSoundVolume},
+    {tm::SettingKind::SubPage, (uint16_t)(kSetRowSoundEventBase + (int)tm::soundcfg::Event::Message),
+     "Message", "", tm::RowValueFn(gsetSoundChoiceValue), nullptr},
+    {tm::SettingKind::SubPage, (uint16_t)(kSetRowSoundEventBase + (int)tm::soundcfg::Event::Dm),
+     "Direct message", "", tm::RowValueFn(gsetSoundChoiceValue), nullptr},
+    {tm::SettingKind::SubPage, (uint16_t)(kSetRowSoundEventBase + (int)tm::soundcfg::Event::Sent),
+     "Sent", "", tm::RowValueFn(gsetSoundChoiceValue), nullptr},
+    {tm::SettingKind::SubPage, (uint16_t)(kSetRowSoundEventBase + (int)tm::soundcfg::Event::NewNode),
+     "New node", "", tm::RowValueFn(gsetSoundChoiceValue), nullptr},
+    {tm::SettingKind::SubPage, (uint16_t)(kSetRowSoundEventBase + (int)tm::soundcfg::Event::Error),
+     "Error", "", tm::RowValueFn(gsetSoundChoiceValue), nullptr},
+    {tm::SettingKind::SubPage, (uint16_t)(kSetRowSoundEventBase + (int)tm::soundcfg::Event::Boot),
+     "Boot", "", tm::RowValueFn(gsetSoundChoiceValue), nullptr},
 };
 static const tm::SettingRow kGeneralRadioRows[] = {
     {tm::SettingKind::Info, 0, "Frequency", "", gsetFrequency, nullptr},
@@ -404,10 +475,12 @@ static const tm::SettingRow kGeneralDeviceRows[] = {
 static const tm::SettingsSection kGeneralSections[] = {
     {"NODE", kGeneralNodeRows, 3},
     {"ADVERT", kGeneralAdvertRows, 1},
+    {"SOUND", kGeneralSoundRows,
+     (int)(sizeof(kGeneralSoundRows) / sizeof(kGeneralSoundRows[0]))},
     {"RADIO (READ ONLY)", kGeneralRadioRows, 6},
     {"DEVICE (READ ONLY)", kGeneralDeviceRows, 6},
 };
-constexpr int kGeneralSectionCount = 4;
+constexpr int kGeneralSectionCount = 5;
 
 // The CORE's General tab. Not a module: the shell owns it, exactly as the L2's General does.
 const tm::SettingsSection* generalSettings(int* count) {
@@ -739,6 +812,53 @@ const tm::SettingsSection* omLiteSettings(tm::Core&, int* count) {
     return g_om_sections;
 }
 
+// ---- S514/EST-450: the per-event sound picker ---------------------------------------------------------
+// The L2's OWN picker order (EST-369): the whole shared library grouped by SHAPE (Solo, Duo, Trio, Multi,
+// Alert), then Off. The ids are the L2's library ids, which is exactly what NVS holds, so nothing here
+// invents a second numbering. `row.id` is the library id; kSoundPickOffId is the Off row.
+constexpr uint16_t kSoundPickOffId = 0xFFFF;
+constexpr int      kSoundPickMaxRows = 64;
+
+tm::SettingRow      g_sound_pick_rows[kSoundPickMaxRows];
+tm::SettingsSection g_sound_pick_sections[(int)om::sound::kShapeCount + 1];
+
+int buildSoundPickSections() {
+    if (g_sound_event < 0 || g_sound_event >= tm::soundcfg::kEventCount) return 0;
+    const uint8_t current = om::soundstore::settings().ids[g_sound_event];
+    int n = 0;
+    int sections = 0;
+    const int many = om::sound::libraryCount();
+    for (int sh = 0; sh < (int)om::sound::kShapeCount; ++sh) {
+        const om::sound::Shape shape = (om::sound::Shape)sh;
+        const int first = n;
+        for (int i = 0; i < many && n < kSoundPickMaxRows - 1; ++i) {
+            const uint8_t id = om::sound::libraryId(i);
+            if (om::sound::soundShape(id) != shape) continue;
+            const char* name = om::sound::soundName(id);
+            const char* value = id == g_sound_preview_id ? "preview" : (id == current ? "now" : "");
+            g_sound_pick_rows[n++] = tm::SettingRow(tm::SettingKind::Action, (uint16_t)id,
+                                                    name != nullptr ? name : "?", value, nullptr, nullptr);
+        }
+        if (n > first) {
+            g_sound_pick_sections[sections++] =
+                tm::SettingsSection(om::sound::shapeName(shape), &g_sound_pick_rows[first], n - first);
+        }
+    }
+    // Off is its own short section at the end, so a shape can never change meaning when the library grows.
+    const int off_first = n;
+    g_sound_pick_rows[n++] =
+        tm::SettingRow(tm::SettingKind::Action, kSoundPickOffId, "Off",
+                       current == om::sound::kSoundOff ? "now" : "", nullptr, nullptr);
+    g_sound_pick_sections[sections++] = tm::SettingsSection("OFF", &g_sound_pick_rows[off_first], 1);
+    return sections;
+}
+
+const tm::SettingsSection* soundSubSections(int* count) {
+    const int sections = buildSoundPickSections();
+    if (count != nullptr) *count = sections;
+    return sections > 0 ? g_sound_pick_sections : nullptr;
+}
+
 // Field order is core/module.h: id, name, meta, pages, available, owns, start, stop, tick, draw, onKey, onTop,
 // settings.
 tm::Module g_om_lite = {
@@ -989,6 +1109,17 @@ extern "C" void app_main(void) {
     // Step 5: the chat history lives on the card, so it starts only once the card is mounted. A missing card is
     // not fatal: the app runs with RAM-only history and the log says so.
     om::sdhistory::begin();
+    // S514/EST-450: the sound path starts HERE, after the card is mounted and after hostedConnectC6()
+    // above has brought the C6 link up. The BSP already initialised the codec/I2S inside
+    // bsp_device_initialize (common/badge_bsp_device.c:84); audioout::begin() takes that handle rather than
+    // initialising a second channel. A failure is one log line and the app runs silent: no crash, no
+    // boot block.
+    om::soundstore::begin();
+    om::audioout::begin();
+    // Boot is a normal event row but its stored default is Off (the L2's own default is Bell TK-TK).
+    // This is the ONLY place the Boot event is raised: with the default it does nothing, and a sound
+    // Filip chooses in Settings is what he hears on the next start.
+    om::audioout::playEvent(tm::soundcfg::Event::Boot);
     // S513/EST-437: the contacts come back BEFORE the DM logs and before the radio task. That ordering matters:
     // the DM restore then finds its peer already in the table by its full key (instead of adding a prefix-only
     // row), and a DM from a node heard before the restart can be opened without waiting for its next advert.
@@ -1221,6 +1352,15 @@ extern "C" void app_main(void) {
                     sv.sub_max  = tm::kNodeNameMaxBytes;
                     break;
             }
+        } else if (settings_frame.subPage() && g_sound_sub) {
+            // S514/EST-450: the per-event picker. Same row renderer as every tab, grouped by the L2's
+            // shapes. The sub-title names the event; the row's value says "now" (stored) or "preview".
+            int sn = 0;
+            sv.sections      = soundSubSections(&sn);
+            sv.section_count = sn;
+            sv.sub_title     = tm::soundcfg::eventLabel((tm::soundcfg::Event)g_sound_event);
+            sv.focus         = g_sound_sub_focus;
+            sv.scroll        = g_sound_sub_scroll;
         } else if (settings_frame.subPage() && g_nodes_list) {
             // S514/EST-447: the NODES list sub-page. Same row renderer as a tab; the focus/scroll are its own.
             int sn = 0;
@@ -1251,6 +1391,7 @@ extern "C" void app_main(void) {
     // logged, and the tab rows read names/scopes from the live table on every draw.
     auto closeChatPage = [&]() {
         settings_frame.closeSubPage();
+        g_sound_sub    = false;   // S514/EST-450
         g_chat_sub     = ChatSub::None;
         g_chat_field   = ChatField::None;
         g_chat_channel = -1;
@@ -1263,6 +1404,7 @@ extern "C" void app_main(void) {
     auto openChatList = [&](ChatSub sub) {
         g_chat_sub   = sub;
         g_chat_field = ChatField::None;
+        g_sound_sub  = false;   // S514/EST-450: only one sub-page's state may be live
         if (!settings_frame.subPage()) settings_frame.openSubPage();
         int n = 0;
         const tm::SettingsSection* ss = chatSubSections(&n);
@@ -1274,6 +1416,7 @@ extern "C" void app_main(void) {
     // chat pages' focus/scroll (and vice versa); the frame's sub-page depth is shared, as it is for every page.
     auto closeNodesPage = [&]() {
         settings_frame.closeSubPage();
+        g_sound_sub        = false;   // S514/EST-450
         g_nodes_list       = false;
         g_nodes_sub_focus  = -1;
         g_nodes_sub_scroll = 0;
@@ -1283,6 +1426,7 @@ extern "C" void app_main(void) {
         g_chat_sub   = ChatSub::None;
         g_chat_field = ChatField::None;
         g_chat_channel = -1;
+        g_sound_sub  = false;   // S514/EST-450
         if (!settings_frame.subPage()) settings_frame.openSubPage();
         int n = 0;
         const tm::SettingsSection* ss = nodesSubSections(&n);
@@ -1291,6 +1435,7 @@ extern "C" void app_main(void) {
     };
     auto openChatFieldPage = [&](ChatField f, const char* initial, const char* title) {
         g_chat_field = f;
+        g_sound_sub  = false;   // S514/EST-450
         snprintf(g_chat_title, sizeof(g_chat_title), "%s", title);
         snprintf(settings_draft, sizeof(settings_draft), "%s", initial != nullptr ? initial : "");
         settings_draft_len = strlen(settings_draft);
@@ -1924,6 +2069,10 @@ extern "C" void app_main(void) {
                             if (queued) {
                                 ESP_LOGI(TAG, "chat: queued %s (%u chars)", chat_dm_open ? "a DM" : "a channel text",
                                          (unsigned)composer_len);
+                                // S514/EST-450: the L2 plays Sent when the send path ACCEPTS the message.
+                                // Here that acceptance is the radio queue taking it (a real send failure
+                                // is reported by the radio task, which plays Error instead).
+                                om::audioout::playEvent(tm::soundcfg::Event::Sent);
                                 composer[0]           = '\0';
                                 composer_len          = 0;
                                 chat_notice           = nullptr;   // a send that worked clears the last refusal
@@ -1932,6 +2081,8 @@ extern "C" void app_main(void) {
                                 // S513: the queue is FULL (four requests waiting), or the DM peer has no key yet
                                 // (EST-441). Nothing is replaced, so the text stays in the composer and the page
                                 // says why for three seconds.
+                                // S514/EST-450: a send that failed is the error sound's first case.
+                                om::audioout::playEvent(tm::soundcfg::Event::Error);
                                 chat_notice          = ready ? "radio busy, not sent" : chat_notice_buf;
                                 chat_notice_until_us = esp_timer_get_time() + 3 * 1000 * 1000;
                                 ESP_LOGW(TAG, "chat: not sent (%s); the text is kept in the composer",
@@ -2123,6 +2274,77 @@ extern "C" void app_main(void) {
                                 }
                                 dirty = true;
                             }
+                        } else if (settings_frame.subPage() && g_sound_sub) {
+                            // S514/EST-450: the event's picker. Up/Down/Enter/Esc use the SAME list
+                            // arithmetic as every other sub-page; the choice is the part only this page
+                            // has: the first Enter PLAYS the focused sound, the second Enter on that same
+                            // row chooses it. Off is chosen on the first Enter (nothing to preview).
+                            tm::SetKey sk = tm::SetKey::None;
+                            if (k == tm::Key::Up) sk = tm::SetKey::Up;
+                            else if (k == tm::Key::Down) sk = tm::SetKey::Down;
+                            else if (k == tm::Key::Enter) sk = tm::SetKey::Enter;
+                            else if (k == tm::Key::Esc) sk = tm::SetKey::Esc;
+                            else if (is_char && ch == ',') sk = tm::SetKey::Settings;
+
+                            int sn = 0;
+                            const tm::SettingsSection* ss = soundSubSections(&sn);
+                            const tm::SettingsKeyResult r =
+                                tm::settingsSubPageKey(settings_frame, sk, ss, sn, &g_sound_sub_focus,
+                                                       &g_sound_sub_scroll,
+                                                       om::ui::kSetBodyH + om::ui::kSetTabH);
+                            const tm::soundcfg::Event ev =
+                                (tm::soundcfg::Event)g_sound_event;
+                            if (r.event == tm::SettingsEvent::CloseSubPage) {
+                                g_sound_sub        = false;
+                                g_sound_preview_id = kNoSoundPreview;
+                                g_sound_preview_row = -1;
+                            } else if (r.event == tm::SettingsEvent::FocusMoved) {
+                                // A preview belongs to the row it was played on. A clamped Up/Down at
+                                // the end reports the same row, so that case keeps the pending choice.
+                                if (r.row != g_sound_preview_row) {
+                                    g_sound_preview_id  = kNoSoundPreview;
+                                    g_sound_preview_row = -1;
+                                }
+                            } else if (r.event == tm::SettingsEvent::ActionRow) {
+                                const tm::SettingRow* pick = tm::settingsRowAt(ss, sn, r.row);
+                                if (pick != nullptr) {
+                                    const uint8_t id =
+                                        pick->id == kSoundPickOffId
+                                            ? om::sound::kSoundOff
+                                            : (uint8_t)pick->id;
+                                    const bool second = (id != om::sound::kSoundOff &&
+                                                         id == g_sound_preview_id &&
+                                                         r.row == g_sound_preview_row);
+                                    if (id == om::sound::kSoundOff || second) {
+                                        if (!om::soundstore::setChoice(ev, id)) {
+                                            // Keep the picker open so the choice can be tried again.
+                                            om::ui::noticeSet("Sound not saved", 3000);
+                                        } else {
+                                            ESP_LOGI(TAG, "settings: %s sound -> %s",
+                                                     tm::soundcfg::eventKey(ev),
+                                                     tm::soundcfg::choiceName(id));
+                                            g_sound_sub         = false;
+                                            g_sound_preview_id  = kNoSoundPreview;
+                                            g_sound_preview_row = -1;
+                                            // The frame is still at depth 1; close it so the draw returns
+                                            // to the SOUND section at the same focus/scroll it was opened
+                                            // from.
+                                            settings_frame.closeSubPage();
+                                        }
+                                    } else {
+                                        g_sound_preview_id  = id;
+                                        g_sound_preview_row = r.row;
+                                        if (!om::audioout::preview(id)) {
+                                            om::ui::noticeSet(
+                                                om::soundstore::settings().master
+                                                    ? "Sound not available"
+                                                    : "Sound is Off",
+                                                3000);
+                                        }
+                                    }
+                                }
+                            }
+                            dirty = true;
                         } else if (settings_frame.subPage() && g_nodes_list) {
                             // S514/EST-447: the Remove-a-contact list. Same row arithmetic as every other list
                             // sub-page; Enter on a contact raises the shared sheet (nodesSubAction), Esc closes.
@@ -2224,6 +2446,24 @@ extern "C" void app_main(void) {
                                         snprintf(settings_draft, sizeof(settings_draft), "%s",
                                                  om::mc::nodeName());
                                         settings_draft_len = strlen(settings_draft);
+                                    } else if (row != nullptr &&
+                                               row->id >= kSetRowSoundEventBase &&
+                                               row->id <
+                                                   kSetRowSoundEventBase + tm::soundcfg::kEventCount) {
+                                        // S514/EST-450: open this event's picker. The frame already
+                                        // opened the sub-page; this fills its own focus/scroll and clears
+                                        // any left-over preview from the previous event.
+                                        g_sound_event      = (int)row->id - (int)kSetRowSoundEventBase;
+                                        g_sound_sub        = true;
+                                        g_nodes_list       = false;
+                                        g_chat_sub         = ChatSub::None;
+                                        g_chat_field       = ChatField::None;
+                                        g_sound_preview_id = kNoSoundPreview;
+                                        g_sound_preview_row = -1;
+                                        int sn = 0;
+                                        const tm::SettingsSection* ss = soundSubSections(&sn);
+                                        g_sound_sub_focus  = tm::settingsFirstFocusable(ss, sn);
+                                        g_sound_sub_scroll = 0;
                                     }
                                     break;
                                 case tm::SettingsEvent::ToggleValue:

@@ -28,6 +28,7 @@
 #include "mc_dm.h"      // S513/EST-433/434: TXT_MSG open + the two reply frames
 #include "dm_send.h"    // S513/EST-436/439: compose, the PATH parser, the pending/ACK table and the retry rule
 #include "radio_link.h"
+#include "audio_out.h"     // S514/EST-450: the notification sounds (queue-only, never blocks this task)
 #include "settings.h"     // EST-445: the name rule and the advert-interval mapping (pure, host-tested)
 #include "sd_history.h"   // step 5: the chat history on the card
 #include "chat_layout.h"  // step 5 / S503: historyReadCount, the read-prefix rule for the seen point
@@ -962,6 +963,9 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
             }
             (void)dmPush(g_dms, m);
         }
+        // S514/EST-450: a DM to us, after the seen-ring check above dropped our own echo and a
+        // duplicate flood copy. Played before the ACK reply is queued so the sound never delays it.
+        om::audioout::playEvent(tm::soundcfg::Event::Dm);
 
         if (!dm.ack_valid) {
             // CLI_DATA / CLI_COMMAND are shown but never acknowledged (BaseChatMesh.cpp:244): there is no ACK
@@ -1067,6 +1071,10 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
                     snprintf(text, sizeof(text), "New node: %s (%s)", name[0] != '\0' ? name : "?",
                              advertTypeName(type));
                     om::ui::noticeSet(text, 3000);
+                    // S514/EST-450: the sound uses the SAME condition as the notice. A repeat advert
+                    // (before >= 0), our own echo and a flood duplicate all returned above without
+                    // reaching this branch, so a restored contact stays silent too.
+                    om::audioout::playEvent(tm::soundcfg::Event::NewNode, true);
                 }
             }
         }
@@ -1117,6 +1125,9 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
         const uint32_t seq = pushAndLog((size_t)idx, m);
         (void)seq;
     }
+    // S514/EST-450: a live channel text from someone else. Our own echo and a duplicate flood copy
+    // were dropped by the seen ring before this point, so they can never reach the speaker.
+    om::audioout::playEvent(tm::soundcfg::Event::Message);
 }
 
 // Performed by the radio task only.
@@ -1178,6 +1189,10 @@ static int doText(size_t i, const char* sender, const char* text) {
         snprintf(m.text, sizeof(m.text), "%.*s", (int)(sizeof(m.text) - 1), text);
         const uint32_t seq = pushAndLog(i, m);
         (void)seq;
+    } else {
+        // S514/EST-450: the radio refused the frame. "Sent" was the queue accepting it on the main task
+        // (the L2's own rule); this is the real failure, so it is the error sound.
+        om::audioout::playEvent(tm::soundcfg::Event::Error);
     }
     return sent > 0 ? (int)n : -1;
 }
@@ -1390,12 +1405,14 @@ bool dmTick() {
 
     if (due.action == meshcore::DmTimeoutAction::GiveUp) {
         bool changed = false;
+        bool unconfirmed = false;
         {
             StoreLock l;
             DmMessage* m = findDmBySeq(due.msg_id);
             if (m != nullptr) {
                 m->delivery = om::ui::DmState::NotConfirmed;
                 changed      = true;
+                unconfirmed  = true;
                 if (m->log_id != 0) {
                     (void)sdhistory::appendDmState(m->peer_pub, m->log_id, m->delivery,
                                                    (uint32_t)om::time_source::epochNow());
@@ -1404,6 +1421,9 @@ bool dmTick() {
                          (unsigned)meshcore::kDmMaxAttempts);
             }
         }
+        // S514/EST-450: a DM with no confirmation is the ticket's second error case. A stale timeout
+        // whose message has already left the ring changes nothing, so it is silent too.
+        if (unconfirmed) om::audioout::playEvent(tm::soundcfg::Event::Error);
         return changed;
     }
 

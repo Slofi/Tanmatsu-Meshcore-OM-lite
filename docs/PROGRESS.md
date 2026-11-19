@@ -15,6 +15,117 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S514 (EST-450) · Sounds: message, DM, sent, new node, error
+
+> Written by **DeepSeek** for ticket **EST-450**: fenced Paperclip run, no session start/end, nothing
+> installed, flashed or committed. Starts on `3dbf387` (v46) plus EST-445…449 in the tree and keeps their
+> work. **Version: 47.** This entry is opened FIRST, as the ticket asks; Results and files are filled in as
+> the work finishes.
+
+### What this builds (items in the ticket's order)
+
+1. **ONE synth source for both devices.** `core/sound_events.h` includes the L2's
+   `firmware/src/sound_synth.h` across the tree (the `core/mc_history` pattern) and
+   `core/CMakeLists.txt` compiles `../../firmware/src/sound_synth.cpp`; nothing is copied or forked.
+2. **One owner of the I2S channel** (`main/audio_out.*`): a low-priority audio task with its own queue
+   (requests copied by value, a full queue drops), a PSRAM phrase buffer, the amp ON only while playing,
+   and the stack low-water mark logged like the radio task's.
+3. **Events** in the L2's vocabulary: message, DM, sent, new node, error. Boot is OFF by default here; the
+   L2's own default is Bell TK-TK with the welcome sound enabled. Boot is raised once at start, so it
+   stays silent at the default and plays only a sound Filip chose. At most one sound per 400 ms.
+4. **Settings, General tab, SOUND section:** Sound On/Off, Volume 0–100 in steps of 10, one row per event,
+   and a picker grouped by the L2's shapes. First Enter previews a sound, the second chooses it. NVS
+   namespace `"mcsnd"`, library ids stored exactly as the L2 stores them.
+5. **Host tests** for the mapping, the 400 ms gate, the echo/duplicate/restored decision, the storage round
+   trip and unknown-id redirection. The synth is already covered by the L2's `test_est369.cpp`.
+6. **Preview:** `shots/2026-11-19-settings-sound.png`.
+
+### Results (real exit codes)
+
+- **Host:** `sh test/host/run.sh` → **exit 0**, **13,953 checks, 0 failures**. The new sound stage is **67
+  checks**; the Settings stage is 275 (273 in EST-449's log — the existing stage, not a new one). Log:
+  `paperclip-pilot/sweep/est450/host-final6.log`.
+- **ARMED, twice** (backed up, broken, captured, restored and diffed identical each time; logs beside the
+  host log):
+  1. The 400 ms gate made strict (`>=` → `>` in `rateDue`) → red:
+     `FAIL test_sound_events.cpp:90  tm::soundcfg::rateDue(1000, 1400)` (63 checks, 1 failure).
+  2. Boot's Off default removed (it fell back to the L2's Bell TK-TK) → red:
+     `FAIL test_sound_events.cpp:77  s.ids[(int)Event::Boot] == om::sound::kSoundOff (got 64, want 255)`
+     `FAIL test_sound_events.cpp:118  !tm::soundcfg::shouldPlay(tm::soundcfg::defaultSettings(), Event::Boot, false, false, false, true)`
+     (62 checks, 2 failures).
+- **L2 suite:** `cd ../firmware && sh test/host/run.sh` → **exit 0**. The synth is the L2's own
+  `firmware/test/host/test_est369.cpp` stage (built with `src/sound_synth.cpp` at
+  `firmware/test/host/run.sh:236-243`), so no waveform test is duplicated here. Log:
+  `paperclip-pilot/sweep/est450/l2-host-final.log`.
+- **Build:** `make build` → **exit 0**. `application.bin` **0x1757d0 = 1,529,808 B (1,494.0 KiB)** —
+  **46.7 % of the 3,200 KiB per-app ceiling**; the build's own check says `0x8a830` (**27 %**) free in the
+  2 MB app partition. The first build log proves the shared source is compiled from the L2 tree:
+  `__idf_core.dir/home/slofi/Projects/pocket-mesh/firmware/src/sound_synth.cpp.obj`
+  (`est450/build-1.log:318`), plus `audio_out.cpp.obj` and `sound_store.cpp.obj`. Final log:
+  `est450/build-final5.log`.
+- **Preview:** `python3 tools/preview_tanmatsu.py settings_sound` → exit 0,
+  `shots/2026-11-19-settings-sound.png` (800×480). The SOUND section is scrolled to the body top: Sound On,
+  Volume 60%, Message Soft Hi, Direct message Wood Warm, Sent Soft Tick, New node Soft Lo, Error Bell Fall,
+  Boot Off. The General preview was re-rendered too (SOUND rows, Automatic advert Off, version 47).
+
+### BSP conflicts checked (cited, not assumed)
+
+- `bsp_device_initialize()` **already calls `bsp_audio_initialize()`** at
+  `managed_components/badgeteam__badge-bsp/common/badge_bsp_device.c:84`, after the primary I2C bus is
+  created at `:39`. `audioout::begin()` therefore **takes the published I2S handle**
+  (`bsp_audio_get_i2s_handle`) and only calls `bsp_audio_initialize()` itself as a one-time fallback when
+  that handle is missing — calling it again would create a second I2S channel and repeat the codec
+  bring-up.
+- The audio init uses the same primary I2C bus (`targets/tanmatsu/badge_bsp_audio.c:70`) and configures
+  the ES8156 at `0x08` (`:77-84`, `targets/tanmatsu/tanmatsu_hardware.h:62`). Our app never touches I2C
+  directly, so there is no second owner.
+- The amplifier is a **CH32 coprocessor command** (`badge_bsp_audio.c:103-107`,
+  `tanmatsu_coprocessor_set_amplifier_enable`) — the same coprocessor this app power-cycles for the C6.
+  We touch it only after boot is past, on the audio task, ON for a phrase and OFF after.
+- The I2S slot is fixed **16-bit STEREO** (`badge_bsp_audio.c:32-34`), so the mono synth is duplicated
+  into L/R. The BSP's default clock is **44,100 Hz** (`initialize_i2s(44100)`, `:84`); we call
+  `bsp_audio_set_rate(16000)` (`:64-67`) because `sound_synth.h` fixes `kRate = 16000` and its low-pass /
+  alias guard assume an 8 kHz Nyquist. At 44.1 kHz every phrase would be ~2.76× fast and high.
+
+### Files
+
+- **new** `core/sound_events.h` — events, L2 defaults (Boot Off here), the 400 ms gate, the
+  echo/duplicate/restored/notice policy, the 9-byte settings codec and the kRedirect rule.
+- **new** `main/audio_out.h/.cpp` — the one I2S owner: PSRAM phrase buffer (internal quarter fallback),
+  3-slot value queue with zero-timeout drop, 400 ms gate, amp ON/OFF, stack low-water log.
+- **new** `main/sound_store.h/.cpp` — NVS namespace `"mcsnd"`, key `"cfg"`, the pure blob only.
+- **new** `test/host/test_sound_events.cpp` — the 67 checks and the two arm targets.
+- **new** `shots/2026-11-19-settings-sound.png`.
+- `core/CMakeLists.txt` — compiles `../../firmware/src/sound_synth.cpp`.
+- `core/settings.h` — `kAppVersion = "47"`.
+- `main/CMakeLists.txt` — `audio_out.cpp`, `sound_store.cpp`.
+- `main/main.cpp` — SOUND section (Sound, Volume, six event rows), the picker sub-page, preview-then-choose,
+  the Sent/Error calls on the Chat send result, `soundstore::begin()` + `audioout::begin()` after the SD
+  mount and the C6 link, version 47.
+- `main/mc_link.cpp` — Message after a live channel text, Dm after a live DM, NewNode under the same
+  `before < 0 && g_new_node_notice` condition as the notice, Error on a refused radio send and on a DM
+  with no confirmation.
+- `test/host/run.sh` — the sound stage (links the L2's real `sound_synth.cpp`).
+- `tools/preview_tanmatsu.py` — `settings_sound`, and the General preview's SOUND rows/v47.
+- `docs/PROGRESS.md`, `shots/2026-11-19-settings-general.png` (re-rendered).
+
+### What could NOT be checked
+
+- **Nothing was installed, flashed or committed.** No device, no serial port, no server.
+- The sounds were **not heard on the glass**: the 16 kHz codec path after `bsp_audio_set_rate`, the 30 ms
+  amplifier settle (the L2 uses 250 ms after its ES8311 amp — a different chip), the tail silence, and the
+  perceived 400 ms spacing all need Filip's ears.
+- NVS after a reboot: the 9-byte `mcsnd/cfg` blob and the chosen ids across a power cycle.
+- The event triggers against real mesh traffic (a live channel text, a DM, an advert that adds a contact,
+  a refused send, a DM that never confirms). The decisions are host-tested; the wiring is compiled.
+- The picker's sub-page scroll with the full 41-sound library on the panel (host arithmetic only).
+
+### Next step
+
+A device session with Filip: play each event once and each picker preview, check no click/hiss at the amp
+transition and that a 401 ms burst of adverts produces one sound, then reboot and confirm the choices
+survive.
+
 ## 2026-11-19 · S514 (EST-449) · Nodes search bar
 
 > Written by **DeepSeek** for ticket **EST-449**: fenced Paperclip run, no session start/end, nothing installed,

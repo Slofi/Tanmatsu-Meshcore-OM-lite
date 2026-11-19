@@ -31,10 +31,11 @@ SET="$(mktemp /tmp/tm-settings.XXXXXX)"
 CHANADMIN="$(mktemp /tmp/tm-channel-admin.XXXXXX)"
 NODESMAP="$(mktemp /tmp/tm-nodes-map.XXXXXX)"
 NODESSEARCH="$(mktemp /tmp/tm-nodes-search.XXXXXX)"
+SOUND="$(mktemp /tmp/tm-sound-events.XXXXXX)"
 CHANORACLE="$(mktemp -d /tmp/tm-chan-oracle.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH"; rm -rf "$ED" "$EDASAN" "$CHANORACLE"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$SOUND"; rm -rf "$ED" "$EDASAN" "$CHANORACLE"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -288,3 +289,15 @@ PYORACLE
     ../../core/mc_store.cpp \
     -o "$NODESSEARCH"
 "$NODESSEARCH"
+
+# SOUNDS (S514/EST-450): the event -> L2 default mapping (including Boot Off here vs the L2's Bell
+# TK-TK), the 400 ms rate gate at exact instants and across the 32-bit wrap, the echo/duplicate/restored
+# refusal, the settings byte round trip and the L2's kRedirect for a retired/unknown id. It links the
+# L2's OWN ../../../firmware/src/sound_synth.cpp — the same file the device component compiles — so the
+# default ids and the redirect table are the real ones. The waveforms are already covered by the L2's
+# firmware/test/host/test_est369.cpp and are not duplicated here.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_sound_events.cpp \
+    ../../../firmware/src/sound_synth.cpp \
+    -o "$SOUND"
+"$SOUND"

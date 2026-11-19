@@ -1365,7 +1365,16 @@ def settings_general():
         ('row', 'Public key', 'a1b2c3d4e5f60718', False),
         ('row', 'Advert now', 'Enter', False),
         ('sect', 'ADVERT', None, None),
-        ('row', 'Automatic advert', '3 h', False),
+        ('row', 'Automatic advert', 'Off', False),
+        ('sect', 'SOUND', None, None),
+        ('row', 'Sound', 'On', False),
+        ('row', 'Volume', '60%', False),
+        ('row', 'Message', 'Soft Hi', False),
+        ('row', 'Direct message', 'Wood Warm', False),
+        ('row', 'Sent', 'Soft Tick', False),
+        ('row', 'New node', 'Soft Lo', False),
+        ('row', 'Error', 'Bell Fall', False),
+        ('row', 'Boot', 'Off', False),
         ('sect', 'RADIO (READ ONLY)', None, None),
         ('row', 'Frequency', '869.618 MHz', False),
         ('row', 'Bandwidth', '62.5 kHz', False),
@@ -1377,12 +1386,13 @@ def settings_general():
         ('row', 'Time', '22:31 · rtc', False),
         ('row', 'SD card', 'mounted · history on', False),
         ('row', 'Contacts', '3 / 32', False),
-        ('row', 'App version', '44', False),
+        ('row', 'App version', '47', False),
         ('row', 'Free internal heap', '120 KB', False),
         ('row', 'Free PSRAM', '26.1 MB', False),
     ]
     total_h = sum(sect_h if k == 'sect' else row_h for k, *_ in total_rows)
 
+    sound_rows = ('Sound', 'Volume', 'Message', 'Direct message', 'Sent', 'New node', 'Error', 'Boot')
     for kind, label, value, focused in total_rows:
         if kind == 'sect':
             if yy + sect_h > body_bot:
@@ -1391,7 +1401,8 @@ def settings_general():
             continue
         if yy + row_h > body_bot:
             break
-        setrow(d, lx0, lx1, yy, label, value, focused=focused, chevron=(label == 'Name'))
+        setrow(d, lx0, lx1, yy, label, value, focused=focused,
+               chevron=(label == 'Name' or label in sound_rows))
         yy += row_h + 2
 
     scroll_indicator(d, (lx0, body_top, W - 8, body_bot), total_h, body_bot - body_top, 0)
@@ -1431,6 +1442,64 @@ def _settings_owner_frame(tab_index, right_text):
                         fill=P['Acc'])
     hline(d, 0, W, tab_top + tab_h, P['Line'])
     return img, d, W, H, pad, tab_top + tab_h
+
+
+def settings_sound():
+    """S514/EST-450: the General tab's new SOUND section.
+
+    The section is scrolled to the top of the body so all eight rows are visible: Sound (master, On),
+    Volume (the L2's 60%), then one row per event with its stored sound — Message Soft Hi, Direct
+    message Wood Warm, Sent Soft Tick, New node Soft Lo, Error Bell Fall, Boot Off. The event rows are
+    sub-pages (chevron). The values are the L2's own defaults; no real node/channel name is used
+    (public-repo rule 9). Height of everything above SOUND: NODE (22 + 3*36) + ADVERT (22 + 36).
+    """
+    img, d, W, H, pad, body_top = _settings_owner_frame(0, 'general · tab 1 of 4')
+    body_bot = H - TM['hint_h']
+    lx0, lx1 = pad, W - pad
+    row_h, sect_h = 34, 22
+
+    items = [
+        ('sect', 'NODE', None),
+        ('row', 'Name', 'TNMT (SI)'),
+        ('row', 'Public key', 'a1b2c3d4e5f60718'),
+        ('row', 'Advert now', 'Enter'),
+        ('sect', 'ADVERT', None),
+        ('row', 'Automatic advert', 'Off'),
+        ('sect', 'SOUND', None),
+        ('row', 'Sound', 'On'),
+        ('row', 'Volume', '60%'),
+        ('row', 'Message', 'Soft Hi'),
+        ('row', 'Direct message', 'Wood Warm'),
+        ('row', 'Sent', 'Soft Tick'),
+        ('row', 'New node', 'Soft Lo'),
+        ('row', 'Error', 'Bell Fall'),
+        ('row', 'Boot', 'Off'),
+        ('sect', 'RADIO (READ ONLY)', None),
+        ('row', 'Frequency', '869.618 MHz'),
+        ('row', 'Bandwidth', '62.5 kHz'),
+        ('row', 'Spreading', 'SF 8'),
+        ('row', 'Coding', '4/8'),
+        ('row', 'TX power', '22 dBm'),
+        ('row', 'Path hash', '2 B'),
+    ]
+    total_h = sum(sect_h if k == 'sect' else row_h + 2 for k, *_ in items)
+    scroll = 4 + sect_h + 3 * (row_h + 2) + sect_h + (row_h + 2)   # SOUND header at the body top
+
+    yy = body_top + 4 - scroll
+    for kind, label, value in items:
+        if kind == 'sect':
+            if body_top <= yy and yy + sect_h <= body_bot:
+                spaced(d, (lx0 + 4, yy + 5), label, font(FONT_MONO, TM['f_label']), P['Dim'])
+            yy += sect_h
+            continue
+        if body_top <= yy and yy + row_h <= body_bot:
+            setrow(d, lx0, lx1, yy, label, value, focused=(label == 'Sound'), chevron=True)
+        yy += row_h + 2
+
+    scroll_indicator(d, (lx0, body_top, W - 8, body_bot), total_h, body_bot - body_top, scroll)
+    hint_bar(d, 'settings', [('←→', 'tab'), ('↑↓', 'row'), ('↵', 'open/change'), ('esc', 'back'),
+                             (',', 'settings')])
+    return save(img, '2026-11-19-settings-sound.png')
 
 
 def _omlite_rows():
@@ -1642,7 +1711,8 @@ RENDERERS = dict(launcher=launcher, menu=menu, nodes=nodes, nodes_search=nodes_s
                  chat_dm=chat_dm_column, dm_enter=dm_enter, map=map_page, rptr=rptr, settings=settings,
                  settings_general=settings_general, settings_omlite=settings_omlite,
                  settings_opstoc=settings_opstoc, settings_chat=settings_chat,
-                 settings_nodes=settings_nodes, settings_map=settings_map)
+                 settings_nodes=settings_nodes, settings_map=settings_map,
+                 settings_sound=settings_sound)
 
 
 def main(argv):
