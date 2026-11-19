@@ -130,7 +130,7 @@ void audioTask(void*) {
       continue;
     }
 
-    bsp_audio_set_volume(om::soundstore::settings().volume);
+    bsp_audio_set_volume(tm::soundcfg::bspVolumeForRegister(tm::soundcfg::volumeRegister(om::soundstore::settings().volume)));
     bsp_audio_set_amplifier(true);
     vTaskDelay(pdMS_TO_TICKS(kAmpSettleMs));
     const bool wrote = writeMono(s_buf, n);
@@ -188,7 +188,7 @@ bool begin() {
     s_i2s = nullptr;
     return false;
   }
-  bsp_audio_set_volume(om::soundstore::settings().volume);
+  bsp_audio_set_volume(tm::soundcfg::bspVolumeForRegister(tm::soundcfg::volumeRegister(om::soundstore::settings().volume)));
   bsp_audio_set_amplifier(false);   // no hiss while nothing is playing
 
   s_buf = (int16_t*)heap_caps_malloc((size_t)om::sound::kMaxSamples * sizeof(int16_t),
@@ -258,7 +258,7 @@ bool preview(uint8_t soundId) {
 
 void setVolume(uint8_t percent) {
   if (!s_ready) return;
-  bsp_audio_set_volume(percent > 100 ? 100 : percent);
+  bsp_audio_set_volume(tm::soundcfg::bspVolumeForRegister(tm::soundcfg::volumeRegister(percent)));   // the L2 curve
 }
 
 uint32_t playedCount() { return s_played; }

@@ -7,6 +7,7 @@
 // every waveform, edge at zero and headroom, and it compiles the same sound_synth.cpp this suite links.
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #include "sound_events.h"
 
@@ -196,8 +197,38 @@ void test_volume_steps() {
 
 }  // namespace
 
+
+// S514 (Claude): the L2's volume curve, through the SAME arithmetic the device runs: the BSP's x0.70
+// (badge_bsp_audio.c:100) and es8156_set_volume_percentage's clamp + lroundf (es8156.c:800-815), reproduced here.
+static int codecRegisterFor(float bsp_pct) {
+  float v = bsp_pct * 0.70f;
+  if (v < 0.0f) v = 0.0f;
+  if (v > 100.0f) v = 100.0f;
+  const float db  = -95.5f + (v / 100.0f) * (32.0f - (-95.5f));
+  long        reg = lroundf((db - (-95.5f)) / 0.5f);
+  if (reg < 0) reg = 0;
+  if (reg > 255) reg = 255;
+  return (int)reg;
+}
+
+void test_volume_curve() {
+  printf("test  volume: the L2 curve (60 %% = 0 dB) reaches the codec exactly\n");
+  CHECK_EQ((int)tm::soundcfg::volumeRegister(0), 0x00);     // mute
+  CHECK_EQ((int)tm::soundcfg::volumeRegister(1), 0x61);
+  CHECK_EQ((int)tm::soundcfg::volumeRegister(60), 0xBF);    // 0 dB, as on the L2
+  CHECK_EQ((int)tm::soundcfg::volumeRegister(100), 0xFF);   // +32 dB, the codec's top
+  CHECK_EQ((int)tm::soundcfg::volumeRegister(250), 0xFF);   // clamped
+  for (int p = 0; p <= 100; p++) {
+    const int want = tm::soundcfg::volumeRegister((uint8_t)p);
+    CHECK_EQ(codecRegisterFor(tm::soundcfg::bspVolumeForRegister((uint8_t)want)), want);
+  }
+  // The old path handed the percentage straight to the BSP: 100 % landed 38 dB below the L2's 100 %.
+  CHECK(codecRegisterFor(100.0f) < tm::soundcfg::volumeRegister(100));
+}
+
 int main() {
   test_event_defaults();
+  test_volume_curve();
   test_rate_gate();
   test_never_for_echo_duplicate_restored();
   test_settings_round_trip();

@@ -47,6 +47,24 @@ constexpr uint32_t kSoundMinGapMs = 400;
 // The L2's volume default (`sound_events.cpp`: getUChar("vol", 60)); the settings row walks it by 10.
 constexpr uint8_t kDefaultVolume = 60;
 
+// S514 (Claude; Filip: "I have it set to 100% and it is still barely hearable"). The volume CURVE is the L2's
+// (firmware/src/audio.cpp:279-285): the codec's DAC volume register runs -95.5 dB (0x00) .. +32 dB (0xFF) in
+// 0.5 dB steps on both the L2's ES8311 and the Tanmatsu's ES8156 (es8156.c:796-798), and the L2 maps
+// 1..100 % onto 0x60 (-47.5 dB) .. 0xFF (+32 dB), so 60 % is 0 dB (register 0xBF) and 0 % mutes (0x00).
+// The Tanmatsu BSP instead maps its percentage linearly over the whole -95.5..+32 dB span after a 0.70 factor
+// (badge_bsp_audio.c:16,100), so 100 % reached only -6.25 dB and 60 % about -42 dB.
+constexpr uint8_t volumeRegister(uint8_t pct) {
+  if (pct == 0) return 0x00;
+  const uint32_t p     = pct > 100 ? 100u : pct;
+  constexpr uint32_t kFloor = 0x60;
+  return (uint8_t)(kFloor + ((uint32_t)(0xFF - kFloor) * p) / 100u);
+}
+
+// The percentage to hand bsp_audio_set_volume() so the codec lands on volumeRegister(pct): the BSP multiplies by
+// 0.70 and es8156_set_volume_percentage() maps 0..100 linearly onto the 255 register steps with lroundf, so the
+// BSP value is reg * (100 / 255) / 0.70. Values above 100 are fine: the codec driver clamps its own input.
+constexpr float bspVolumeForRegister(uint8_t reg) { return ((float)reg * 100.0f / 255.0f) / 0.70f; }
+
 constexpr const char* eventKey(Event ev) {
   switch (ev) {
     case Event::Boot:    return "boot";
