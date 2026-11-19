@@ -5,9 +5,11 @@
 // The search runs through the same record-reader callback the device uses (there it reads from the card, here
 // from an array), so what is tested is the code that runs, not a copy of it.
 #include <stdio.h>
+#include <stdlib.h>   // S514/EST-452: the link map's ownership test hands back a real allocation and frees it
 #include <string.h>
 #include <math.h>
 
+#include "map_clmt.h"   // S514/EST-452: the Fast Seek link map's sizing, retry rule and owner
 #include "map_pack.h"
 #include "map_view.h"
 
@@ -643,6 +645,124 @@ void test_read_range_above_2gib() {
     CHECK(!om::map::readRangeFor(e, nullptr));
 }
 
+// ---- S514/EST-452: the Fast Seek link map. ff.c f_lseek(CREATE_LINKMAP): tbl[0] = the table's size in DWORDs,
+// (run length, first cluster) per fragment, a 0 terminator, and on success tbl[0] is put back to the DWORDs USED
+// = 2 + 2 * fragments. The device allocates from these numbers and prints the fragment count from them, so an
+// off-by-one here is a WRONG TABLE (FatFs returns FR_INT_ERR on a seek), not a cosmetic error.
+void test_clmt_sizing() {
+    CHECK_EQ(om::map::clmtItemsForFragments(0), 2);     // an empty file: the size DWORD and the terminator
+    CHECK_EQ(om::map::clmtItemsForFragments(1), 4);     // a contiguous pack: 16 bytes
+    CHECK_EQ(om::map::clmtItemsForFragments(3), 8);
+    CHECK_EQ(om::map::clmtItemsForFragments(256), 514);
+    CHECK_EQ(om::map::clmtItemsForFragments(1) * 4, 16);   // what the log's "B bytes" is made of
+
+    // The inverse is what turns tbl[0] back into the fragment count for the log line: items -> fragments.
+    CHECK_EQ(om::map::clmtFragmentsForItems(2), 0);
+    CHECK_EQ(om::map::clmtFragmentsForItems(4), 1);
+    CHECK_EQ(om::map::clmtFragmentsForItems(8), 3);
+    CHECK_EQ(om::map::clmtFragmentsForItems(514), 256);
+    // A truncated / garbage table must report no fragments, never a fraction of one.
+    CHECK_EQ(om::map::clmtFragmentsForItems(0), 0);
+    CHECK_EQ(om::map::clmtFragmentsForItems(1), 0);
+    CHECK_EQ(om::map::clmtFragmentsForItems(3), 0);
+    CHECK_EQ(om::map::clmtFragmentsForItems(5), 1);
+
+    for (uint32_t f = 0; f <= 1000; f++) {
+        CHECK_EQ(om::map::clmtFragmentsForItems(om::map::clmtItemsForFragments(f)), f);
+        CHECK_EQ(om::map::clmtItemsForFragments(f) % 2, 0);   // ulen = 2 + 2n is always even
+    }
+
+    // The first attempt at open: 256 fragments = 514 DWORDs = 2,056 B of PSRAM, and the ceiling on a retry.
+    CHECK_EQ(om::map::clmtItemsForFragments(om::map::kClmtFirstTryFragments), 514);
+    CHECK_EQ(om::map::clmtItemsForFragments(om::map::kClmtFirstTryFragments) * 4, 2056);
+    CHECK_EQ(om::map::kClmtMaxItems, 262144);                              // 1 MB
+    CHECK(om::map::clmtItemsForFragments(om::map::kClmtFirstTryFragments) < om::map::kClmtMaxItems);
+}
+
+void test_clmt_retry() {
+    const uint32_t first = om::map::clmtItemsForFragments(om::map::kClmtFirstTryFragments);   // 514
+
+    // A pack in more pieces than the first guess: retry with EXACTLY what the driver wrote back. The driver's own
+    // test is `ulen <= tlen`, so an exact-size table succeeds; anything less would fail again.
+    const uint32_t           needed = om::map::clmtItemsForFragments(900);   // 1802
+    const om::map::ClmtRetry r      = om::map::clmtRetry(needed, first);
+    CHECK(r.retry);
+    CHECK_EQ(r.items, needed);
+    CHECK_EQ(r.items, 1802);
+    CHECK_EQ(om::map::clmtFragmentsForItems(r.items), 900);
+
+    // One retry is enough BY CONSTRUCTION: with the table the driver asked for, `ulen <= tlen` holds, so a second
+    // failure is a real error (not a loop). Being told the size we already have is no progress.
+    CHECK(!om::map::clmtRetry(needed, needed).retry);
+    CHECK_EQ(om::map::clmtRetry(needed, needed).items, 0);
+    CHECK(!om::map::clmtRetry(first, first).retry);
+    // ... and neither is a driver that wrote nothing (0) or something smaller than what we gave it.
+    CHECK(!om::map::clmtRetry(0, first).retry);
+    CHECK(!om::map::clmtRetry(2, first).retry);
+    CHECK(!om::map::clmtRetry(first - 2, first).retry);
+
+    // The ceiling: one over is refused (no allocation), the ceiling itself is allowed.
+    CHECK(om::map::clmtRetry(om::map::kClmtMaxItems, first).retry);
+    CHECK(!om::map::clmtRetry(om::map::kClmtMaxItems + 2, first).retry);
+    CHECK(!om::map::clmtRetry(0xFFFFFFFFu, first).retry);
+    // A genuinely fragmented 3.6 GB pack still fits comfortably under it: 60,000 fragments = 480,008 B.
+    CHECK(om::map::clmtRetry(om::map::clmtItemsForFragments(60000), first).retry);
+    CHECK_EQ(om::map::clmtItemsForFragments(60000) * 4, 480008);
+}
+
+// closePack() runs on every reopen (a zoom across a band boundary) and at teardown. The table must be handed back
+// exactly once: a double free would abort the device, a leak would eat PSRAM on every zoom. The fake here is a
+// malloc/free counter, NOT FatFs — the pointer bookkeeping is the production struct.
+void test_clmt_ownership_frees_once() {
+    om::map::ClmtTable t;
+    CHECK(t.table == nullptr);
+    CHECK_EQ(t.items, 0);
+    CHECK(t.drop() == nullptr);   // closing when nothing is open (or a pack that never got a table)
+
+    uint32_t* a = static_cast<uint32_t*>(malloc(16));   // room for one fragment
+    CHECK(a != nullptr);
+    a[0] = om::map::clmtItemsForFragments(1);           // as the driver leaves it: 4 DWORDs used
+    CHECK(t.adopt(a, 4));
+    CHECK(t.table == a);
+    CHECK_EQ(t.items, 4);
+    CHECK_EQ(om::map::clmtFragmentsForItems(t.table[0]), 1);   // the log line's fragment count
+
+    // Taking a second table while one is held would lose the first: refused, and the caller keeps its own.
+    uint32_t* b = static_cast<uint32_t*>(malloc(16));
+    CHECK(b != nullptr);
+    CHECK(!t.adopt(b, 4));
+    CHECK(t.table == a);
+    CHECK_EQ(t.items, 4);
+    free(b);   // the refused one was never adopted, so this is the only free it gets
+
+    int frees = 0;
+    uint32_t* got = t.drop();
+    CHECK(got == a);
+    if (got) {
+        free(got);
+        ++frees;
+    }
+    CHECK_EQ(t.items, 0);
+    if (t.drop() != nullptr) ++frees;   // the second close path: nothing left to free
+    CHECK_EQ(frees, 1);                 // exactly one free for one adopt
+
+    // And the state is reusable: the next pack's table is held normally and freed once.
+    uint32_t* c = static_cast<uint32_t*>(malloc(16));
+    CHECK(c != nullptr);
+    CHECK(t.adopt(c, 4));
+    got = t.drop();
+    if (got) {
+        free(got);
+        ++frees;
+    }
+    CHECK_EQ(frees, 2);
+    CHECK(t.table == nullptr);
+    // Adopting nothing is refused, and must not read as "a table is held".
+    CHECK(!t.adopt(nullptr, 4));
+    CHECK(t.table == nullptr);
+    CHECK(t.drop() == nullptr);
+}
+
 }  // namespace
 
 
@@ -661,6 +781,10 @@ int main() {
     test_peek_does_not_touch_lru();
     test_plan_tiles_order();
     test_read_range_above_2gib();
+    // S514/EST-452: the Fast Seek link map's numbers, its one retry, and the exactly-once free.
+    test_clmt_sizing();
+    test_clmt_retry();
+    test_clmt_ownership_frees_once();
 
     printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -15,6 +15,124 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S514 (EST-452) · FatFs fast seek for the packs: a z16/z17 fill stops re-walking the FAT per tile
+
+> Written by **DeepSeek** for ticket **EST-452**: fenced Paperclip run, no session start/end, nothing
+> installed, flashed or committed. Starts on `fc9b199` (v48), tree clean. **Version: 49.** The ticket asked
+> for this entry FIRST; this run wrote it after the code and the tests, with the real results below (the
+> EXPECTED numbers were worked out before the measurements and are left in, so the glass can settle them).
+
+### What this builds (items in the ticket's order)
+
+1. **A cluster link map (CLMT) on the pack's `FIL`, built at open.** `CONFIG_FATFS_USE_FASTSEEK` was already
+   1 (`build/tanmatsu/config/sdkconfig.h:913` -> `ffconf.h:42` `FF_USE_FASTSEEK 1`), but FatFs only takes its
+   short seek path when the FIL carries `cltbl` (`ff.c` `clmt_clust()`); with `cltbl == 0` it follows the FAT
+   chain cluster by cluster. `main/map_link.cpp` now, at the end of `ensurePack()` (after the pack's own
+   open log line): allocates the table in PSRAM (`heap_caps_malloc(..., MALLOC_CAP_SPIRAM)`), sets
+   `tbl[0]` = its size in DWORDs, sets `fil.cltbl`, and calls `f_lseek(&fil, CREATE_LINKMAP)`.
+   - **One retry, exact size.** On `FR_NOT_ENOUGH_CORE` the driver has written the DWORDs it needs into
+     `tbl[0]`; the table is detached and freed, and one more is allocated at exactly that size. That retry
+     cannot loop: with the size the driver asked for, its own `ulen <= tlen` test passes by construction.
+   - **Log at open:** `z17: fast seek on, link map N fragment(s), 2056 B` — the fragment count is the value
+     the driver put back in `tbl[0]` (`2 + 2 * fragments`), the bytes are the allocation. A contiguous
+     pack is 1 fragment; a `the pack needs a ... retrying once` line would mean the pack is in more than
+     256 pieces.
+   - **Failure is a slower map, never a broken one:** no PSRAM, a driver error, or a table the previous pack
+     still held leaves `cltbl` null and the pack reads exactly as in v48, with one warning logged.
+   - **Freed in `closePack()`**, which runs on every reopen (a zoom across a band boundary) and at teardown:
+     `cltbl` is detached from the FIL first, then the owner hands the pointer back and it is freed once. A
+     second close frees nothing (the state is cleared in the owner, not in the caller).
+   - The rules (sizes, the retry decision, the exactly-once hand-back) are pure and live in
+     **`core/map_clmt.h`**; the FatFs calls themselves stay in `map_link.cpp`. **No FatFs is faked on the
+     host** — a fake would only test the fake.
+2. **The measurement line is unchanged on purpose**, because it is enough: `fill z16: 12 tile(s) in 945 ms
+   (34 card reads, 2.8/tile, hardware decode)` already carries the time, and the boot probe still logs
+   `z17 tile ... in X ms`. ⚠️ **`R` will not move:** `g_card_reads` counts INDEX reads only (2-4 a tile);
+   the FAT reads that the seek spends were never counted, so the improvement shows in **ms**, not in `R`.
+3. **Host tests, ARMED** (below): the sizing arithmetic against `ff.c`'s own protocol, the retry decision,
+   and the free-on-close — the three things that are pure.
+
+### What the 945 ms is made of, and what to EXPECT on the glass (not yet measured)
+
+Read, not assumed: the hardware decoder needs **2 ms a tile** (`decoder check: ... 2 ms vs sw 41 ms` in
+v43's boot log), and a whole 12-tile z16 fill issues only **34 card reads**, i.e. 2.8 index reads a tile —
+a few ms. So of z16's **937-945 ms for 12 tiles (78 ms a tile)** and z17's **966 ms for 7 tiles (138 ms a
+tile)**, almost everything is the seek: with no CLMT, `f_lseek` to a lower offset starts at the file's first
+cluster and walks `get_fat` to the target. slo17 is 3,590,722,268 B; at 32 KB clusters that is ~110k FAT
+entries = 440 KB of FAT = ~860 sectors of 512 B **for every backward seek**. That is the same order as the
+465 ms boot tile (one cold walk from fptr 0) and the 78-138 ms a tile in a fill (a warm-ish walk).
+
+Expected after this change (the fills are centre-out, so most of their seeks are backward):
+
+- **z17 fill (7 tiles): 966 ms -> ~150-250 ms.** Per tile: the compressed tile read (tens of KB) + 2 ms of
+  decode + the 30-35 index reads; the seek becomes a scan of a handful of (length, start) pairs.
+- **z16 fill (12 tiles): 937-945 ms -> ~200-300 ms.** Same arithmetic, slightly smaller tiles.
+- **z15 fill (8 tiles, the 991 MB `slo` pack): 571-579 ms -> ~120-200 ms.** ~30k clusters there, so the
+  walk is ~2.8x shorter to begin with.
+- **z12-z14: better, but less (they are already 15-30 ms a tile)** — their seeks are mostly short and
+  forward, which normal `f_lseek` already handles cheaply.
+- **The boot probes should be FLAT, and that is the honest part:** building the table costs ONE full walk,
+  and today the first seek after each open costs exactly the same walk (it starts from cluster 0 to reach
+  any offset). At boot the packs are opened and one tile is read per open, so the walk only MOVES from the
+  seek into the open: `z17 tile ... 465 ms` is expected to stay ~465 ms. The second tile in a pack is the
+  first that gets cheaper. If the boot gets materially slower, the cause is not this ticket's arithmetic.
+
+### Results (real exit codes)
+
+- **Host:** `sh test/host/run.sh` -> **exit 0, 15,861 checks, 0 failures** (was 13,805 on `fc9b199`; the
+  map stage is **12,449**, was 10,393, **+2,056**). Log: `paperclip-pilot/sweep/est452/host-final.log`.
+- **ARMED twice**, on copies of `core/map_clmt.h` in `sweep/est452/` (the production file was not touched):
+  1. `kClmtItemsPerFragment` 2 -> 1 (the plausible misreading "one DWORD per fragment") -> red, exit 1:
+     `FAIL test_map.cpp:654  om::map::clmtItemsForFragments(1) == 4 (got 3, want 4)`, and the retry size
+     follows it down: `FAIL test_map.cpp:691  r.items == 1802 (got 902, want 1802)` (10,420 checks,
+     2 failures). Log: `sweep/est452/arm-clmt.log`.
+  2. The retry guard `needed > tried` -> `needed >= tried` (retry on no progress, i.e. a loop) -> red,
+     exit 1: `FAIL test_map.cpp:696  !om::map::clmtRetry(needed, needed).retry` (12,439 checks, 1 failure).
+     Log: `sweep/est452/arm-retry.log`.
+- **Build:** `make build` -> **exit 0**, **0 warnings**. `application.bin` **0x175ff0 = 1,531,888 B
+  (1,496.0 KiB)** = **46.7 % of the 3,200 KiB ceiling**; the build's own check says `0x8a010` (**27 %**)
+  free in the 2 MB app partition. `map_link.cpp` rebuilt (`build-final.log:375`) and the object carries the
+  new lines (`strings .../map_link.cpp.obj | grep "fast seek"` -> all six), which is the proof the
+  `#if FF_USE_FASTSEEK` block was actually compiled in. Log: `sweep/est452/build-final.log`.
+
+### Why this cannot corrupt a tile even if the sizing were wrong
+
+FatFs never accepts an incomplete table: it walks the chain, writes what fits, and returns
+`FR_NOT_ENOUGH_CORE` with the required `ulen` if `ulen > tlen`. So our first-attempt size can only decide
+whether ONE extra walk happens; it can never leave a short table in use, which would have shown up as
+`FR_INT_ERR` on the next seek. The host test pins our numbers to `ff.c`'s arithmetic anyway.
+
+### Files
+
+- **new** `core/map_clmt.h` — the CLMT's numbers (`clmtItemsForFragments` / `clmtFragmentsForItems`), the
+  first-try size (256 fragments = 2,056 B), the 1 MB ceiling, `clmtRetry()` (exact size, no-progress and
+  ceiling guards) and `ClmtTable` (`adopt()` / `drop()`, at most one live table, freed exactly once).
+- `main/map_link.cpp` — `attachLinkMap()` (build the table, one retry, log, give up quietly),
+  `OpenPack::clmt`, the call at the end of `ensurePack()`, and the detach+free in `closePack()`.
+- `test/host/test_map.cpp` — `test_clmt_sizing` (2,019 checks incl. a 0..1000 round trip),
+  `test_clmt_retry` (15) and `test_clmt_ownership_frees_once` (22); `#include "map_clmt.h"`.
+- `core/settings.h` — `kAppVersion = "49"`.
+- `docs/PROGRESS.md` — this entry.
+
+### What could NOT be checked
+
+- **Nothing was installed, flashed or committed.** No device, no serial port.
+- **The fragment counts of the real packs are unknown until the glass**; the arithmetic says "a handful",
+  and 256 fragments is the first try, so the retry path is unlikely to be exercised in practice (which is
+  why it is host-tested instead).
+- **The real per-tile numbers** above are expectations from the v43 log, not measurements; that is the next
+  step, and it needs Claude on the device.
+- The two Settings preview shots still say version **48**; they were not re-rendered, because this ticket is
+  code + host tests + build only.
+
+### Next step
+
+On the glass, one boot and one walk through the zooms: read the new `zNN: fast seek on, link map N
+fragment(s), 2056 B` line for each pack (N should be a handful; a second `the pack needs a ... retrying once`
+line means the packs are fragmented and is worth reporting), then compare `fill z16` and `fill z17` against
+v43's 937-945 ms / 966 ms. Expect the fills to drop by most of their time and the boot `z17 tile` line to
+stay where it is.
+
 ## 2026-11-19 · S514 (EST-451) · Volume with +/-, and the picker keeps its gold frame on screen
 
 > Written by **DeepSeek** for ticket **EST-451**: fenced Paperclip run, no session start/end, nothing

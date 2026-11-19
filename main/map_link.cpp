@@ -14,6 +14,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "jpeg_decoder.h"         // espressif/esp_jpeg: the software decoder, and the fallback
+#include "map_clmt.h"             // S514/EST-452: the Fast Seek link map's numbers, retry rule and ownership
 #include "map_pack.h"
 #include "map_view.h"
 #include "nvs.h"   // S514/EST-447: the MAP rows and the last position live in NVS "mcset"
@@ -53,6 +54,9 @@ struct OpenPack {
     uint32_t*           block_lru_id       = nullptr;
     uint32_t*           block_lru_got      = nullptr;
     uint8_t*            block_lru_valid    = nullptr;
+    // S514/EST-452: the Fast Seek cluster link map table FatFs is given through `pack.cltbl`. Owned here and
+    // freed in closePack(), exactly once; nullptr means this pack seeks the slow way (the v48 behaviour).
+    om::map::ClmtTable  clmt;
 };
 
 OpenPack           g_pack;
@@ -130,8 +134,16 @@ uint32_t readBlockRecords(void* ctx, uint32_t first, om::map::Entry* out, uint32
 }
 
 void closePack() {
+    // S514/EST-452: the link map is OURS, not FatFs's. Detach it from the FIL before the FIL goes away and take
+    // it back from the owner, so this close path (which runs on every reopen) frees it exactly once and a second
+    // close frees nothing. heap_caps_free() ignores nullptr, so the slow-seek case needs no branch.
+#if FF_USE_FASTSEEK
+    g_pack.pack.cltbl = nullptr;   // detach before the FIL goes away (the field exists only with fast seek on)
+#endif
+    uint32_t* const clmt = g_pack.clmt.drop();
     if (g_pack.idx) fclose(g_pack.idx);
     if (g_pack.pack_open) f_close(&g_pack.pack);
+    heap_caps_free(clmt);
     // S514: the block cache is owned by the open pack; free it with it, so a zoom across a band boundary does not
     // leak 132 KB of PSRAM per pack.
     heap_caps_free(g_pack.block_key_storage);
@@ -163,6 +175,60 @@ char probeDrive(const char* dir) {
     ESP_LOGW(TAG, "fat: no mounted drive has /maps/%s/tiles.pack (probed 0:-9:)", dir);
     return 0;
 }
+
+#if FF_USE_FASTSEEK
+// S514/EST-452: FatFs Fast Seek. CONFIG_FATFS_USE_FASTSEEK is 1 (build/tanmatsu/config/sdkconfig.h:913 ->
+// ffconf.h FF_USE_FASTSEEK), but f_lseek() only takes its short path when the FIL carries a cluster link map
+// table (`cltbl`, ff.c clmt_clust()). Without one it walks the FAT chain from the start of the file to reach any
+// LOWER offset, which on slo17 is ~110k cluster entries / ~860 FAT sectors per seek: the 465 ms boot tile and
+// most of the ~130 ms a tile inside a z17 fill. Building the table costs ONE such walk, here at open; afterwards
+// a seek is a scan of a handful of (length, first cluster) pairs.
+//
+// Not fatal on any failure: without a table the pack reads exactly as it did in v48, only slower. The FIL is
+// never left pointing at a table that has been freed.
+void attachLinkMap(int z) {
+    uint32_t items = om::map::clmtItemsForFragments(om::map::kClmtFirstTryFragments);
+    for (int attempt = 1; attempt <= 2; attempt++) {
+        const size_t bytes = (size_t)items * sizeof(uint32_t);
+        // PSRAM: a few KB next to the block index, and the map's budget is PSRAM. tbl[0] must be the table's
+        // size in DWORDs before the call — that is the only field the driver reads before it writes.
+        uint32_t* tbl = (uint32_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+        if (tbl == nullptr) {
+            ESP_LOGW(TAG, "z%d: no PSRAM for the fast-seek link map (%u B): seeking as before", z, (unsigned)bytes);
+            return;
+        }
+        tbl[0]            = items;
+        g_pack.pack.cltbl = tbl;
+        const FRESULT fr  = f_lseek(&g_pack.pack, CREATE_LINKMAP);
+        if (fr == FR_OK) {
+            // tbl[0] now holds the DWORDs the driver USED (2 + 2 * fragments), which is the fragment count.
+            if (!g_pack.clmt.adopt(tbl, items)) {   // cannot happen: closePack() dropped the previous one
+                g_pack.pack.cltbl = nullptr;
+                heap_caps_free(tbl);
+                ESP_LOGW(TAG, "z%d: fast seek off (the previous link map was still held): seeking as before", z);
+                return;
+            }
+            ESP_LOGI(TAG, "z%d: fast seek on, link map %u fragment(s), %u B", z,
+                     (unsigned)om::map::clmtFragmentsForItems(tbl[0]), (unsigned)bytes);
+            return;
+        }
+        // Too small: the driver wrote the size it needs into tbl[0]. Detach and read it before the free.
+        g_pack.pack.cltbl = nullptr;
+        const uint32_t           needed = tbl[0];
+        heap_caps_free(tbl);
+        const om::map::ClmtRetry again  = om::map::clmtRetry(needed, items);
+        if (!again.retry) {
+            ESP_LOGW(TAG, "z%d: fast seek off (f_lseek CREATE_LINKMAP: %d, %u DWORD(s) needed): seeking as before",
+                     z, (int)fr, (unsigned)needed);
+            return;
+        }
+        ESP_LOGI(TAG, "z%d: the pack needs a %u-DWORD link map (%u B); retrying once", z, (unsigned)again.items,
+                 (unsigned)(again.items * sizeof(uint32_t)));
+        items = again.items;
+    }
+    ESP_LOGW(TAG, "z%d: fast seek off after two tries: seeking as before", z);
+}
+#endif
 
 // Open the pack that serves `z`, reusing it when it is already the open one. Single-owner: the worker task, or
 // boot before any view exists. The FIL lives here and is closed in closePack() — the om-map worker is the only
@@ -257,6 +323,11 @@ bool ensurePack(int z) {
     }
     ESP_LOGI(TAG, "z%d: pack %s open on drive %c:, %u tiles, %lu B", z, dir, drive, (unsigned)g_pack.count,
              (unsigned long)f_size(&g_pack.pack));
+#if FF_USE_FASTSEEK
+    // S514/EST-452: last, so the open's own numbers are logged first and a slow map build cannot be mistaken for
+    // a slow open. A failure here leaves the pack usable (slow seeks), which is exactly v48's behaviour.
+    attachLinkMap(z);
+#endif
     return true;
 }
 
