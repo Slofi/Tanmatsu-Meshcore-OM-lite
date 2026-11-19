@@ -49,7 +49,7 @@ char g_node_name[32] = "TNMT (SI)";
 
 // EST-445: the automatic advert interval, stored in NVS mcid/advint as SECONDS (0 = Off). The default is
 // today's behaviour, 3 hours. The schedule in serviceRequests() reads this; the manual advert paths do not.
-uint32_t g_advint_s = 3u * 60u * 60u;
+uint32_t g_advint_s = 0;   // S514: Off until loadAdvertInterval() reads a stored choice
 
 // The L2's words for an advert type (firmware/src/ui/node_menu.h:27-35, advTypeName) — the new-node notice and the
 // Nodes sheet in the L2 name a type the same way, so the two cannot disagree. S513/EST-437. S514/EST-447: the ONE
@@ -630,7 +630,7 @@ void begin() {
     g_contacts_last_write_ms = monotonicMs();
     loadOrCreateIdentity();
     loadNodeName();          // EST-445: mcid/name, default "TNMT (SI)"
-    loadAdvertInterval();    // EST-445: mcid/advint, default 3 h
+    loadAdvertInterval();    // EST-445: mcid/advint; default Off since S514 (Filip)
     loadNewNodeNotice();     // S514/EST-447: mcset/newnode, default On
     loadChannels();
     g_loaded = true;

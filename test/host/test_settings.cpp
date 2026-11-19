@@ -132,7 +132,7 @@ void test_name_draft_typing() {
 
 // ------------------------------------------------------------------------------------------ 2. adverts
 void test_advert_interval_mapping() {
-  printf("test  automatic advert: Off / 1 / 3 / 6 / 12 h, default 3 h\n");
+  printf("test  automatic advert: Off / 1 / 3 / 6 / 12 h, default Off (S514)\n");
   CHECK_STR(tm::advertIntervalLabel(tm::AdvertInterval::Off), "Off");
   CHECK_STR(tm::advertIntervalLabel(tm::AdvertInterval::H1), "1 h");
   CHECK_STR(tm::advertIntervalLabel(tm::AdvertInterval::H3), "3 h");
@@ -145,8 +145,8 @@ void test_advert_interval_mapping() {
   CHECK_EQ(tm::advertIntervalSeconds(tm::AdvertInterval::H6), 21600);
   CHECK_EQ(tm::advertIntervalSeconds(tm::AdvertInterval::H12), 43200);
 
-  CHECK(tm::advertIntervalDefault() == tm::AdvertInterval::H3);
-  CHECK_EQ(tm::advertIntervalSeconds(tm::advertIntervalDefault()), 10800);   // today's behaviour
+  CHECK(tm::advertIntervalDefault() == tm::AdvertInterval::Off);           // S514, Filip: Off by default
+  CHECK_EQ(tm::advertIntervalSeconds(tm::advertIntervalDefault()), 0);
 
   CHECK(tm::advertIntervalCycle(tm::AdvertInterval::Off) == tm::AdvertInterval::H1);
   CHECK(tm::advertIntervalCycle(tm::AdvertInterval::H1) == tm::AdvertInterval::H3);
@@ -159,8 +159,8 @@ void test_advert_interval_mapping() {
   CHECK(tm::advertIntervalFromSeconds(10800) == tm::AdvertInterval::H3);
   CHECK(tm::advertIntervalFromSeconds(21600) == tm::AdvertInterval::H6);
   CHECK(tm::advertIntervalFromSeconds(43200) == tm::AdvertInterval::H12);
-  CHECK(tm::advertIntervalFromSeconds(7200) == tm::AdvertInterval::H3);      // corrupt -> default
-  CHECK(tm::advertIntervalFromSeconds(0xFFFFFFFFu) == tm::AdvertInterval::H3);
+  CHECK(tm::advertIntervalFromSeconds(7200) == tm::advertIntervalDefault());   // corrupt -> default (Off since S514)
+  CHECK(tm::advertIntervalFromSeconds(0xFFFFFFFFu) == tm::AdvertInterval::Off);
 
   CHECK(tm::advertIntervalStoredValid(0));
   CHECK(tm::advertIntervalStoredValid(10800));

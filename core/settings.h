@@ -638,10 +638,12 @@ constexpr uint32_t advertIntervalSeconds(AdvertInterval v) {
   }
 }
 
-constexpr AdvertInterval advertIntervalDefault() { return AdvertInterval::H3; }   // today's behaviour
+// S514 (Filip): "set the off as default for adverts". Without a stored choice there is no scheduled advert; the node
+// is announced by the 'a' key or Settings > Advert now, or by choosing an interval in Settings (stored, wins).
+constexpr AdvertInterval advertIntervalDefault() { return AdvertInterval::Off; }
 
 // The stored value is seconds (NVS mcid/advint). Any value that is not one of the five choices is treated
-// as the default rather than silently becoming Off: a corrupt NVS must not stop the node announcing.
+// as the DEFAULT, which is Off since S514 (Filip): a corrupt value behaves like no choice at all.
 constexpr AdvertInterval advertIntervalFromSeconds(uint32_t s) {
   switch (s) {
     case 0:      return AdvertInterval::Off;
@@ -649,7 +651,7 @@ constexpr AdvertInterval advertIntervalFromSeconds(uint32_t s) {
     case 10800:  return AdvertInterval::H3;
     case 21600:  return AdvertInterval::H6;
     case 43200:  return AdvertInterval::H12;
-    default:     return AdvertInterval::H3;
+    default:     return advertIntervalDefault();
   }
 }
 
@@ -677,6 +679,6 @@ constexpr bool advertScheduleDue(uint32_t interval_s, uint32_t elapsed_s, bool e
 }
 
 // The image's version, shown in General > DEVICE. One constant: the next ticket bumps this line.
-constexpr const char* kAppVersion = "45";
+constexpr const char* kAppVersion = "46";
 
 }  // namespace tm
