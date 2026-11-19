@@ -930,6 +930,9 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
     // its extra type is ACK, the delivered mark for the message we sent (Mesh.cpp:160-180). Opening it is the
     // only way a route is ever learned, and storing it is a STRUCTURAL change to the contact table.
     if (v.type() == meshcore::kTypePath) {
+        // S514 (Claude): a PATH can also be a repeater's answer to our login/status (it is not in the contact
+        // table when it was found by a scan); the RPTR link tries the login target's key first.
+        if (om::rptrlink::onPathReply(v)) return;
         if (!g_has_id) {
             ESP_LOGW(TAG, "rx %u B PATH but this node has no identity yet, dropped", (unsigned)len);
             return;

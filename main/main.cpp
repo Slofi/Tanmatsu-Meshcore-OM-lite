@@ -3330,7 +3330,13 @@ extern "C" void app_main(void) {
         {
             const om::rptr::LoginState before = om::rptrlink::login().state;
             om::rptrlink::tick();
-            if (om::rptrlink::login().state != before) dirty = true;
+            if (om::rptrlink::login().state != before) {
+                dirty = true;
+                // S514 (Claude; Filip: "stuck on sending"): the "sending…" note set when the login went out was
+                // only cleared on success, and the note wins over the state text, so "no answer" and "refused"
+                // could never show. Any state change ends the note.
+                g_rptr_note[0] = '\0';
+            }
             if (g_rptr_mode == 1 && om::rptrlink::login().loggedIn()) {
                 // Logged in: the STATUS view opens and asks for the repeater's own counters once.
                 g_rptr_mode = 2;

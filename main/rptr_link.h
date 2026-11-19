@@ -34,6 +34,7 @@ bool statusRequest();                               // refresh the open repeater
 // Receive hooks, called by mc_link's radio task.
 void onControl(const meshcore::View& pkt, int snr_db);
 bool onResponse(const meshcore::View& pkt);         // true when it was ours
+bool onPathReply(const meshcore::View& pkt);       // S514: a PATH from the login target (route + embedded RESPONSE)
 
 // Snapshot accessors: copy under the lock, then draw from the copy. `status_now_ms` is the caller's millis.
 void lock();

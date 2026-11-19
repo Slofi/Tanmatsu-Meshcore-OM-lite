@@ -14,6 +14,8 @@
 #include "mc_identity.h"
 #include "mc_link.h"
 #include "rptr_wire.h"
+#include "dm_send.h"       // S514 (Claude): dmOpenPath, for a reply that comes back as a PATH
+#include "time_source.h"   // S514 (Claude): the request timestamp is epoch seconds, as upstream
 
 namespace om {
 namespace rptrlink {
@@ -55,6 +57,19 @@ nvs_handle_t s_nvs = 0;
 bool         s_nvsOk = false;
 
 uint32_t nowMs() { return (uint32_t)(esp_timer_get_time() / 1000); }
+
+// S514 (Claude): upstream puts getCurrentTimeUnique() (epoch SECONDS, strictly increasing) in the first four bytes
+// of a login (BaseChatMesh.cpp:608) and of a request (:694), and the repeater refuses anything not newer than the
+// last value it stored for this client (reference/meshcore-repeater-v1.18.0/MyMesh.cpp:114 login, :676 request).
+// v53 sent milliseconds-since-boot for the login and a RANDOM number for the status request, so a request was
+// refused about half the time and every login after a reboot looked like a replay.
+uint32_t uniqueTimestamp() {
+    static uint32_t last = 0;
+    uint32_t        t    = (uint32_t)om::time_source::epochNow();
+    if (t <= last) t = last + 1;
+    last = t;
+    return t;
+}
 
 void lockInit() {
     if (s_lock == nullptr) s_lock = xSemaphoreCreateMutex();
@@ -247,7 +262,7 @@ bool loginStart(int found_index, const char* password) {
     }
 
     uint8_t frame[128];
-    const size_t n = rptr::buildLogin(self, f.key, secret, nowMs(), pw,
+    const size_t n = rptr::buildLogin(self, f.key, secret, uniqueTimestamp(), pw,
                                       path_len == 0xFF ? nullptr : path, path_len, frame, sizeof(frame));
     if (n == 0 || !mc::queueRptrFrame(frame, n)) {
         ESP_LOGW("rptr", "login: nothing went on the air");
@@ -300,7 +315,7 @@ bool statusRequest() {
         unlock();
         return false;
     }
-    const uint32_t tag = esp_random();
+    const uint32_t tag = uniqueTimestamp();   // the request's timestamp: must be newer than the last (see above)
     uint8_t frame[128];
     const size_t n = rptr::buildStatusRequest(self, s_targetKey, s_targetSecret, tag, esp_random(),
                                               s_targetPathLen == 0xFF ? nullptr : s_targetPath,
@@ -351,6 +366,8 @@ void onControl(const meshcore::View& pkt, int snr_db) {
     }
 }
 
+bool handleReply(const uint8_t* plain, size_t plain_len, bool login_busy, bool status_pending);
+
 bool onResponse(const meshcore::View& pkt) {
     lock();
     const bool login_busy = s_login.busy();
@@ -370,7 +387,13 @@ bool onResponse(const meshcore::View& pkt) {
     uint8_t plain[meshcore::kMaxPayload];
     size_t plain_len = 0;
     if (!rptr::openResponse(self, key, secret, pkt, plain, sizeof(plain), &plain_len)) return false;
+    return handleReply(plain, plain_len, login_busy, status_pending);
+}
 
+// The decrypted reply data of a login or a status request, whichever is pending. The same bytes arrive either as
+// a RESPONSE datagram or inside a PATH return (S514: a repeater answers a FLOODED login with
+// createPathReturn(..., PAYLOAD_TYPE_RESPONSE, reply_data, ...), reference/meshcore-repeater-v1.18.0/MyMesh.cpp:602-606).
+bool handleReply(const uint8_t* plain, size_t plain_len, bool login_busy, bool status_pending) {
     if (login_busy) {
         rptr::LoginAnswer a;
         if (!rptr::parseLoginAnswer(plain, plain_len, &a)) return false;
@@ -409,6 +432,39 @@ bool onResponse(const meshcore::View& pkt) {
         return true;
     }
     return false;
+}
+
+// S514 (Claude; Filip: "stuck on sending, no reply"): v53 dropped the repeater's login answer, because a FLOODED
+// login is answered with a PATH packet (route back + the RESPONSE as its extra) and PATH packets were only offered
+// to the contact table, where a scanned repeater is not. The login target's own key is tried here; the route it
+// carries is kept for the next request, and an embedded RESPONSE goes to the same parser as a RESPONSE datagram.
+bool onPathReply(const meshcore::View& pkt) {
+    lock();
+    const bool login_busy     = s_login.busy();
+    const bool status_pending = s_statusPending;
+    const bool have           = s_haveTarget;
+    uint8_t    key[rptr::kPubKeyBytes];
+    memcpy(key, s_targetKey, sizeof(key));
+    unlock();
+    if (!have) return false;
+    if (pkt.payload_len < 2 || pkt.payload[1] != key[0]) return false;
+
+    meshcore::Identity self;
+    if (!mc::selfIdentity(&self)) return false;
+    static meshcore::DmPath p;   // radio task only; large (extra buffer), so not on its stack
+    p = meshcore::DmPath{};
+    if (!meshcore::dmOpenPath(self, pkt, key, 1, &p)) return false;
+
+    lock();
+    if (p.out_path_len != 0xFF) {
+        s_targetPathLen = p.out_path_len;
+        memcpy(s_targetPath, p.out_path, (size_t)(p.out_path_len & 63) * (size_t)((p.out_path_len >> 6) + 1));
+    }
+    unlock();
+    ESP_LOGI("rptr", "reply came as a PATH (route 0x%02X, extra type %u, %u B)", (unsigned)p.out_path_len,
+             (unsigned)p.extra_type, (unsigned)p.extra_len);
+    if (p.extra_type == rptr::kTypeResponse) (void)handleReply(p.extra, p.extra_len, login_busy, status_pending);
+    return true;   // it was ours either way: the route alone is worth keeping
 }
 
 const rptr::FoundList& found() { return s_found; }
