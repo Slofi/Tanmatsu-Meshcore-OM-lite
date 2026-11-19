@@ -1581,7 +1581,7 @@ CONFIRM_Q = 'Change TX power to %s?' % TX_POWER_NEW
 CONFIRM_BODY = ('Cancel changes nothing. Apply writes the value to the radio and shows it in the row.')
 
 
-def sheet(img, question, body):
+def sheet(img, question, body, apply_label='Apply'):
     """The EST-422 confirmation sheet, at 800 px.
 
     S515/EST-467 (Filip: "make a default selection 'Cancel' as an extra safety"): **Cancel sits on the LEFT
@@ -1615,7 +1615,7 @@ def sheet(img, question, body):
     # Apply: right, gold, the only filled plate on the screen
     ax = x1 - 24 - bw
     plate(d, [ax, by, ax + bw, by + bh], P['SelBg2'], P['Acc'], r=6)
-    text(d, (ax + 18, by + bh // 2), 'Apply', fab, P['AccInk'], anchor='lm')
+    text(d, (ax + 18, by + bh // 2), apply_label, fab, P['AccInk'], anchor='lm')
     text(d, (ax + bw - 18, by + bh // 2), 'Enter', fb, P['Acc'], anchor='rm')
     # the sheet is modal: the hint bar below says so (drawn by the caller, after this)
     return img
@@ -2450,6 +2450,130 @@ def rptr_list():
     return save(img, '2026-11-19-rptr-list.png')
 
 
+# ------------------------------------------------------------ RPTR part 2a (S515/EST-470): the safe settings
+# The device's own numbers, so the preview and main/rptr_page.cpp cannot drift: 24 px a row, the label at 300,
+# the first row at 322, all content-relative to the pane's first line (main/rptr_page.cpp's kSet* constants).
+SET_ROW_H, SET_LABEL_Y, SET_ROWS_Y = 24, 300, 322
+SET_FIXTURES = [        # (label, the repeater's ANSWERED value, the action's verb)
+    ('Name', 'TEST-RPT-A', None),
+    ('Owner info', 'ops|TestBox', None),
+    ('Position', '46.25000, 14.50000', None),
+    ('Repeat', 'on', None),
+    ('Power save', 'off', None),
+    ('TX power', '22 dBm', None),
+    ('Advert local', 'send', None),
+    ('Advert flood', 'send', None),
+    ('Clock sync', 'send', None),
+    ('Reboot', 'reboot', None),
+]
+
+
+def _rptr_status_pane(d, W, work_top, focus, scroll, answer='OK', answer_bad=False):
+    """The right-hand pane of the STATUS view, exactly as the device lays it out (one scroll offset)."""
+    pad = TM['pad']
+    list_x1 = pad + TM['list_w']
+    x = list_x1 + 8 + 24
+    rw = W - pad - x
+    y0 = work_top + 16
+    pane_bot = TM['H'] - TM['hint_h'] - 8
+
+    def sy(cy):
+        return y0 + cy - scroll
+
+    fm = font(FONT_MONO, TM['f_meta'])
+    # Two panes in one, the device's rule: no focus = the stats with the section under them; a focused row = the
+    # ten settings rows from the top (nothing cut, no half row at either edge).
+    if focus < 0:
+        text(d, (x, sy(24)), 'TEST-RPT-A', font(FONT_SANS, 26), P['Ink'])
+        text(d, (x, sy(40)), "The repeater's own counters", fm, P['Dim'])
+    cells = [] if focus >= 0 else [('UPTIME', '1d 01:01'), ('BATTERY', '4.11 V (92%)'),
+             ('NOISE FLOOR', '-117 dBm'), ('LAST RSSI', '-83 dBm'),
+             ('LAST SNR', '8.25 dB'), ('TX QUEUE', '2'),
+             ('PACKETS RX', '123456'), ('PACKETS TX', '7890'),
+             ('AIRTIME', '3600 s'), ('RX AIRTIME', '7200 s'),
+             ('EVENTS', '5'), ('CRC ERRORS', '2')]
+    col_w = rw // 2
+    for i, (lab, val) in enumerate(cells):
+        cy = 64 + (i // 2) * 34
+        yy = sy(cy)
+        if yy + 34 < y0 or yy > pane_bot:
+            continue            # scrolled away, exactly like the device's clip
+        if yy < y0:
+            continue
+        cx = x + (i % 2) * col_w
+        text(d, (cx, yy), lab, font(FONT_MONO, TM['f_label']), P['Dimmer'])
+        text(d, (cx, yy + 15), val, font(FONT_SANS, 16), P['Ink'])
+    clock_y = sy(274)
+    if focus < 0 and y0 <= clock_y <= pane_bot:
+        text(d, (x, clock_y), "Clock 1750000100 (repeater's own) · RTT 431 ms", fm, P['Dim'])
+
+    lab_y = sy(SET_LABEL_Y)
+    if y0 <= lab_y <= pane_bot:
+        text(d, (x, lab_y), 'SETTINGS', fm, P['Dim'])
+        if focus < 0:
+            text(d, (x + rw - TM['ring_inset'], lab_y), '↓ open', font(FONT_MONO, TM['f_hint']),
+                 P['Acc'], anchor='ra')
+    fk = font(FONT_MONO, TM['f_kv'])
+    right = x + rw - TM['ring_inset']
+    for row, (lab, val, _verb) in enumerate(SET_FIXTURES):
+        cy = sy(SET_ROWS_Y + row * SET_ROW_H)
+        if cy + SET_ROW_H <= y0 or cy >= pane_bot:
+            continue
+        focused = row == focus
+        if focused:
+            d.rectangle([x - 8, cy, right, cy + SET_ROW_H], fill=P['SelBg'], outline=P['Acc'], width=2)
+        else:
+            hline(d, x, right, cy + SET_ROW_H, P['RowLine'])
+        text(d, (x, cy + 5), lab, font(FONT_SANS, TM['f_body']), P['AccInk'] if focused else P['Ink'])
+        text(d, (right - 6, cy + 6), val, fk, P['Acc'] if focused else P['Dim'], anchor='ra')
+    ans_y = sy(SET_ROWS_Y + len(SET_FIXTURES) * SET_ROW_H + 10)
+    if y0 <= ans_y <= pane_bot:
+        text(d, (x, ans_y), answer, font(FONT_MONO, TM['f_hint']),
+             P['Warn'] if answer_bad else P['Acc'])
+    foot_y = sy(SET_ROWS_Y + len(SET_FIXTURES) * SET_ROW_H + 32)
+    if y0 <= foot_y <= pane_bot:
+        text(d, (x, foot_y), '12 s ago · r reads the values again · Esc logs out',
+             font(FONT_MONO, TM['f_hint']), P['Dimmer'])
+    return x, rw
+
+
+def _rptr_status_frame(focus, scroll):
+    img, d = new_screen()
+    W, pad = TM['W'], TM['pad']
+    status_bar(d, clock='21:34')
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'RPTR', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    fm = font(FONT_MONO, TM['f_meta'])
+    text(d, (W - pad, y + TM['head_h'] // 2), 'status', fm, P['Dim'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+    work_top = y + TM['head_h'] + 1
+    _rptr_list_pane(d, W, pad, work_top, 0)
+    return img, d, W, work_top
+
+
+def rptr_settings():
+    """EST-470: RPTR part 2a, the SETTINGS section under the stats. Every value is the repeater's OWN answer
+    ("…" while a row has not been read); the focus is on TX power, whose draft is shown with `l/r` in the hints."""
+    img, d, W, work_top = _rptr_status_frame(5, SET_LABEL_Y - 12)
+    _rptr_status_pane(d, W, work_top, 5, SET_LABEL_Y - 12, answer='OK')
+    hint_bar(d, 'rptr', [('↑↓', 'row'), ('l/r', 'dBm'), ('Enter', 'send'), ('esc', 'log out')])
+    return save(img, '2026-11-19-rptr-settings.png')
+
+
+def rptr_confirm():
+    """EST-470: the shared confirm sheet, on the repeater's TX power. It NAMES the exact CLI line and the value the
+    row shows now, and Cancel opens focused (EST-467). Nothing is sent until Enter lands on Send."""
+    img, d, W, work_top = _rptr_status_frame(5, SET_LABEL_Y - 12)
+    _rptr_status_pane(d, W, work_top, 5, SET_LABEL_Y - 12, answer='OK')
+    img = sheet(img,
+                'Send "set tx 20"? The repeater says 22 dBm now.',
+                'The repeater answers "OK" or its own error text, and the row is read again.',
+                apply_label='Send')
+    d = ImageDraw.Draw(img)
+    hint_bar(d, 'rptr', [('l/r', 'Cancel / Send'), ('Enter', 'choose'), ('esc', 'cancel')])
+    return save(img, '2026-11-19-rptr-confirm.png')
+
+
 def rptr_status():
     """RPTR part 1, the STATUS view: the repeater's own counters, every value with its unit."""
     img, d = new_screen()
@@ -3189,7 +3313,8 @@ def chat_msg_info():
 RENDERERS = dict(chat_select=chat_select, chat_msg_menu=chat_msg_menu, chat_msg_info=chat_msg_info, map_nodes_z12=map_nodes_z12, map_nodes_z14=map_nodes_z14, nodes_views=nodes_views, nodes_sd_wording=nodes_sd_wording, node_menu_radio=node_menu_radio, launcher=launcher, nodes_fresh=nodes_fresh, hint_dots=hint_dots, menu=menu, nodes=nodes, nodes_search=nodes_search,
                  nodes_favourites=nodes_favourites, node_trace=node_trace, chat=chat, chat2=chat_cards,
                  chat_emoji=chat_emoji,
-                 chat_dm=chat_dm_column, chat_meta=chat_meta, dm_enter=dm_enter, map=map_page, rptr=rptr, rptr_list=rptr_list, rptr_status=rptr_status, settings=settings,
+                 chat_dm=chat_dm_column, chat_meta=chat_meta, dm_enter=dm_enter, map=map_page, rptr=rptr, rptr_list=rptr_list, rptr_status=rptr_status, rptr_settings=rptr_settings,
+                 rptr_confirm=rptr_confirm, settings=settings,
                  settings_general=settings_general, settings_omlite=settings_omlite,
                  settings_opstoc=settings_opstoc, settings_chat=settings_chat,
                  settings_nodes=settings_nodes, settings_map=settings_map,

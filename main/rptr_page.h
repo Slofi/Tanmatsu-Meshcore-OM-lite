@@ -45,6 +45,21 @@ struct RptrView {
     const rptr::Status* status = nullptr;
     bool         status_pending = false;
     uint32_t     status_age_s = 0;
+
+    // EST-470: the SETTINGS section under the stats (part 2a's safe settings). Every VALUE here came from the
+    // repeater's own answer; a row that has not been read yet draws "…", never a placeholder.
+    const rptr::Settings* set = nullptr;
+    int          set_focus = -1;        // -1 = not focused yet: the pane opens on the stats
+    bool         set_pending = false;   // one CLI line is waiting for its answer
+    const char*  set_answer = "";       // the repeater's last words ("OK", its error text, "no answer")
+    bool         set_answer_bad = false;
+    // The shared text field, open on a text row. `set_edit_text` is the DRAFT: the row behind keeps the value the
+    // repeater answered until Apply, exactly as EST-422 requires.
+    bool         set_edit = false;
+    const char*  set_edit_label = "";
+    const char*  set_edit_text = "";
+    size_t       set_edit_len = 0;
+    int          set_tx_draft = 0;      // the +/- draft on the TX power row
 };
 
 void drawRptr(Screen& s, const RptrView& v);

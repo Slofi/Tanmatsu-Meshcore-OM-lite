@@ -1567,6 +1567,13 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
     // transmits. The DM's timestamp is NOT a clock source (unlike an advert): anyone holding a contact's key can
     // write any ts, so it is recorded and noteText()/noteAdvert() are deliberately not called.
     if (v.type() == meshcore::kTypeTxtMsg) {
+        // S515/EST-470: a repeater's CLI ANSWER arrives as a TXT_MSG that is sealed with the LOGIN TARGET's key,
+        // and the answering repeater is usually NOT in the contact table - the same shape as v55's dropped login
+        // reply (PATH -> onPathReply). The RPTR link tries that key FIRST and takes only a CLI-typed text, so:
+        //   · a CLI answer never lands in a DM thread and is never dropped as "no contact opens it";
+        //   · it never reaches dmPush, so it raises no new-message pop-up (core/msg_popup.h) and no Chat dot;
+        //   · a PLAIN text from that same repeater still falls through to the DM code below, untouched.
+        if (om::rptrlink::onCliAnswer(v)) return;
         if (!g_has_id) {
             ESP_LOGW(TAG, "rx %u B TXT_MSG but this node has no identity yet, dropped", (unsigned)len);
             return;

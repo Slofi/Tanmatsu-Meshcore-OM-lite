@@ -344,7 +344,7 @@ PYORACLE
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core -I ../../core/ed25519 \
     test_rptr.cpp \
     ../../core/rptr_model.cpp ../../core/rptr_wire.cpp \
-    ../../core/mc_wire.cpp ../../core/mc_crypto_psa.cpp ../../core/mc_identity.cpp \
+    ../../core/mc_wire.cpp ../../core/mc_crypto_psa.cpp ../../core/mc_identity.cpp ../../core/mc_dm.cpp \
     "$ED"/*.o \
     -lmbedcrypto \
     -o "$RPTR"
@@ -360,7 +360,7 @@ done
     -I ../../core -I ../../core/ed25519 \
     test_rptr.cpp \
     ../../core/rptr_model.cpp ../../core/rptr_wire.cpp \
-    ../../core/mc_wire.cpp ../../core/mc_crypto_psa.cpp ../../core/mc_identity.cpp \
+    ../../core/mc_wire.cpp ../../core/mc_crypto_psa.cpp ../../core/mc_identity.cpp ../../core/mc_dm.cpp \
     "$RPTRED"/*.o \
     -lmbedcrypto \
     -o "$RPTRASAN"

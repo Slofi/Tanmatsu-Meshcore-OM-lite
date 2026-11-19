@@ -175,17 +175,64 @@ void drawLoginDetail(Screen& s, const RptrView& v, int x, int rw, int top) {
     }
 }
 
+// EST-470: the SETTINGS section's geometry, one home. Ten rows at 24 px do not fit under six rows of stats in a
+// 386 px pane, so the pane shows ONE of the two: the stats with the section's head under them (no focus, as v64), or
+// the ten rows with their answer and foot line (a row focused). Both fit whole, so no half row is ever drawn.
+// The numbers below are content-relative to the pane's first line.
+constexpr int kSetRowH    = 24;
+constexpr int kSetLabelY  = 300;   // "SETTINGS", right under the stats' clock line
+constexpr int kSetRowsY   = 322;   // the first row
+constexpr int kSetAnswerY = kSetRowsY + (int)om::rptr::kSetRowCount * kSetRowH + 10;
+constexpr int kSetFootY   = kSetAnswerY + 22;
+
+int s_status_scroll = 0;   // page-local, main task only, like s_rptr_first
+
+// One settings row: label left, the repeater's OWN value right, the gold focus band when it is the focus. A value
+// that has not been read yet is "…" - never a placeholder and never the L2's default.
+void drawSetRow(Screen& s, const RptrView& v, int x, int rw, int row, int y0) {
+    const int y1 = y0 + kSetRowH;
+    const int right = x + rw - kTmRingInset;
+    const bool focused = v.set_focus == row;
+    if (y1 <= 0 || y0 >= kTmH - kTmHintH) return;
+    if (focused) {
+        s.fillRect(x - 8, y0, right - (x - 8), kSetRowH, kSelBg);
+        s.frame(x - 8, y0, right - (x - 8), kSetRowH, 2, kAcc);
+    } else {
+        s.hline(x, right, y1, kRowLine);
+    }
+    drawText(s, Face::Body, x, y0 + 5, om::rptr::setRowLabel(row), focused ? kAccInk : kInk);
+
+    char value[64] = "\xe2\x80\xa6";   // U+2026: "not read yet", the ticket's own glyph
+    if (v.set != nullptr) {
+        if (row == (int)om::rptr::SetRow::TxPower && focused && v.set_tx_draft >= (int)om::rptr::kTxMin) {
+            snprintf(value, sizeof(value), "%d dBm", v.set_tx_draft);   // the +/- draft, before the confirm
+        } else if (om::rptr::setRowIsAction(row)) {
+            snprintf(value, sizeof(value), "%s", row == (int)om::rptr::SetRow::Reboot ? "reboot" : "send");
+        } else if (!om::rptr::settingsRowValue(*v.set, row, value, sizeof(value))) {
+            snprintf(value, sizeof(value), "\xe2\x80\xa6");
+        }
+    }
+    drawTextClipped(s, Face::Kv, x + 150, y0 + 6, right - (x + 150) - 6, value, focused ? kAcc : kDim);
+}
+
 void drawStatusDetail(Screen& s, const RptrView& v, int x, int rw, int top) {
-    int y = top + 16;
-    drawText(s, Face::Title, x, y + 24, v.target != nullptr ? v.target : "Repeater", kInk);
-    y += 40;
+    const int y0       = top + 16;
+    const int pane_bot = kTmH - kTmHintH - 8;
+
+    // Two panes in one. With NO focus the pane opens on the stats exactly as v64 did and the SETTINGS section
+    // starts under them; the moment a row is focused the pane moves to the section (10 x 24 + the answer + the foot
+    // line is 334 px of the 386 available).
+    const bool settings_pane = v.set_focus >= 0;
+    s_status_scroll = settings_pane ? kSetLabelY - 12 : 0;
+
     char line[96];
-    if (v.status_pending) {
-        drawText(s, Face::Body, x, y, "Reading the repeater's status…", kAcc);
-    } else if (v.status != nullptr && v.status->valid) {
+    char title_buf[48];
+    snprintf(title_buf, sizeof(title_buf), "%s", v.target != nullptr ? v.target : "Repeater");
+    if (!settings_pane) drawText(s, Face::Title, x, y0 + 24 - s_status_scroll, title_buf, kInk);
+
+    if (!settings_pane && v.status != nullptr && v.status->valid) {
         const rptr::Status& st = *v.status;
-        drawText(s, Face::Meta, x, y, "The repeater's own counters", kDim);
-        y += 24;
+        drawText(s, Face::Meta, x, y0 + 40 - s_status_scroll, "The repeater's own counters", kDim);
         // Two columns of label/value, every value with its unit.
         char up[24], batt[24], snr[24], noise[24], rssi[24];
         rptr::uptimeText(up, sizeof(up), st.uptimeSec);
@@ -225,26 +272,71 @@ void drawStatusDetail(Screen& s, const RptrView& v, int x, int rw, int top) {
         cells[11].value = vals[6];
         const int col_w = rw / 2;
         for (int i = 0; i < 12; ++i) {
+            const int cy = 64 + (i / 2) * 34;
+            if (y0 + cy + 34 > pane_bot) continue;   // the pane is 386 px: a short one drops the last row
             const int cx = x + (i % 2) * col_w;
-            const int cy = y + (i / 2) * 34;
-            drawText(s, Face::Hint, cx, cy, cells[i].label, kDimmer);
-            drawText(s, Face::Body, cx, cy + 15, cells[i].value, kInk);
+            const int yy = y0 + cy - s_status_scroll;
+            drawText(s, Face::Hint, cx, yy, cells[i].label, kDimmer);
+            drawText(s, Face::Body, cx, yy + 15, cells[i].value, kInk);
         }
-        y += 6 * 34 + 6;
-        if (st.clockValid) {
-            snprintf(line, sizeof(line), "Clock %lu (repeater's own) · RTT %lu ms",
-                     (unsigned long)st.clock, (unsigned long)(st.haveRtt ? st.rttMs : 0));
-            drawText(s, Face::Meta, x, y, line, kDim);
-        } else {
-            drawText(s, Face::Meta, x, y, "Clock not set on the repeater", kDim);
+        const int clock_y = y0 + 274 - s_status_scroll;
+        if (clock_y > 0 && clock_y < pane_bot) {
+            if (st.clockValid) {
+                snprintf(line, sizeof(line), "Clock %lu (repeater's own) · RTT %lu ms", (unsigned long)st.clock,
+                         (unsigned long)(st.haveRtt ? st.rttMs : 0));
+                drawText(s, Face::Meta, x, clock_y, line, kDim);
+            } else {
+                drawText(s, Face::Meta, x, clock_y, "Clock not set on the repeater", kDim);
+            }
         }
-        y += 22;
-        snprintf(line, sizeof(line), "%lu s ago · r refreshes · Esc logs out", (unsigned long)v.status_age_s);
-        drawText(s, Face::Hint, x, y, line, kDimmer);
-    } else {
-        drawText(s, Face::Body, x, y, "No status yet. Press r to ask.", kDim);
-        y += 24;
-        drawText(s, Face::Hint, x, y, "Esc logs out", kDimmer);
+    } else if (!settings_pane && v.status_pending) {
+        drawText(s, Face::Body, x, y0 + 64 - s_status_scroll, "Reading the repeater's status…", kAcc);
+    } else if (!settings_pane) {
+        drawText(s, Face::Body, x, y0 + 64 - s_status_scroll, "No status yet. Press r to ask.", kDim);
+    }
+
+    // ---- EST-470: the SETTINGS section. Enter edits, and every change goes through the shared confirm sheet.
+    const int lab_y = y0 + kSetLabelY - s_status_scroll;
+    if (lab_y > 0 && lab_y < pane_bot) {
+        drawText(s, Face::Meta, x, lab_y, "SETTINGS", kDim);
+        if (!settings_pane) drawText(s, Face::Hint, x + rw - kTmRingInset - 62, lab_y, "↓ open", kAcc);
+    }
+    for (int row = 0; row < (int)om::rptr::kSetRowCount; ++row) {
+        const int cy = y0 + kSetRowsY + row * kSetRowH - s_status_scroll;
+        if (cy + kSetRowH <= y0 || cy >= pane_bot) continue;
+        drawSetRow(s, v, x, rw, row, cy);
+    }
+    // The repeater's last words: OK, its own error text, or "no answer". A change is never shown as done here
+    // without an answer, and the ROW's value always comes from a read.
+    const int ans_y = y0 + kSetAnswerY - s_status_scroll;
+    if (ans_y > 0 && ans_y + 16 < pane_bot) {
+        if (v.set_pending) {
+            drawText(s, Face::Hint, x, ans_y, "waiting for the repeater…", kAcc);
+        } else if (v.set_answer != nullptr && v.set_answer[0] != '\0') {
+            drawTextClipped(s, Face::Hint, x, ans_y, rw - kTmRingInset, v.set_answer,
+                            v.set_answer_bad ? (uint16_t)kWarn : (uint16_t)kAcc);
+        }
+    }
+    const int foot_y = y0 + kSetFootY - s_status_scroll;
+    if (foot_y > 0 && foot_y + 16 < pane_bot) {
+        snprintf(line, sizeof(line), "%lu s ago · r reads the values again · Esc logs out",
+                 (unsigned long)v.status_age_s);
+        drawText(s, Face::Hint, x, foot_y, line, kDimmer);
+    }
+
+    // The shared text field, drawn OVER the pane's bottom when it is open (the row behind keeps the old value).
+    if (v.set_edit) {
+        const int field_h = 56;
+        const int fy      = pane_bot - field_h - 26;
+        s.fillRect(x - 8, fy, rw, field_h, kFieldBg);
+        s.frame(x - 8, fy, rw, field_h, 2, kAcc);
+        snprintf(line, sizeof(line), "%s", v.set_edit_label != nullptr ? v.set_edit_label : "");
+        drawText(s, Face::Hint, x - 2, fy - 16, line, kDim);
+        char shown[80];
+        snprintf(shown, sizeof(shown), "%s_", v.set_edit_text != nullptr ? v.set_edit_text : "");
+        drawTextClipped(s, Face::Row, x + 6, textBaseline(s, Face::Row, fy, field_h), rw - 20, shown, kInk);
+        drawText(s, Face::Hint, x - 2, fy + field_h + 4, "Enter sends · Esc cancels",
+                 kDimmer);
     }
 }
 
@@ -305,8 +397,18 @@ void drawRptr(Screen& s, const RptrView& v) {
         hints[n++] = {"Enter", "send"};
         hints[n++] = {"esc", "back"};
     } else {
-        hints[n++] = {"r", "refresh"};
-        hints[n++] = {"esc", "log out"};
+        // EST-470: the status view's settings rows. Left/Right is the TX power draft, the only stepper here.
+        if (v.set_edit) {
+            hints[n++] = {"Enter", "send"};
+            hints[n++] = {"bksp", "delete"};
+        } else if (v.set_focus == (int)om::rptr::SetRow::TxPower) {
+            hints[n++] = {"l/r", "dBm"};
+            hints[n++] = {"Enter", "send"};
+        } else {
+            hints[n++] = {"Enter", "change"};
+            hints[n++] = {"r", "re-read"};
+        }
+        hints[n++] = {"esc", v.set_edit ? "cancel" : "log out"};
     }
     drawHintBar(s, tm::Page::Rptr, hints, n);
 }

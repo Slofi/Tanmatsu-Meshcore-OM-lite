@@ -15,6 +15,108 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S515 (EST-470) RPTR part 2a: the safe settings
+
+> Written by **DeepSeek** for ticket **EST-470** (re-filed from EST-458): fenced Paperclip run, no session start or
+> end, nothing installed, flashed, pushed or committed. Starting point **v64 `28dc1b1`** (the tree Claude installed on
+> the device on 2026-11-19 20:56). **Version: 65** (`core/settings.h` kAppVersion). `firmware/` was read only and is
+> unchanged.
+>
+> **ITEMS DONE: 1, 2, 3, 4, 5, 6.** `sh test/host/run.sh` **exit 0**: the `rptr` suite **101 → 287 checks** (+186,
+> run twice: `-O2` and the ASan/UBSan stage), the whole log's suite totals summed **32,712 → 33,084** (+372).
+> `make build` **exit 0**, `application.bin` **0x1A8C70 = 1,739,888 B** (**+15,856 B** over v64's 1,724,032 B;
+> 1,698 KiB, i.e. **53 % of the ticket's 3,200 KiB budget**, 17 % of the 2 MiB app partition still free). Previews:
+> `shots/2026-11-19-rptr-settings.png`, `shots/2026-11-19-rptr-confirm.png`. **Nothing was installed, so no line here
+> was ever on the air.**
+
+### What it builds (2a only; radio/path hash/loop detect/advert timers/flood.max/regions/silent/free-form = 2b)
+
+1. **The CLI path, ported line by line.** `core/rptr_wire.cpp::buildCli` is upstream
+   `BaseChatMesh::sendCommandData` (`firmware/lib/meshcore/helpers/BaseChatMesh.cpp:492-516`): a **TXT_MSG** whose
+   plaintext is `ts(4 LE) | flags | line`, `flags = (attempt & 3) | (TXT_TYPE_CLI_DATA << 2)` with
+   `TXT_TYPE_CLI_DATA = 1` (`helpers/TxtDataHelpers.h:7`, so `0x04` at attempt 0), sealed as
+   `dest_hash(1) | src_hash(1) | encryptThenMAC(secret, plaintext)` (`Mesh.cpp:490-509`), sent DIRECT down the route
+   learned at login (`s_targetPath`, v55) or as a flood when there is none, which is `sendCommandData`'s
+   `out_path_len == OUT_PATH_UNKNOWN` branch. The timestamp is v55's `uniqueTimestamp()` (epoch seconds, strictly
+   increasing) because the repeater drops anything not newer:
+   `sender_timestamp >= client->last_timestamp` (`reference/meshcore-repeater-v1.18.0/MyMesh.cpp:714`), and an EQUAL
+   one is a RETRY that deliberately answers nothing (`:727-731`).
+2. **The answer is a TXT_MSG of the same CLI type, and it goes to RPTR, not to the DMs.** The repeater builds it as
+   `ts(4 LE) | (TXT_TYPE_CLI_DATA << 2) | text` (`MyMesh.cpp:743-757`). `rptrlink::onCliAnswer` is called from
+   `mc_link.cpp::onPacket` **before the DM code**, at the top of the TXT_MSG branch: it tries the **login target's
+   key** (a node usually NOT in the contact table, the same shape as v55's dropped login reply), and
+   `rptr::parseCliReply` accepts **only** CLI_DATA - so a PLAIN text from that same repeater still reaches Chat,
+   while a CLI answer returns before `dmPush`, which is why it raises **no new-message pop-up**
+   (`core/msg_popup.h`) and **no Chat dot**, and is never dropped as "no contact opens it".
+3. **READ BEFORE WRITE.** After a successful login (and on `r`) the link runs the seven reads in the order
+   `rptr::setReadCmd()` fixes: `get name`, `get owner.info`, `get lat`, `get lon`, `get repeat`, `powersaving`,
+   `get tx` - the exact `get` names from `CommonCLI::handleGetCmd` (`firmware/lib/meshcore/helpers/CommonCLI.cpp:701-790`)
+   and `CommonRadioPrefs::handleCommand` (`:135-139`), never guessed. Every answer is keyed by the **line that
+   asked** (`settingsApplyRead`), not by the row, so `get lat` and `get lon` can never be swapped; a row that has
+   not been answered yet draws **"…"**. NOTE: `powersaving` is a TOP-LEVEL command (`CommonCLI.cpp:439-462`) - the
+   L2's own `firmware/src/rptr_model.cpp:1146` sends `set powersaving on`, which would reach `handleSetCmd` and come
+   back `unknown config: powersaving on`. This port sends `powersaving on|off`.
+4. **SETTINGS in the status view**: ten rows (Name, Owner info, Position, Repeat, Power save, TX power, Advert local,
+   Advert flood, Clock sync, Reboot), label left and the repeater's own value right; Enter edits (one shared text
+   field for name/owner/position, toggles for on/off, `l/r` or `+`/`-` for TX power 1-22 dBm, one action per action
+   row). **Every** change goes through the shared confirm sheet (EST-422/EST-467, Cancel focused) whose text NAMES
+   the exact line and the value the row shows now (`confirmWriteText`); Reboot's is the ticket's own sentence.
+   **Position is ONE row and TWO commands** (`set lat` then `set lon`, `CommonCLI.cpp:557-563`): the sheet names
+   both, the link sends the first and releases the second only on its OK, so a refused half never leaves the
+   repeater with a half-applied position (`settingsSend(..., const char* second)`). The
+   answer ("OK" / the repeater's error text / "no answer") is drawn on the page and raised as the shared notice, and
+   the changed row is read again - **a value only ever comes from a read**, so nothing is shown as done on our word.
+   `clock sync` is ALSO sent by itself once per login, as OM does (`CommonCLI.cpp:211-221`; skipped while this
+   device's own clock is before 2025-01-01, because it would only be refused).
+5. **One request at a time**: `rptr::CliPending` plus `sendCliLocked()` refuse a second line while one is in flight;
+   the deadline is the v55 floor (`requestDeadlineMs(8000, 0, 8000)`); a timeout says "no answer" and leaves every
+   row as it was READ. `reboot` is the one line that can never answer (`CommonCLI.cpp:199-200` calls
+   `board->reboot()`, which does not return), so its send is its answer and the page returns to the list. The
+   password is never logged, drawn or returned by any new code path.
+6. **Host tests** (`test/host/test_rptr.cpp`, +186 checks): the CLI frame byte for byte against the Python oracle
+   (flood and direct), three reads, eleven answers, per-command parsing, the 23-byte name cap with a shared
+   position, the TX clamp, the confirm wording, the ONE-line queue with the 32-bit wrap, and the routing rule
+   (`route()` in the test: CLI answer → RPTR, PLAIN text from the same key → DM, our own frame → dropped). The parsers
+   also run in the ASan/UBSan stage with the 4,000-round junk pass extended to `openCliAnswer`/`parseCliReply`.
+
+### Arms (two, each run, each reverted)
+
+* **A - a CLI parser that also takes a PLAIN text** (`rptr_wire.cpp`, `txt_type != kTxtTypeCliData && txt_type != 0`):
+  `FAIL test/host/test_rptr.cpp:408  route(kAnsPlain) == Where::Dm` - **1 failure**, i.e. a DM would have been
+  swallowed by RPTR.
+* **B - the 23-byte cap dropped** (`rptr_model.cpp`, `max = kNameMax` always): two lines,
+  `FAIL test/host/test_rptr.cpp:552  om::rptr::cliName(line, sizeof(line), "ABCDEFGHIJKLMNOPQRSTUVWX", true) == 0 (got 33, want 0)`
+  and `:553  got "set name ABCDEFGHIJKLMNOPQRSTUVWX" want ""`.
+
+### Where this came from (EST-458's saved partial patch)
+
+Started **from** `../wip/EST-458-rptr-part2a-partial-2026-11-19.patch`, then re-read everything it touches at v64:
+its `core/rptr_model.*` block (the labels, the line builders, the parsers, the confirm words, `CliPending`) is kept,
+with one real change: the patch applied a `get` answer by ROW (`settingsApplyAnswer(Settings*, int row, ...)`), and
+its Position case had to guess which half of "lat, lon" an answer was ("the half that has not arrived yet is the
+one filled here"). Answers are keyed by the **asked line** now. The patch contained nothing else - no wire frame, no
+link, no page, no keys, no tests, no previews; those are new here.
+
+### Files
+
+`core/rptr_model.h/.cpp` (the settings model, the seven reads, the line builders, the answer parsers, the confirm
+words, `CliPending`), `core/rptr_wire.h/.cpp` (`buildCli`, `openCliAnswer`, `parseCliReply`, `kTypeTxtMsg`),
+`main/rptr_link.h/.cpp` (one-line queue, the read ladder, the timeout, `onCliAnswer`), `main/mc_link.cpp` (the RPTR
+hook before the DM code), `main/rptr_page.h/.cpp` (the SETTINGS section, the field, the answer line, the hints),
+`main/main.cpp` (the section's keys, the confirm wiring, the login hook, the notice),
+`test/host/test_rptr.cpp` + `test/host/run.sh` (links `mc_dm.cpp` into the RPTR suite),
+`tools/preview_tanmatsu.py`, `core/settings.h` (v65).
+
+### What could NOT be checked
+
+Everything on the air: no login, no read, no change, no reboot was sent (the next install needs Filip at the
+device). The SI-LJ-Trnovo II run is Claude's with Filip, starting with Clock sync and Owner info. Two things to
+watch on the first real session: whether that repeater's firmware answers `get tx` at all (a repeater older than
+1.18 may answer `??: tx`, which shows as an error line and leaves the row "…"), and whether `powersaving on` is
+accepted by the version actually deployed.
+
+
+**Claude's review of EST-470 (S515, 2026-11-19 21:2x):** DeepSeek's fence could write only `paperclip-pilot/sweep/` in this run, so the work came as `sweep/est470-EST-470.patch` (15 files, +1991/−36) + 2 PNGs; Claude dry-ran it (`git apply --check`, clean on `28dc1b1`), key-scanned it (0 hits), checked no new log line touches the repeater password, applied it, and re-ran the suite here (exit 0; `test_rptr` 287 checks in both O2 and ASan) and the build (exit 0, 1,739,888 B). Read: `onCliAnswer` sits at the top of the TXT_MSG branch before the DM code and returns at once without a login (`s_haveTarget && loggedIn()`, then the source hash). Accepted: DeepSeek's `powersaving on|off` as a top-level command (`CommonCLI.cpp:439-462`), which also means **the L2's `set powersaving on` (`firmware/src/rptr_model.cpp:1146`) is a real L2 bug** (the repeater answers `unknown config`); not fixed on the L2 tonight. Not on the air yet: watch `get tx` and `powersaving` against SI-LJ-Trnovo II.
 ## 2026-11-19 · S515 (EST-469) message selection + menu
 
 > Written by **DeepSeek** for ticket **EST-469**: fenced Paperclip run, no session start/end, nothing installed,

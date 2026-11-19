@@ -758,7 +758,8 @@ enum : uint16_t {
 enum class ChatSub : uint8_t { None = 0, Channel, Scope, AddKey, KeyShown };
 enum class ChatField : uint8_t { None = 0, Tag, KeyName, KeyB64, ScopeRegion, Rename };
 enum class ConfirmTarget : uint8_t { Name = 0, RemoveChannel, ShowKey, RemoveContact, ClearContacts, ForgetRptr,
-                                     DeleteEverywhere, ClearRadio, RemoveFromRadio };
+                                     DeleteEverywhere, ClearRadio, RemoveFromRadio,
+                                     RptrSetting };   // EST-470: one sheet for every safe setting
 
 // S514/EST-453: the RPTR page's UI state. The link owns the found list, the login machine and the status;
 // these are only where the cursor and the typed password are.
@@ -768,6 +769,17 @@ char         g_rptr_pw[om::rptr::kPasswordMax + 1] = "";
 size_t       g_rptr_pw_len    = 0;
 uint32_t     g_rptr_status_ms = 0;
 char         g_rptr_note[64]  = "";
+
+// EST-470: the status view's SETTINGS section. Only where the cursor, the draft and the CLI line that the open
+// confirm will send are; every VALUE comes from the link (the repeater's own answers), never from here.
+int          g_rptr_set_focus = -1;                  // -1 = not focused yet: the pane opens on the stats
+bool         g_rptr_set_edit = false;                // the shared text field is open on a text row
+char         g_rptr_set_text[128] = "";
+size_t       g_rptr_set_text_len = 0;
+int          g_rptr_set_tx = 0;                      // the +/- draft on the TX power row
+char         g_rptr_set_line[128] = "";              // the exact line the open confirm will send
+char         g_rptr_set_line2[128] = "";             // its second half ("set lon ..."); empty for most rows
+uint32_t     g_rptr_answer_seen = 0;                 // the last answer already shown as a notice
 
 ChatSub     g_chat_sub         = ChatSub::None;
 ChatField   g_chat_field       = ChatField::None;
@@ -815,7 +827,7 @@ uint8_t             g_confirm_pub[32] = {0};
 ConfirmTarget g_confirm_target  = ConfirmTarget::Name;
 int           g_confirm_channel = -1;
 char          g_confirm_title[48] = "Change the node name?";
-char          g_confirm_text[160] = "Other nodes will see the new name after the next advert";
+char          g_confirm_text[224] = "Other nodes will see the new name after the next advert";
 char          g_confirm_apply[16] = "Apply";
 bool          g_confirm_danger  = false;
 
@@ -2916,6 +2928,23 @@ extern "C" void app_main(void) {
         rv.status_age_s = status_copy.valid && g_rptr_status_ms != 0
                               ? (uint32_t)((esp_timer_get_time() / 1000 - g_rptr_status_ms) / 1000)
                               : 0;
+        // EST-470: the SETTINGS section, from one copy taken under the link's lock.
+        static om::rptr::Settings set_copy;
+        static char set_answer_copy[96];
+        om::rptrlink::lock();
+        set_copy = om::rptrlink::settings();
+        snprintf(set_answer_copy, sizeof(set_answer_copy), "%s", om::rptrlink::lastAnswer());
+        rv.set_pending   = om::rptrlink::cliBusy();
+        rv.set_answer_bad = om::rptrlink::lastAnswerBad();
+        om::rptrlink::unlock();
+        rv.set           = &set_copy;
+        rv.set_focus     = g_rptr_set_focus;
+        rv.set_answer    = set_answer_copy;
+        rv.set_edit      = g_rptr_set_edit;
+        rv.set_edit_label = g_rptr_set_focus >= 0 ? om::rptr::setRowLabel(g_rptr_set_focus) : "";
+        rv.set_edit_text = g_rptr_set_text;
+        rv.set_edit_len  = g_rptr_set_text_len;
+        rv.set_tx_draft  = g_rptr_set_tx;
         if (g_rptr_mode == 1) {
             if (g_rptr_note[0] != '\0')
                 rv.note = g_rptr_note;
@@ -2927,6 +2956,62 @@ extern "C" void app_main(void) {
                 rv.note = "refused by the repeater";
         }
         om::ui::drawRptr(g_screen, rv);
+        // EST-470: every change goes through the shared confirm sheet, drawn over the status view (the same
+        // frame the Settings sub-page and the Nodes page use). The row behind keeps the OLD value: the sheet is
+        // what will put a line on the air, and only an answer from the repeater changes a value.
+        if (settings_frame.confirmOpen() && g_confirm_target == ConfirmTarget::RptrSetting) {
+            om::ui::SettingsView sv;
+            sv.confirm        = true;
+            sv.confirm_title  = g_confirm_title;
+            sv.confirm_text   = g_confirm_text;
+            sv.confirm_apply  = g_confirm_apply;
+            sv.confirm_danger = g_confirm_danger;
+            sv.confirm_cancel = settings_frame.confirm_cancel;
+            om::ui::drawConfirmSheet(g_screen, sv);
+        }
+    };
+
+    // ---- EST-470: the SETTINGS section's two helpers ------------------------------------------------
+    // The row's value as the repeater answered it ("" when it has not been read yet).
+    auto rptrRowValue = [](int row, char* out, size_t cap) -> bool {
+        if (out == nullptr || cap == 0) return false;
+        out[0] = '\0';
+        om::rptrlink::lock();
+        const bool ok = om::rptr::settingsRowValue(om::rptrlink::settings(), row, out, cap);
+        om::rptrlink::unlock();
+        return ok;
+    };
+    // Raise the shared sheet for ONE change. The question NAMES the line(s) and the value the row shows now
+    // (EST-470 item 3); it is the only way a line reaches the air, and Cancel changes nothing. `send_line` and
+    // `send_line2` are what goes out: a Position change is `set lat` then `set lon`, two commands for one row.
+    auto rptrConfirm = [&](int row, const char* question_line, const char* send_line, const char* send_line2,
+                           bool danger) {
+        const char* question = question_line != nullptr ? question_line : "";
+        const char* first    = send_line != nullptr ? send_line : question;
+        snprintf(g_rptr_set_line, sizeof(g_rptr_set_line), "%s", first);
+        snprintf(g_rptr_set_line2, sizeof(g_rptr_set_line2), "%s", send_line2 != nullptr ? send_line2 : "");
+        char cur[64] = "";
+        rptrRowValue(row, cur, sizeof(cur));
+        char text[192] = "";
+        char target_copy[48] = "";
+        om::rptrlink::lock();
+        snprintf(target_copy, sizeof(target_copy), "%s", om::rptrlink::target());
+        om::rptrlink::unlock();
+        if (row == (int)om::rptr::SetRow::Reboot) {
+            om::rptr::confirmRebootText(text, sizeof(text), target_copy);
+            snprintf(g_confirm_title, sizeof(g_confirm_title), "Reboot the repeater");
+            snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Reboot");
+            danger = true;
+        } else {
+            om::rptr::confirmWriteText(text, sizeof(text), question, cur);
+            snprintf(g_confirm_title, sizeof(g_confirm_title), "Send this line?");
+            snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Send");
+        }
+        snprintf(g_confirm_text, sizeof(g_confirm_text), "%s", text);
+        g_confirm_danger = danger;
+        g_confirm_target = ConfirmTarget::RptrSetting;
+        settings_frame.beginConfirm(row);
+        dirty = true;
     };
     for (;;) {
         bsp_input_event_t ev = {};
@@ -3302,17 +3387,178 @@ extern "C" void app_main(void) {
                                 dirty = true;
                             }
                         } else {
-                            if (k == tm::Key::Esc) {
+                            // EST-470 item 3: the status view's SETTINGS rows. Enter edits (the shared text
+                            // field, a toggle, `+`/`-`, or an action), and EVERY change goes through the shared
+                            // confirm sheet, which names the exact CLI line it will send.
+                            const int row_count = (int)om::rptr::kSetRowCount;
+                            if (settings_frame.confirmOpen() && g_confirm_target == ConfirmTarget::RptrSetting) {
+                                // The sheet owns every key: it opens on Cancel, Left/Right move to Send, Esc
+                                // cancels. Nothing behind it moves.
+                                handled = true;
+                                dirty   = true;
+                                const tm::SetKey sk = (k == tm::Key::Enter) ? tm::SetKey::Enter
+                                                       : (k == tm::Key::Esc) ? tm::SetKey::Esc
+                                                       : (k == tm::Key::Left) ? tm::SetKey::Left
+                                                       : (k == tm::Key::Right) ? tm::SetKey::Right
+                                                                             : tm::SetKey::None;
+                                const tm::SettingsKeyResult r =
+                                    tm::settingsKey(settings_frame, sk, nullptr, 0);
+                                if (r.event == tm::SettingsEvent::ConfirmApplied) {
+                                    const int row = r.row;
+                                    if (!om::rptrlink::settingsSend(g_rptr_set_line, row, false,
+                                                                    g_rptr_set_line2[0] != '\0'
+                                                                        ? g_rptr_set_line2
+                                                                        : nullptr)) {
+                                        om::ui::noticeSet("Not sent: a line is still waiting for its answer", 3500);
+                                    } else if (row == (int)om::rptr::SetRow::Reboot) {
+                                        // The repeater is rebooting: this login is over, so the page goes back
+                                        // to the list with the honest sentence rather than a dead session.
+                                        om::ui::noticeSet("Reboot sent; the repeater is off the mesh for ~10 s",
+                                                          4000);
+                                        g_rptr_mode      = 0;
+                                        g_rptr_set_focus = -1;
+                                        g_rptr_set_edit  = false;
+                                        om::rptrlink::logout();
+                                    } else {
+                                        ESP_LOGI(TAG, "rptr: \"%s\" sent", g_rptr_set_line);
+                                    }
+                                } else if (r.event == tm::SettingsEvent::ConfirmCancelled) {
+                                    ESP_LOGI(TAG, "rptr: \"%s\" cancelled; nothing sent", g_rptr_set_line);
+                                }
+                            } else if (g_rptr_set_edit) {
+                                // The shared text field. Nothing is sent from here: Enter builds the line and
+                                // raises the confirm, so the draft never reaches the air unconfirmed.
+                                handled = true;
+                                dirty   = true;
+                                const int row = g_rptr_set_focus;
+                                if (k == tm::Key::Esc) {
+                                    g_rptr_set_edit = false;
+                                } else if (k == tm::Key::Backspace) {
+                                    if (g_rptr_set_text_len > 0) {
+                                        g_rptr_set_text[--g_rptr_set_text_len] = '\0';
+                                    }
+                                } else if (k == tm::Key::Enter) {
+                                    char line[128] = "";
+                                    int  n = 0;
+                                    if (row == (int)om::rptr::SetRow::Name) {
+                                        om::rptrlink::lock();
+                                        const bool shared = om::rptrlink::settings().positionOk();
+                                        om::rptrlink::unlock();
+                                        n = om::rptr::cliName(line, sizeof(line), g_rptr_set_text, shared);
+                                        if (n == 0) {
+                                            om::ui::noticeSet(shared ? "Not sent: 1-23 characters, no [ ] \\ : , ? *"
+                                                                     : "Not sent: 1-31 characters, no [ ] \\ : , ? *",
+                                                              3500);
+                                        }
+                                    } else if (row == (int)om::rptr::SetRow::Owner) {
+                                        n = om::rptr::cliOwner(line, sizeof(line), g_rptr_set_text);
+                                        if (n == 0) om::ui::noticeSet("Not sent: the owner cannot be empty", 3500);
+                                    } else if (row == (int)om::rptr::SetRow::Position) {
+                                        int32_t lat = 0, lon = 0;
+                                        if (om::rptr::cliParseTypedPosition(g_rptr_set_text, &lat, &lon)) {
+                                            n = om::rptr::cliPosition(line, sizeof(line), lat, lon);
+                                        }
+                                        if (n == 0) {
+                                            om::ui::noticeSet("Not sent: type \"lat, lon\", e.g. 46.25, 14.50",
+                                                              3500);
+                                        }
+                                    }
+                                    if (n > 0) {
+                                        g_rptr_set_edit = false;
+                                        // A Position change is TWO commands (`set lat` then `set lon`,
+                                        // CommonCLI.cpp:557-563): the sheet names both (the joined line), the link
+                                        // sends `set lat` and then `set lon`, the second only after the first OK.
+                                        char        lat_line[48] = "";
+                                        char        lon_line[48] = "";
+                                        const char* second       = nullptr;
+                                        if (row == (int)om::rptr::SetRow::Position) {
+                                            int32_t la = 0, lo = 0;
+                                            if (om::rptr::cliParseTypedPosition(g_rptr_set_text, &la, &lo) &&
+                                                om::rptr::cliLat(lat_line, sizeof(lat_line), la) > 0 &&
+                                                om::rptr::cliLon(lon_line, sizeof(lon_line), lo) > 0) {
+                                                second = lon_line;
+                                            }
+                                        }
+                                        rptrConfirm(row, line, lat_line[0] != '\0' ? lat_line : nullptr, second,
+                                                    false);
+                                    }
+                                } else if (is_char && ch >= 0x20 && ch <= 0x7E &&
+                                           g_rptr_set_text_len + 1 < sizeof(g_rptr_set_text)) {
+                                    g_rptr_set_text[g_rptr_set_text_len++] = ch;
+                                    g_rptr_set_text[g_rptr_set_text_len]   = '\0';
+                                }
+                            } else if (k == tm::Key::Esc) {
                                 g_rptr_mode = 0;
                                 g_rptr_pw[0] = '\0';
                                 g_rptr_pw_len = 0;
+                                g_rptr_set_focus = -1;
+                                g_rptr_set_edit  = false;
                                 om::rptrlink::logout();
+                                dirty = true;
+                            } else if (k == tm::Key::Up || k == tm::Key::Down) {
+                                const int step = k == tm::Key::Down ? 1 : -1;
+                                g_rptr_set_focus += step;
+                                if (g_rptr_set_focus < 0) g_rptr_set_focus = 0;
+                                if (g_rptr_set_focus >= row_count) g_rptr_set_focus = row_count - 1;
+                                // The TX power draft starts from the repeater's OWN value; unread stays unread
+                                // (-1) until the first step, so the row cannot show a number nobody answered.
+                                if (g_rptr_set_focus == (int)om::rptr::SetRow::TxPower) {
+                                    g_rptr_set_tx = -1;
+                                    om::rptrlink::lock();
+                                    if (om::rptrlink::settings().txOk) g_rptr_set_tx = om::rptrlink::settings().tx;
+                                    om::rptrlink::unlock();
+                                }
+                                dirty = true;
+                            } else if ((k == tm::Key::Left || k == tm::Key::Right ||
+                                        (is_char && (ch == '+' || ch == '-'))) &&
+                                       g_rptr_set_focus == (int)om::rptr::SetRow::TxPower) {
+                                const bool up = (k == tm::Key::Right) || (is_char && ch == '+');
+                                if (g_rptr_set_tx < (int)om::rptr::kTxMin) g_rptr_set_tx = 14;   // nothing read yet
+                                else g_rptr_set_tx += up ? 1 : -1;
+                                if (g_rptr_set_tx < (int)om::rptr::kTxMin) g_rptr_set_tx = (int)om::rptr::kTxMin;
+                                if (g_rptr_set_tx > (int)om::rptr::kTxMax) g_rptr_set_tx = (int)om::rptr::kTxMax;
                                 dirty = true;
                             } else if (is_char && ch == 'r') {
                                 if (om::rptrlink::statusRequest()) {
                                     g_rptr_status_ms = (uint32_t)(esp_timer_get_time() / 1000);
                                 } else {
                                     om::ui::noticeSet("Status request not sent", 3000);
+                                }
+                                // EST-470 item 2: `r` also reads every settings value again.
+                                om::rptrlink::settingsReadStart();
+                                dirty = true;
+                            } else if (k == tm::Key::Enter && g_rptr_set_focus >= 0) {
+                                const int row = g_rptr_set_focus;
+                                if (om::rptr::setRowIsText(row)) {
+                                    // Pre-filled with the repeater's own answer, so a change is an EDIT.
+                                    char v[128] = "";
+                                    rptrRowValue(row, v, sizeof(v));
+                                    snprintf(g_rptr_set_text, sizeof(g_rptr_set_text), "%s", v);
+                                    g_rptr_set_text_len = strlen(g_rptr_set_text);
+                                    g_rptr_set_edit     = true;
+                                } else if (om::rptr::setRowIsToggle(row)) {
+                                    char cur[16] = "";
+                                    char line[48] = "";
+                                    bool on = false;
+                                    if (!rptrRowValue(row, cur, sizeof(cur))) {
+                                        om::ui::noticeSet("Not read yet; press r to read the values", 3000);
+                                    } else {
+                                        on = strcmp(cur, "on") == 0;
+                                        const int n = row == (int)om::rptr::SetRow::Repeat
+                                                          ? om::rptr::cliRepeat(line, sizeof(line), !on)
+                                                          : om::rptr::cliPowerSaving(line, sizeof(line), !on);
+                                        if (n > 0) rptrConfirm(row, line, nullptr, nullptr, false);
+                                    }
+                                } else if (om::rptr::setRowIsStepper(row)) {
+                                    char line[32] = "";
+                                    if (g_rptr_set_tx < (int)om::rptr::kTxMin) g_rptr_set_tx = 14;
+                                    if (om::rptr::cliTx(line, sizeof(line), (unsigned)g_rptr_set_tx) > 0)
+                                        rptrConfirm(row, line, nullptr, nullptr, false);
+                                } else {
+                                    const char* line = om::rptr::setRowActionCmd(row);
+                                    if (line != nullptr)
+                                        rptrConfirm(row, line, nullptr, nullptr,
+                                                    row == (int)om::rptr::SetRow::Reboot);
                                 }
                                 dirty = true;
                             }
@@ -4223,6 +4469,11 @@ extern "C" void app_main(void) {
                 g_rptr_note[0] = '\0';
                 om::rptrlink::statusRequest();
                 g_rptr_status_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                // EST-470 item 2: READ BEFORE WRITE. The seven `get` lines go out one at a time from here, so
+                // every settings row shows the repeater's REAL value instead of a placeholder.
+                om::rptrlink::settingsReadStart();
+                g_rptr_set_focus = -1;
+                g_rptr_set_edit  = false;
                 dirty = true;
             }
             if (g_rptr_mode == 2) {
@@ -4233,6 +4484,34 @@ extern "C" void app_main(void) {
                     g_rptr_status_ms = (uint32_t)(esp_timer_get_time() / 1000);
                     dirty = true;
                 }
+                // EST-470: a settings value or an answer arrived on the radio task. The answer also goes to the
+                // shared notice line, so it is seen from anywhere on the page and not only by the row it changed.
+                uint32_t set_serial = 0;
+                uint32_t ans_serial = 0;
+                char     answer[96] = "";
+                bool     answer_bad = false;
+                om::rptrlink::lock();
+                set_serial = om::rptrlink::settingsSerial();
+                ans_serial = om::rptrlink::answerSerial();
+                snprintf(answer, sizeof(answer), "%s", om::rptrlink::lastAnswer());
+                answer_bad = om::rptrlink::lastAnswerBad();
+                om::rptrlink::unlock();
+                static uint32_t last_set_serial = 0;
+                if (set_serial != last_set_serial) {
+                    last_set_serial = set_serial;
+                    dirty = true;
+                }
+                if (ans_serial != g_rptr_answer_seen) {
+                    g_rptr_answer_seen = ans_serial;
+                    if (answer[0] != '\0') {
+                        om::ui::noticeSet(answer, answer_bad ? 4000 : 2500);
+                    }
+                    dirty = true;
+                }
+            } else {
+                // Leaving the status view (Esc, a reboot, a logout) drops the section's cursor and its draft.
+                g_rptr_set_focus = -1;
+                g_rptr_set_edit  = false;
             }
             static uint32_t last_scan_serial = 0;
             if (om::rptrlink::found().serial != last_scan_serial) {

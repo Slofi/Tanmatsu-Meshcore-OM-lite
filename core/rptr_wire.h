@@ -39,6 +39,7 @@ namespace rptr {
 // MeshCore constants this port names (Packet.h:8-30, helpers/BaseChatMesh.h:18-21).
 constexpr uint8_t kTypeReq = 0x00;
 constexpr uint8_t kTypeResponse = 0x01;
+constexpr uint8_t kTypeTxtMsg = 0x02;   // Packet.h:22: a TXT_MSG datagram (a DM, and the CLI's own carrier)
 constexpr uint8_t kTypeAnonReq = 0x07;
 constexpr uint8_t kTypeControl = 0x0B;
 constexpr uint8_t kRouteFlood = 0x01;
@@ -78,6 +79,39 @@ bool parseScanAnswer(const meshcore::View& pkt, uint32_t want_tag, int8_t snr_ou
 // The bodies after the 4-byte repeater timestamp has been stripped.
 bool parseLoginAnswer(const uint8_t* plain, size_t len, LoginAnswer* out);
 bool parseStatusAnswer(const uint8_t* plain, size_t len, Status* out);
+
+// ------------------------------------------------------------------------------- EST-470: the CLI path
+// Upstream BaseChatMesh::sendCommandData (helpers/BaseChatMesh.cpp:492-516) builds a TXT_MSG datagram whose
+// plaintext is
+//     ts(4 LE) | flags | text,   flags = (attempt & 3) | (TXT_TYPE_CLI_DATA << 2)
+// TXT_TYPE_CLI_DATA = 1 (helpers/TxtDataHelpers.h:7), so the flags byte is 0x04 for attempt 0. The datagram is
+// dest_hash(1) + src_hash(1) + encryptThenMAC(secret, plaintext) (Mesh.cpp:490-509), sent DIRECT down the route
+// learned at login or as a flood when there is none, which is sendCommandData's `out_path_len == OUT_PATH_UNKNOWN`
+// branch. `path` nullptr means "no route yet" -> flood.
+constexpr uint8_t kTxtTypeCliData = 1;
+
+size_t buildCli(const meshcore::Identity& self, const uint8_t dest_pub[kPubKeyBytes],
+                const uint8_t secret[meshcore::kSecretBytes], uint32_t timestamp, const char* line,
+                const uint8_t* path, uint8_t path_len, uint8_t* out, size_t cap);
+
+// The repeater's ANSWER: a TXT_MSG with the SAME CLI type, from the node whose key we logged in to (usually not in
+// the contact table). openCliAnswer accepts a frame addressed to us and sourced by `from_pub` whose MAC opens with
+// `secret`; the TYPE check is parseCliReply's job below, so a PLAIN text from that same node still falls through
+// to the DM path and is never swallowed here.
+bool openCliAnswer(const meshcore::Identity& self, const uint8_t from_pub[kPubKeyBytes],
+                   const uint8_t secret[meshcore::kSecretBytes], const meshcore::View& pkt, uint8_t* plain,
+                   size_t plain_cap, size_t* plain_len);
+
+// The decrypted CLI answer. Upstream (reference/meshcore-repeater-v1.18.0/MyMesh.cpp:743-757) sends
+//     ts(4 LE) | (TXT_TYPE_CLI_DATA << 2) | text
+// where ts is the repeater's own clock. Only a CLI-typed text is accepted, so this is also the routing decision:
+// a frame that is not a CLI answer returns false and the DM code gets its chance.
+struct CliReply {
+  uint32_t timestamp = 0;
+  uint8_t  txt_type = 0;
+  char     text[meshcore::kMaxText + 1] = "";
+};
+bool parseCliReply(const uint8_t* plain, size_t len, CliReply* out);
 
 }  // namespace rptr
 }  // namespace om

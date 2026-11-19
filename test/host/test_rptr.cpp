@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "mc_dm.h"        // EST-470: the CLI answer IS a TXT_MSG, so the DM codec opens it too
 #include "mc_identity.h"
 #include "mc_wire.h"
 #include "rptr_model.h"
@@ -301,6 +302,376 @@ void testFormatting() {
     CHECK_STR(b, "-1.75 dB");
 }
 
+// ------------------------------------------------------- EST-470: the CLI path, against the SAME oracle
+// Both frames and answers below are the oracle's output (PyNaCl/libsodium X25519 + cryptography AES-128-ECB +
+// hmac/hashlib), built from the layouts in rptr_wire.h - never from this port. Run 2026-11-19 for the ticket:
+//
+//   cli flood  "set tx 20"   ts 1750000000 -> header 0x09, path_len 0x40, A.pub[0] 03.pub[0] seal(...)
+//   cli direct "set tx 20"   the same with header 0x0a, path_len 0x41, path ab cd
+//   answer     ts|0x04|text  header 0x09, path_len 0x40, OUR pub[0] then A.pub[0]
+const char* kCliSetTx = "0940290338839611b685d258dc60576dfc796605357f";
+const char* kCliSetTxDirect = "0a41abcd290338839611b685d258dc60576dfc796605357f";
+const char* kCliClockSync = "09402903a351995eb891fdb374e43ebf11865a9fa8a6";
+const char* kCliGetName = "09402903bf808de9101139a6d8f71d0346e23aa5b662";
+const char* kAnsOk = "09400329615ebb633ed362d194685ff4be6b0790832c";
+const char* kAnsName = "09400329ed9f392f77fab77b79d82e609ede29df7c3b61a9cb219b7ac620fc24afd38d1b8ef3";
+const char* kAnsTx = "09400329b1680c0a7418692f8350862c824eb2575881";
+const char* kAnsOn = "094003291c45d5f74d267951353aab36c8b2ab0f52be36849e1fa575e02073877097c3692687";
+const char* kAnsErrClock = "094003294ad5016f6ab374dfc3088eb25e38641c2ca9869ab4adb700606adcb0f65014ef6d192f0b76db4ff0c6eccf2bf28627efd696";
+const char* kAnsLat = "094003291157f214043495b323957a1fc5ca380d1cfb";
+const char* kAnsLon = "094003298e75ffb7a124b3b87b78edd31d93685c90de";
+const char* kAnsRepeat = "09400329f8f9413f524fe619c7dda3c22ea52336b2ca";
+const char* kAnsOwner = "09400329af8c67763d8ff2d36f2341af3cfc80791b44b4d7b1aa02667c0deae34af76081ecbd";
+const char* kAnsAdvertLocal = "094003294fa212d2ef6817d98ed49b0ff93be8c00cc95ef677ec6a2800ce81937635c7bc9f4a";
+const char* kAnsAdvertFlood = "0940032912b57a706f75288782ac03c88615e39819021dd5576b9ed389ee0b62f53b2e39d253";
+// ts|0x00|"hello": a PLAIN text from the SAME repeater. It must reach the DM code, never the CLI queue.
+const char* kAnsPlain = "09400329441f5c30ec73ec1209eed5ac42f12ded7a96";
+
+// One answer frame -> the value its row should hold, through openCliAnswer + parseCliReply + settingsApplyRead.
+bool readAnswer(const char* hex, const char* read_cmd, om::rptr::Settings* s) {
+    uint8_t raw[256];
+    const size_t n = fromHex(raw, sizeof(raw), hex);
+    if (n == 0) return false;
+    meshcore::View v;
+    if (!meshcore::decode(raw, n, &v)) return false;
+    uint8_t plain[256];
+    size_t plain_len = 0;
+    if (!om::rptr::openCliAnswer(g_self, g_a, g_secret, v, plain, sizeof(plain), &plain_len)) return false;
+    om::rptr::CliReply r;
+    if (!om::rptr::parseCliReply(plain, plain_len, &r)) return false;
+    return om::rptr::settingsApplyRead(s, read_cmd, r.text);
+}
+
+void testCliFrames() {
+    const uint8_t path_bad[2] = {0x01, 0x02};
+    uint8_t frame[192];
+    size_t n = om::rptr::buildCli(g_self, g_a, g_secret, 1750000000u, "set tx 20", nullptr, 0, frame,
+                                  sizeof(frame));
+    CHECK_EQ(n, 22);
+    CHECK(frameEquals(frame, n, kCliSetTx));
+    // The SAME line down the route learned at login: DIRECT, one 1-byte hop (0x41), path copied verbatim.
+    // A path_len that is not a legal route (hash size 4 is reserved, Packet.cpp:13-18) is refused by the
+    // DIRECT branch itself: no partial frame, nothing queued.
+    CHECK_EQ(om::rptr::buildCli(g_self, g_a, g_secret, 1750000000u, "set tx 20", path_bad, 0xC0, frame,
+                                sizeof(frame)), 0);
+    const uint8_t path[2] = {0xAB, 0xCD};
+    n = om::rptr::buildCli(g_self, g_a, g_secret, 1750000000u, "set tx 20", path, 0x41, frame, sizeof(frame));
+    CHECK(frameEquals(frame, n, kCliSetTxDirect));
+
+    n = om::rptr::buildCli(g_self, g_a, g_secret, 1750000010u, "clock sync", nullptr, 0, frame, sizeof(frame));
+    CHECK(frameEquals(frame, n, kCliClockSync));
+    n = om::rptr::buildCli(g_self, g_a, g_secret, 1750000020u, "get name", nullptr, 0, frame, sizeof(frame));
+    CHECK(frameEquals(frame, n, kCliGetName));
+
+    // What never goes on the air: an empty line, and a line longer than MeshCore's MAX_TEXT_LEN.
+    CHECK_EQ(om::rptr::buildCli(g_self, g_a, g_secret, 1, "", nullptr, 0, frame, sizeof(frame)), 0);
+    char longline[200];
+    memset(longline, 'x', sizeof(longline));
+    longline[sizeof(longline) - 1] = '\0';
+    CHECK_EQ(om::rptr::buildCli(g_self, g_a, g_secret, 1, longline, nullptr, 0, frame, sizeof(frame)), 0);
+    // A buffer one byte short leaves nothing behind: no partial frame is ever queued.
+    CHECK_EQ(om::rptr::buildCli(g_self, g_a, g_secret, 1, "set tx 20", nullptr, 0, frame, 21), 0);
+}
+
+// The answer is a NORMAL TXT_MSG: the DM codec opens it too (which is exactly why it would otherwise land in a
+// DM thread), and only the CLI type check takes it to RPTR instead.
+void testCliAnswerIsATxtMsg() {
+    uint8_t raw[256];
+    const size_t n = fromHex(raw, sizeof(raw), kAnsTx);
+    meshcore::View v;
+    CHECK(meshcore::decode(raw, n, &v));
+    meshcore::DmMessage dm;
+    CHECK(meshcore::dmOpen(g_self, v, g_a, 1, 0, &dm));
+    CHECK_EQ(dm.txt_type, om::rptr::kTxtTypeCliData);
+    CHECK_STR(dm.text, "> 20");
+    CHECK_EQ(dm.timestamp, 1750000023u);
+
+    // The ROUTING rule mc_link.cpp implements, in the same order: RPTR first, the DM code only if that refuses.
+    enum class Where { Rptr, Dm, Dropped };
+    auto route = [&](const char* hex) {
+        uint8_t buf[256];
+        const size_t len = fromHex(buf, sizeof(buf), hex);
+        meshcore::View p;
+        if (!meshcore::decode(buf, len, &p)) return Where::Dropped;
+        uint8_t plain[256];
+        size_t plain_len = 0;
+        if (om::rptr::openCliAnswer(g_self, g_a, g_secret, p, plain, sizeof(plain), &plain_len)) {
+            om::rptr::CliReply r;
+            if (om::rptr::parseCliReply(plain, plain_len, &r)) return Where::Rptr;
+        }
+        meshcore::DmMessage m;
+        if (meshcore::dmOpen(g_self, p, g_a, 1, 0, &m)) return Where::Dm;
+        return Where::Dropped;
+    };
+    CHECK(route(kAnsTx) == Where::Rptr);              // a CLI answer from the login target: RPTR, never a DM
+    CHECK(route(kAnsOk) == Where::Rptr);
+    CHECK(route(kAnsPlain) == Where::Dm);             // a PLAIN text from that same node still reaches Chat
+    CHECK(route(kCliSetTx) == Where::Dropped);        // our own CLI frame is addressed to the repeater, not to us
+
+    // A frame addressed to somebody else, or sourced by somebody else, is not ours.
+    uint8_t other[256];
+    memcpy(other, raw, n);
+    other[2] ^= 0xFF;                                  // dest hash: no longer our pub_key[0]
+    meshcore::View w;
+    CHECK(meshcore::decode(other, n, &w));
+    uint8_t plain[256];
+    size_t plain_len = 0;
+    CHECK(!om::rptr::openCliAnswer(g_self, g_a, g_secret, w, plain, sizeof(plain), &plain_len));
+    memcpy(other, raw, n);
+    other[3] ^= 0xFF;                                  // src hash: no longer the login target's
+    CHECK(meshcore::decode(other, n, &w));
+    CHECK(!om::rptr::openCliAnswer(g_self, g_a, g_secret, w, plain, sizeof(plain), &plain_len));
+    // The wrong secret never opens it (a different repeater with the same first byte cannot answer for this one).
+    uint8_t wrong[32] = {0};
+    CHECK(meshcore::decode(raw, n, &w));
+    CHECK(!om::rptr::openCliAnswer(g_self, g_a, wrong, w, plain, sizeof(plain), &plain_len));
+}
+
+void testCliAnswersPerCommand() {
+    om::rptr::Settings s;
+    // The read ladder, in the order the link sends it: one value per row, Position taking two lines.
+    CHECK_STR(om::rptr::setReadCmd(0), om::rptr::kCliGetName);
+    CHECK_STR(om::rptr::setReadCmd(1), om::rptr::kCliGetOwner);
+    CHECK_STR(om::rptr::setReadCmd(2), om::rptr::kCliGetLat);
+    CHECK_STR(om::rptr::setReadCmd(3), om::rptr::kCliGetLon);
+    CHECK_STR(om::rptr::setReadCmd(4), om::rptr::kCliGetRepeat);
+    CHECK_STR(om::rptr::setReadCmd(5), om::rptr::kCliPowerSavingRead);
+    CHECK_STR(om::rptr::setReadCmd(6), om::rptr::kCliGetTx);
+    CHECK(om::rptr::setReadCmd(7) == nullptr);
+    CHECK_EQ(om::rptr::setReadRow(om::rptr::kCliGetLon), (int)om::rptr::SetRow::Position);
+    CHECK_EQ(om::rptr::setReadRow("how are you"), -1);
+
+    // Nothing read yet: every row says so instead of guessing.
+    char v[64];
+    for (int row = 0; row < (int)om::rptr::SetRow::TxPower + 1; row++)
+        CHECK(!om::rptr::settingsRowValue(s, row, v, sizeof(v)));
+
+    // Name. `get name` answers "> <name>" (CommonCLI.cpp:715-717).
+    CHECK(readAnswer(kAnsName, om::rptr::kCliGetName, &s));
+    CHECK(s.nameOk);
+    CHECK_STR(s.name, "RPT-Test-A");
+    CHECK(om::rptr::settingsRowValue(s, (int)om::rptr::SetRow::Name, v, sizeof(v)));
+    CHECK_STR(v, "RPT-Test-A");
+
+    // Owner info, with the repeater's '|' for the newline it stores (CommonCLI.cpp:733-745).
+    CHECK(readAnswer(kAnsOwner, om::rptr::kCliGetOwner, &s));
+    CHECK_STR(s.owner, "ops|TestBox");
+
+    // Position: two answers, each landing on its own half.
+    CHECK(readAnswer(kAnsLat, om::rptr::kCliGetLat, &s));
+    CHECK(s.latOk);
+    CHECK(!s.positionOk());
+    CHECK(!om::rptr::settingsRowValue(s, (int)om::rptr::SetRow::Position, v, sizeof(v)));
+    CHECK(readAnswer(kAnsLon, om::rptr::kCliGetLon, &s));
+    CHECK(s.positionOk());
+    CHECK_EQ(s.latE6, 46250000);
+    CHECK_EQ(s.lonE6, 14500000);
+    CHECK(om::rptr::settingsRowValue(s, (int)om::rptr::SetRow::Position, v, sizeof(v)));
+    CHECK_STR(v, "46.25000, 14.50000");
+
+    // Repeat, and Power save (whose answer is a bare "on - After 2 minutes" on the ESP32, CommonCLI.cpp:439-451).
+    CHECK(readAnswer(kAnsRepeat, om::rptr::kCliGetRepeat, &s));
+    CHECK(s.repeatOk);
+    CHECK(!s.repeat);
+    CHECK(readAnswer(kAnsOn, om::rptr::kCliPowerSavingRead, &s));
+    CHECK(s.psOk);
+    CHECK(s.powerSave);
+    CHECK(om::rptr::settingsRowValue(s, (int)om::rptr::SetRow::PowerSave, v, sizeof(v)));
+    CHECK_STR(v, "on");
+
+    // TX power: "> 20" (CommonRadioPrefs.cpp:137-139).
+    CHECK(readAnswer(kAnsTx, om::rptr::kCliGetTx, &s));
+    CHECK_EQ(s.tx, 20);
+    CHECK(om::rptr::settingsRowValue(s, (int)om::rptr::SetRow::TxPower, v, sizeof(v)));
+    CHECK_STR(v, "20 dBm");
+
+    // An answer to the WRONG line never becomes a value: "> 20" is not a coordinate and not an on/off.
+    CHECK(!om::rptr::settingsApplyRead(&s, om::rptr::kCliGetLat, "> 200"));   // beyond 90 degrees
+    CHECK(!om::rptr::settingsApplyRead(&s, om::rptr::kCliGetRepeat, "> 20"));
+    // An error line and an unknown config are not values either, and leave the row as it was.
+    CHECK(!om::rptr::settingsApplyRead(&s, om::rptr::kCliGetName, "Error, bad chars"));
+    CHECK(!om::rptr::settingsApplyRead(&s, om::rptr::kCliGetTx, "??: tx"));
+    CHECK_STR(s.name, "RPT-Test-A");
+    CHECK_EQ(s.tx, 20);
+    // reset(): a fresh login starts from nothing read.
+    s.reset();
+    CHECK(!om::rptr::settingsRowValue(s, (int)om::rptr::SetRow::Name, v, sizeof(v)));
+}
+
+// The action rows: their answer is a NOTICE, never a value. These three frames are the oracle's.
+bool answerText(const char* hex, char* out, size_t cap) {
+    uint8_t raw[256];
+    const size_t n = fromHex(raw, sizeof(raw), hex);
+    if (n == 0) return false;
+    meshcore::View v;
+    if (!meshcore::decode(raw, n, &v)) return false;
+    uint8_t plain[256];
+    size_t plain_len = 0;
+    if (!om::rptr::openCliAnswer(g_self, g_a, g_secret, v, plain, sizeof(plain), &plain_len)) return false;
+    om::rptr::CliReply r;
+    if (!om::rptr::parseCliReply(plain, plain_len, &r)) return false;
+    snprintf(out, cap, "%s", r.text);
+    return true;
+}
+
+void testCliActionAnswers() {
+    char text[192];
+    CHECK(answerText(kAnsAdvertLocal, text, sizeof(text)));
+    CHECK_STR(text, "OK - zerohop advert sent");
+    CHECK(om::rptr::cliAnswerKind(text) == om::rptr::CliAnswer::Ok);
+    CHECK(answerText(kAnsAdvertFlood, text, sizeof(text)));
+    CHECK_STR(text, "OK - Advert sent");
+    CHECK(om::rptr::cliAnswerKind(text) == om::rptr::CliAnswer::Ok);
+    // `clock sync` is refused when our clock is behind the repeater's: the page must show THAT, not "OK".
+    CHECK(answerText(kAnsErrClock, text, sizeof(text)));
+    CHECK_STR(text, "ERR: clock cannot go backwards");
+    CHECK(om::rptr::cliAnswerKind(text) == om::rptr::CliAnswer::Error);
+    // A plain "OK" (every `set` that has nothing to add) parses as a CLI answer at the wire level too.
+    CHECK(answerText(kAnsOk, text, sizeof(text)));
+    CHECK_STR(text, "OK");
+}
+
+void testCliAnswerKinds() {
+    CHECK(om::rptr::cliAnswerKind("OK") == om::rptr::CliAnswer::Ok);
+    CHECK(om::rptr::cliAnswerKind("OK - Advert sent") == om::rptr::CliAnswer::Ok);
+    CHECK(om::rptr::cliAnswerKind("OK - repeat is now OFF") == om::rptr::CliAnswer::Ok);
+    CHECK(om::rptr::cliAnswerKind("ok") == om::rptr::CliAnswer::Ok);
+    CHECK(om::rptr::cliAnswerKind("Error, bad chars") == om::rptr::CliAnswer::Error);
+    CHECK(om::rptr::cliAnswerKind("ERR: clock cannot go backwards") == om::rptr::CliAnswer::Error);
+    CHECK(om::rptr::cliAnswerKind("??: powersaving") == om::rptr::CliAnswer::Unknown);
+    CHECK(om::rptr::cliAnswerKind("") == om::rptr::CliAnswer::Unknown);
+    CHECK(om::rptr::cliAnswerKind(nullptr) == om::rptr::CliAnswer::Unknown);
+}
+
+void testCliLines() {
+    char line[192];
+    // Name: the 23-byte cap applies when the position is SHARED (32 - 9), 31 when it is not.
+    CHECK_EQ(om::rptr::cliName(line, sizeof(line), "ABCDEFGHIJKLMNOPQRSTUVW", true),
+             (int)strlen("set name ABCDEFGHIJKLMNOPQRSTUVW"));   // 23 chars
+    CHECK_STR(line, "set name ABCDEFGHIJKLMNOPQRSTUVW");
+    CHECK_EQ(om::rptr::cliName(line, sizeof(line), "ABCDEFGHIJKLMNOPQRSTUVWX", true), 0);        // 24 chars
+    CHECK_STR(line, "");
+    CHECK(om::rptr::cliName(line, sizeof(line), "ABCDEFGHIJKLMNOPQRSTUVWXY", false) > 0);       // 25, not shared
+    CHECK_EQ(om::rptr::cliName(line, sizeof(line), "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345", false), 0);  // 32 > 31
+    // The characters the repeater's own isValidName refuses, and nothing outside printable ASCII.
+    CHECK_EQ(om::rptr::cliName(line, sizeof(line), "a[b", true), 0);
+    CHECK_EQ(om::rptr::cliName(line, sizeof(line), "a]b", true), 0);
+    CHECK_EQ(om::rptr::cliName(line, sizeof(line), "a\\b", true), 0);
+    CHECK_EQ(om::rptr::cliName(line, sizeof(line), "a:b", true), 0);
+    CHECK_EQ(om::rptr::cliName(line, sizeof(line), "a,b", true), 0);
+    CHECK_EQ(om::rptr::cliName(line, sizeof(line), "a?b", true), 0);
+    CHECK_EQ(om::rptr::cliName(line, sizeof(line), "a*b", true), 0);
+    CHECK_EQ(om::rptr::cliName(line, sizeof(line), "a\tb", true), 0);
+    CHECK_EQ(om::rptr::cliName(line, sizeof(line), "a\xc3\xa9", true), 0);   // UTF-8: 2 bytes, both > 0x7E
+    CHECK_EQ(om::rptr::cliName(line, sizeof(line), "", true), 0);
+
+    // Owner: empty refused; a newline becomes the repeater's '|' so the round trip is lossless.
+    CHECK_EQ(om::rptr::cliOwner(line, sizeof(line), ""), 0);
+    CHECK_EQ(om::rptr::cliOwner(line, sizeof(line), "ops\nTestBox"),
+             (int)strlen("set owner.info ops|TestBox"));
+    CHECK_STR(line, "set owner.info ops|TestBox");
+
+    // Position: five decimals, and the two lines joined exactly as cliRadioApply joins its two.
+    CHECK_EQ(om::rptr::cliLat(line, sizeof(line), 46250000), (int)strlen("set lat 46.25000"));
+    CHECK_STR(line, "set lat 46.25000");
+    CHECK_EQ(om::rptr::cliLon(line, sizeof(line), -14500000), (int)strlen("set lon -14.50000"));
+    CHECK_STR(line, "set lon -14.50000");
+    CHECK(om::rptr::cliPosition(line, sizeof(line), 46250000, 14500000) > 0);
+    CHECK_STR(line, "set lat 46.25000 \xC2\xB7 set lon 14.50000");
+    CHECK_EQ(om::rptr::cliLat(line, sizeof(line), 91000000), 0);     // beyond 90 degrees
+    CHECK_EQ(om::rptr::cliLon(line, sizeof(line), 181000000), 0);    // beyond 180 degrees
+
+    // + / - on TX power: clamped to 1..22, because upstream stores atoi() straight into an int8_t.
+    CHECK_EQ(om::rptr::cliTx(line, sizeof(line), 0), (int)strlen("set tx 1"));
+    CHECK_STR(line, "set tx 1");
+    CHECK_EQ(om::rptr::cliTx(line, sizeof(line), 23), (int)strlen("set tx 22"));
+    CHECK_STR(line, "set tx 22");
+    CHECK_EQ(om::rptr::cliTx(line, sizeof(line), 20), (int)strlen("set tx 20"));
+    CHECK_STR(line, "set tx 20");
+
+    // Repeat and power save: the exact lines the repeater's parser matches ("powersaving" has NO "set " prefix).
+    CHECK_EQ(om::rptr::cliRepeat(line, sizeof(line), false), (int)strlen("set repeat off"));
+    CHECK_STR(line, "set repeat off");
+    CHECK_EQ(om::rptr::cliPowerSaving(line, sizeof(line), true), (int)strlen("powersaving on"));
+    CHECK_STR(line, "powersaving on");
+    CHECK_EQ(om::rptr::cliPowerSaving(line, sizeof(line), false), (int)strlen("powersaving off"));
+    CHECK_STR(line, "powersaving off");
+
+    // The action rows: one line each, and a reboot that says so.
+    CHECK_STR(om::rptr::setRowActionCmd((int)om::rptr::SetRow::AdvertLocal), "advert.zerohop");
+    CHECK_STR(om::rptr::setRowActionCmd((int)om::rptr::SetRow::AdvertFlood), "advert");
+    CHECK_STR(om::rptr::setRowActionCmd((int)om::rptr::SetRow::ClockSync), "clock sync");
+    CHECK_STR(om::rptr::setRowActionCmd((int)om::rptr::SetRow::Reboot), "reboot");
+    CHECK(om::rptr::setRowActionCmd((int)om::rptr::SetRow::Name) == nullptr);
+}
+
+void testCliTypedPosition() {
+    int32_t lat = 0, lon = 0;
+    CHECK(om::rptr::cliParseTypedPosition("46.25,14.5", &lat, &lon));
+    CHECK_EQ(lat, 46250000);
+    CHECK_EQ(lon, 14500000);
+    CHECK(om::rptr::cliParseTypedPosition("46.25, 14.5", &lat, &lon));       // one space after the comma
+    CHECK(om::rptr::cliParseTypedPosition(" -46.25 , -14.5 ", &lat, &lon));  // spaces a paste leaves behind
+    CHECK_EQ(lat, -46250000);
+    CHECK_EQ(lon, -14500000);
+    CHECK(!om::rptr::cliParseTypedPosition("46.25", &lat, &lon));       // no comma
+    CHECK(!om::rptr::cliParseTypedPosition("46.25,", &lat, &lon));      // empty half
+    CHECK(!om::rptr::cliParseTypedPosition(",14.5", &lat, &lon));
+    CHECK(!om::rptr::cliParseTypedPosition("95.0,14.5", &lat, &lon));   // latitude out of range
+    CHECK(!om::rptr::cliParseTypedPosition("46.25,195.0", &lat, &lon));
+    CHECK(!om::rptr::cliParseTypedPosition("abc,14.5", &lat, &lon));
+    CHECK(!om::rptr::cliParseTypedPosition("", &lat, &lon));
+}
+
+void testConfirmWords() {
+    char text[192];
+    // Every change names the exact line, and the value the row shows now (EST-470 item 3).
+    CHECK(om::rptr::confirmWriteText(text, sizeof(text), "set tx 20", "22 dBm") > 0);
+    CHECK_STR(text, "Send \"set tx 20\"? The repeater says 22 dBm now.");
+    CHECK(om::rptr::confirmWriteText(text, sizeof(text), "powersaving on", "off") > 0);
+    CHECK_STR(text, "Send \"powersaving on\"? The repeater says off now.");
+    CHECK(om::rptr::confirmWriteText(text, sizeof(text), "set tx 20", "") > 0);
+    CHECK_STR(text, "Send \"set tx 20\"? The repeater says nothing now.");   // a row not read yet
+    CHECK_EQ(om::rptr::confirmWriteText(text, sizeof(text), "", "22 dBm"), 0);
+    CHECK_EQ(om::rptr::confirmWriteText(text, sizeof(text), nullptr, nullptr), 0);
+
+    // Reboot: one confirm, with the exact sentence the ticket asks for.
+    CHECK(om::rptr::confirmRebootText(text, sizeof(text), "TEST-RPT-A") > 0);
+    CHECK_STR(text, "Reboot TEST-RPT-A? It is off the mesh for ~10 s.");
+    CHECK(om::rptr::confirmRebootText(text, sizeof(text), "") > 0);
+    CHECK_STR(text, "Reboot the repeater? It is off the mesh for ~10 s.");
+}
+
+void testCliPending() {
+    // ONE line in flight: nothing else may be sent while it is used, and a lost answer clears it.
+    om::rptr::CliPending p;
+    CHECK(!p.used);
+    p.begin("set tx 20", (uint8_t)om::rptr::SetRow::TxPower, false, 1000, 8000);
+    CHECK(p.used);
+    CHECK_EQ(p.row, (uint8_t)om::rptr::SetRow::TxPower);
+    CHECK(!p.isRead);
+    CHECK_STR(p.line, "set tx 20");
+    CHECK(!p.timedOut(8999));
+    CHECK(p.timedOut(9000));   // the deadline is inclusive, exactly 8 s after it went out
+    CHECK(!p.timedOut(8999));
+    p.clear();
+    CHECK(!p.used);
+    CHECK_STR(p.line, "");
+    // The 32-bit wrap is a signed difference, like every other window in this tree.
+    om::rptr::CliPending q;
+    q.begin("get tx", (uint8_t)om::rptr::SetRow::TxPower, true, 0xFFFFFF00u, 8000);
+    CHECK(!q.timedOut(0x1000u));    // 0xFFFFFF00 + 8000 wraps to 0x1E40: 0x1000 is still before it
+    CHECK(q.timedOut(0x2000u));     // past the wrapped deadline
+    CHECK(!q.timedOut(0xFFFFF000u));
+    CHECK(om::rptr::setRowIsText((int)om::rptr::SetRow::Position));
+    CHECK(!om::rptr::setRowIsText((int)om::rptr::SetRow::Repeat));
+    CHECK(om::rptr::setRowIsToggle((int)om::rptr::SetRow::PowerSave));
+    CHECK(om::rptr::setRowIsStepper((int)om::rptr::SetRow::TxPower));
+    CHECK(om::rptr::setRowIsAction((int)om::rptr::SetRow::Reboot));
+    CHECK_STR(om::rptr::setRowLabel((int)om::rptr::SetRow::Owner), "Owner info");
+    CHECK_STR(om::rptr::setRowLabel(99), "");
+}
+
 // --------------------------------------------------------------------------------------------- junk pass
 void testJunk() {
     uint32_t s = 0x12345678u;
@@ -323,6 +694,18 @@ void testJunk() {
         if (plain_len > 0) om::rptr::parseLoginAnswer(plain, plain_len, &a);
         om::rptr::Status st;
         if (plain_len > 0) om::rptr::parseStatusAnswer(plain, plain_len, &st);
+        // EST-470: the CLI path reads lengths straight off the air too (a TXT_MSG from any node may be offered to
+        // openCliAnswer), and the answer's text is a C string built from those bytes.
+        size_t cli_len = 0;
+        if (om::rptr::openCliAnswer(g_self, g_a, g_secret, v, plain, sizeof(plain), &cli_len) && cli_len > 0) {
+            om::rptr::CliReply reply;
+            if (om::rptr::parseCliReply(plain, cli_len, &reply)) {
+                om::rptr::Settings s2;
+                (void)om::rptr::settingsApplyRead(&s2, om::rptr::kCliGetOwner, reply.text);
+                (void)om::rptr::cliAnswerKind(reply.text);
+            }
+        }
+        (void)om::rptr::parseCliReply(plain, plain_len, nullptr);
     }
     CHECK(true);   // reaching here without a sanitizer report is the test
 }
@@ -353,6 +736,15 @@ int main() {
     testPassword();
     testLoginMachine();
     testFormatting();
+    testCliFrames();
+    testCliAnswerIsATxtMsg();
+    testCliAnswersPerCommand();
+    testCliActionAnswers();
+    testCliAnswerKinds();
+    testCliLines();
+    testCliTypedPosition();
+    testConfirmWords();
+    testCliPending();
     testJunk();
 
     printf("%d checks, %d failure(s)\n", g_checks, g_failures);

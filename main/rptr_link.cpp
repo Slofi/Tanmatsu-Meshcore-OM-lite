@@ -43,6 +43,18 @@ bool              s_statusPending = false;
 uint32_t          s_statusSentMs = 0;
 uint32_t          s_statusDeadlineMs = 0;
 
+// EST-470: part 2a's settings. ONE CLI line in flight, one read ladder, one last answer for the glass.
+rptr::Settings    s_settings;
+uint32_t          s_settingsSerial = 0;
+rptr::CliPending  s_cli;
+int               s_readStep = 0;          // next line of the read ladder
+int               s_readStop = 0;          // where this pass stops (the whole ladder, or one row after a change)
+bool              s_clock_sync = false;     // EST-470: send `clock sync` once after a login, as OM does
+char              s_second[64] = "";        // the second half of a change (`set lon`), sent only after an OK
+char              s_answer[96] = "";        // the repeater's last words, or "no answer"
+bool              s_answerBad = false;
+uint32_t          s_answerSerial = 0;
+
 char     s_target[rptr::kNameMax + 1] = "";
 uint8_t  s_targetKey[rptr::kPubKeyBytes] = {};
 uint8_t  s_targetSecret[meshcore::kSecretBytes] = {};
@@ -130,6 +142,47 @@ void rememberPassword(const char* name, const char* password) {
     ESP_LOGI("rptr", "password remembered for this repeater (never printed)");
 }
 
+// EST-470: one CLI line on the air, under the lock that already protects the target and the pending slot.
+bool sendCliLocked(const char* line, int row, bool is_read, uint32_t now) {
+    if (s_cli.used || line == nullptr || line[0] == '\0') return false;
+    if (!s_haveTarget || !s_login.loggedIn()) return false;
+    meshcore::Identity self;
+    if (!mc::selfIdentity(&self)) return false;
+    // The timestamp is the login's own strictly-increasing clock: the repeater drops anything not newer than the
+    // last value it stored for this client (MyMesh.cpp:714 `sender_timestamp >= client->last_timestamp`, and an
+    // EQUAL one is treated as a retry that deliberately answers nothing, :727-731).
+    uint8_t      frame[192];
+    const size_t n = rptr::buildCli(self, s_targetKey, s_targetSecret, uniqueTimestamp(), line,
+                                    s_targetPathLen == 0xFF ? nullptr : s_targetPath, s_targetPathLen, frame,
+                                    sizeof(frame));
+    if (n == 0) {
+        ESP_LOGW("rptr", "cli: \"%s\" could not be built", line);
+        return false;
+    }
+    if (!mc::queueRptrFrame(frame, n)) {
+        ESP_LOGW("rptr", "cli: \"%s\" not queued (radio busy)", line);
+        return false;
+    }
+    s_cli.begin(line, (uint8_t)row, is_read, now, rptr::requestDeadlineMs(kEstimateMs, 0, rptr::kStatusMinMs));
+    ESP_LOGI("rptr", "cli sent: \"%s\" (one line at a time, %lu ms deadline)", line,
+             (unsigned long)rptr::requestDeadlineMs(kEstimateMs, 0, rptr::kStatusMinMs));
+    return true;
+}
+
+int readLadderIndex(const char* cmd) {
+    if (cmd == nullptr) return -1;
+    for (int i = 0; i < rptr::kSetReadCount; ++i) {
+        if (strcmp(rptr::setReadCmd(i), cmd) == 0) return i;
+    }
+    return -1;
+}
+
+void noteAnswer(const char* text, bool bad) {
+    snprintf(s_answer, sizeof(s_answer), "%s", text != nullptr ? text : "");
+    s_answerBad = bad;
+    ++s_answerSerial;
+}
+
 // The contact behind a full public key, or nullptr. Used for the name and the stored route.
 const mc::Contact* contactForKey(const uint8_t pub[meshcore::kPubKeyBytes]) {
     mc::ContactStore& cs = mc::contacts();
@@ -198,6 +251,39 @@ void tick() {
     if (s_statusPending && (int32_t)(nowMs() - s_statusDeadlineMs) >= 0) {
         s_statusPending = false;   // one honest "no answer yet" on the page; r tries again
         ESP_LOGW("rptr", "status: no answer within %lu ms", (unsigned long)(s_statusDeadlineMs - s_statusSentMs));
+    }
+    // EST-470 item 4: ONE line at a time. A lost answer changes NOTHING on the repeater's side, so the row keeps
+    // the value it was READ as and the page says "no answer"; the next line then goes out (a read that timed out
+    // is skipped, never retried in a loop).
+    const uint32_t now = nowMs();
+    if (s_cli.used && s_cli.timedOut(now)) {
+        ESP_LOGW("rptr", "cli: no answer to \"%s\" within %lu ms", s_cli.line,
+                 (unsigned long)(s_cli.deadlineMs - s_cli.sentMs));
+        s_cli.clear();
+        // A lost answer changes NOTHING on the repeater's side, so the row keeps the value it was READ as and the
+        // page says "no answer". The step already moved past the line when it went out, so the next pass sends the
+        // next read instead of sitting on this one. A paired change stops here: its first half is unproven.
+        s_second[0] = '\0';
+        noteAnswer("no answer", true);
+    }
+    // EST-470: `clock sync` goes out once per login, BEFORE the reads (OM sends it automatically too). Skipped
+    // while our own clock is not real: the repeater would only answer "ERR: clock cannot go backwards".
+    if (s_clock_sync && !s_cli.used && s_login.loggedIn() && s_haveTarget) {
+        if (om::time_source::epochNow() < (int64_t)rptr::kClockRealSince) {
+            s_clock_sync = false;
+            ESP_LOGW("rptr", "clock sync skipped: this device's clock is not set");
+        } else if (sendCliLocked(rptr::kCliClockSync, (int)rptr::SetRow::ClockSync, false, now)) {
+            s_clock_sync = false;
+        }
+    }
+    // The ladder: one read in flight at a time, only once logged in, and only when nothing else is pending.
+    if (!s_cli.used && s_login.loggedIn() && s_haveTarget && s_readStep < s_readStop) {
+        const char* cmd = rptr::setReadCmd(s_readStep);
+        if (cmd == nullptr) {
+            s_readStep = s_readStop;
+        } else if (sendCliLocked(cmd, rptr::setReadRow(cmd), true, now)) {
+            ++s_readStep;   // the answer (or its deadline) releases the next line
+        }
     }
     unlock();
     static uint32_t last_merge = 0;
@@ -285,6 +371,17 @@ bool loginStart(int found_index, const char* password) {
     s_haveTarget = true;
     s_status = rptr::Status();
     s_statusPending = false;
+    // EST-470: a login to a repeater starts with NOTHING read, so every settings row shows "…" until its own
+    // answer arrives; the read ladder starts as soon as the login succeeds.
+    s_settings.reset();
+    ++s_settingsSerial;
+    s_cli.clear();
+    s_readStep = 0;
+    s_readStop = 0;
+    s_clock_sync = true;   // EST-470: the repeater's clock is synced right after the login, as OM does
+    s_answer[0] = '\0';
+    s_answerBad = false;
+    ++s_answerSerial;
     snprintf(s_pendingPassword, sizeof(s_pendingPassword), "%s", pw);
     s_login.begin(nowMs(), kEstimateMs);
     unlock();
@@ -303,6 +400,16 @@ void logout() {
     memset(s_targetSecret, 0, sizeof(s_targetSecret));
     s_status = rptr::Status();
     s_statusPending = false;
+    s_settings.reset();
+    ++s_settingsSerial;
+    s_cli.clear();
+    s_readStep = 0;
+    s_readStop = 0;
+    s_clock_sync = false;
+    s_second[0] = '\0';
+    s_answer[0] = '\0';
+    s_answerBad = false;
+    ++s_answerSerial;
     unlock();
     ESP_LOGI("rptr", "session closed");
 }
@@ -469,6 +576,120 @@ bool onPathReply(const meshcore::View& pkt) {
     if (p.extra_type == rptr::kTypeResponse) (void)handleReply(p.extra, p.extra_len, login_busy, status_pending);
     return true;   // it was ours either way: the route alone is worth keeping
 }
+
+bool settingsReadStart() {
+    lock();
+    if (!s_haveTarget || !s_login.loggedIn()) {
+        unlock();
+        return false;
+    }
+    // A read in flight is dropped first: 'r' means "read it all again", and the old answer would land on a row
+    // this pass has already asked about.
+    s_cli.clear();
+    s_readStep = 0;
+    s_readStop = rptr::kSetReadCount;
+    unlock();
+    ESP_LOGI("rptr", "settings: reading the repeater's %d value(s)", rptr::kSetReadCount);
+    return true;
+}
+
+bool settingsSend(const char* line, int row, bool is_read, const char* second) {
+    lock();
+    const bool sent = sendCliLocked(line, row, is_read, nowMs());
+    if (sent) {
+        s_second[0] = '\0';
+        if (second != nullptr && second[0] != '\0') snprintf(s_second, sizeof(s_second), "%s", second);
+    }
+    if (sent && row == (int)rptr::SetRow::Reboot) {
+        // `reboot` is the ONE line that can never answer: CommonCLI.cpp:199-200 calls board->reboot(), which
+        // does not return, so no reply is ever built. Holding the slot for 8 s would only paint "no answer"
+        // over a command that worked, so the answer here is the SEND itself.
+        s_cli.clear();
+        s_second[0] = '\0';
+        noteAnswer("reboot sent - it is off the mesh for ~10 s", false);
+    }
+    unlock();
+    return sent;
+}
+
+// EST-470: the CLI answer. This runs on the radio task, BEFORE mc_link's DM code, for two reasons that S514 got
+// wrong once already for the login reply: the answering node is usually NOT in the contact table, and a CLI answer
+// must never land in a DM thread. Everything that is not a CLI-typed text from the login target is refused here
+// and falls through to the DM path untouched.
+bool onCliAnswer(const meshcore::View& pkt) {
+    if (pkt.type() != rptr::kTypeTxtMsg) return false;
+    lock();
+    const bool    have = s_haveTarget && s_login.loggedIn();
+    uint8_t       key[rptr::kPubKeyBytes];
+    uint8_t       secret[meshcore::kSecretBytes];
+    memcpy(key, s_targetKey, sizeof(key));
+    memcpy(secret, s_targetSecret, sizeof(secret));
+    unlock();
+    if (!have) return false;
+    if (pkt.payload_len < 2 || pkt.payload[1] != key[0]) return false;
+
+    meshcore::Identity self;
+    if (!mc::selfIdentity(&self)) return false;
+
+    static uint8_t plain[meshcore::kMaxPayload];   // radio task only, and large: not on its stack
+    size_t         plain_len = 0;
+    if (!rptr::openCliAnswer(self, key, secret, pkt, plain, sizeof(plain), &plain_len)) return false;
+
+    rptr::CliReply reply;
+    if (!rptr::parseCliReply(plain, plain_len, &reply)) return false;   // a PLAIN text: the DM code's
+
+    const bool bad = rptr::cliAnswerKind(reply.text) != rptr::CliAnswer::Ok;
+    lock();
+    const bool    pending = s_cli.used;
+    const bool    was_read = s_cli.isRead;
+    const uint8_t row = s_cli.row;
+    if (was_read) {
+        // A read's answer becomes the row's VALUE - and only when it parses as that line's format.
+        if (rptr::settingsApplyRead(&s_settings, s_cli.line, reply.text)) ++s_settingsSerial;
+    }
+    // A read's own text ("> RPT-Test-A") is not a notice: the VALUE is the feedback. An error on a read is.
+    if (!was_read || bad) noteAnswer(reply.text, bad);
+    if (pending) {
+        s_cli.clear();
+        if (!was_read && !bad && s_second[0] != '\0') {
+            // The first half of a PAIRED change (`set lat`) answered OK, so the second (`set lon`) goes out now,
+            // on its own; the answer to THAT one is what triggers the re-read. A refused or lost first half drops
+            // the second, so the repeater never ends up with a half-applied position.
+            char next[64];
+            snprintf(next, sizeof(next), "%s", s_second);
+            s_second[0] = '\0';
+            if (!sendCliLocked(next, (int)row, false, nowMs())) {
+                snprintf(s_second, sizeof(s_second), "%s", next);   // radio busy: try again on the next answer
+                noteAnswer("the second line is waiting for the radio", true);
+            }
+        } else if (!was_read) {
+            s_second[0] = '\0';
+            // A change: the answer is a notice, and the row is read again so the glass shows the repeater's own
+            // new value. Reboot gets no answer at all (CommonCLI.cpp:199-200 never returns), so it is a change
+            // with nothing to re-read.
+            if (row == (uint8_t)rptr::SetRow::Reboot) {
+                s_readStep = s_readStop;
+            } else {
+                const int idx = readLadderIndex(rptr::setRowReadCmd((int)row));
+                if (idx >= 0) {
+                    s_readStep = idx;
+                    s_readStop = idx + (row == (uint8_t)rptr::SetRow::Position ? 2 : 1);
+                }
+            }
+        }
+    }
+    unlock();
+    ESP_LOGI("rptr", "cli answer: \"%s\"%s", reply.text, bad ? " (not OK)" : "");
+    return true;
+}
+
+const rptr::Settings& settings() { return s_settings; }
+uint32_t settingsSerial() { return s_settingsSerial; }
+const rptr::CliPending& cli() { return s_cli; }
+bool cliBusy() { return s_cli.used; }
+const char* lastAnswer() { return s_answer; }
+bool lastAnswerBad() { return s_answerBad; }
+uint32_t answerSerial() { return s_answerSerial; }
 
 const rptr::FoundList& found() { return s_found; }
 const rptr::LoginMachine& login() { return s_login; }

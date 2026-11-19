@@ -185,5 +185,77 @@ bool parseStatusAnswer(const uint8_t* plain, size_t len, Status* out) {
   return statusParse(plain + 4, (int)(len - 4), out);
 }
 
+// ------------------------------------------------------------------------------- EST-470: the CLI path
+size_t buildCli(const meshcore::Identity& self, const uint8_t dest_pub[kPubKeyBytes],
+                const uint8_t secret[meshcore::kSecretBytes], uint32_t timestamp, const char* line,
+                const uint8_t* path, uint8_t path_len, uint8_t* out, size_t cap) {
+  if (dest_pub == nullptr || secret == nullptr || line == nullptr || out == nullptr) return 0;
+  const size_t text_len = strlen(line);
+  if (text_len == 0 || text_len > meshcore::kMaxText) return 0;
+
+  // sendCommandData's temp[]: ts(4) | (attempt & 3) | (TXT_TYPE_CLI_DATA << 2) | text
+  uint8_t temp[5 + meshcore::kMaxText + 1];
+  putLe32(temp, timestamp);
+  temp[4] = (uint8_t)(kTxtTypeCliData << 2);   // attempt 0: one line goes out once, no retry attempts of its own
+  memcpy(&temp[5], line, text_len + 1);        // the trailing NUL goes into the plaintext, as upstream does
+
+  uint8_t sealed[meshcore::kMaxPayload];
+  const size_t sealed_len = meshcore::sealPayload(secret, sealed, sizeof(sealed), temp, 5 + text_len);
+  if (sealed_len == 0) return 0;
+
+  const uint8_t header = (uint8_t)((path == nullptr ? kRouteFlood : kRouteDirect) | (kTypeTxtMsg << 2));
+  size_t path_bytes = 0;
+  const size_t at = writeRoute(out, cap, header, path, path_len, &path_bytes);
+  if (at == 0) return 0;
+
+  // createDatagram (Mesh.cpp:490-509): dest hash, src hash, then MAC+ciphertext.
+  const size_t need = at + 2 + sealed_len;
+  if (need > cap) return 0;
+  size_t o = at;
+  out[o++] = dest_pub[0];
+  out[o++] = self.pub[0];
+  memcpy(&out[o], sealed, sealed_len);
+  return o + sealed_len;
+}
+
+bool openCliAnswer(const meshcore::Identity& self, const uint8_t from_pub[kPubKeyBytes],
+                   const uint8_t secret[meshcore::kSecretBytes], const meshcore::View& pkt, uint8_t* plain,
+                   size_t plain_cap, size_t* plain_len) {
+  if (plain == nullptr || plain_len == nullptr || from_pub == nullptr || secret == nullptr) return false;
+  *plain_len = 0;
+  if (pkt.type() != kTypeTxtMsg || pkt.payload == nullptr) return false;
+  if (pkt.payload_len < 2 + meshcore::kMacBytes + meshcore::kBlockBytes) return false;
+  if (pkt.payload[0] != self.pub[0]) return false;    // not addressed to us
+  if (pkt.payload[1] != from_pub[0]) return false;    // not the repeater we are talking to
+  const size_t n = meshcore::openPayload(secret, plain, plain_cap, pkt.payload + 2,
+                                         (size_t)pkt.payload_len - 2);
+  if (n == 0) return false;
+  *plain_len = n;
+  return true;
+}
+
+bool parseCliReply(const uint8_t* plain, size_t len, CliReply* out) {
+  if (plain == nullptr || out == nullptr) return false;
+  if (len < 6) return false;   // ts(4) + flags + at least one character, as BaseChatMesh's len > 5
+  uint32_t ts = 0;
+  memcpy(&ts, plain, 4);
+  const uint8_t flags = plain[4];
+  const uint8_t txt_type = (uint8_t)(flags >> 2);
+  if (txt_type != kTxtTypeCliData) return false;   // a PLAIN text from the same node is the DM path's
+
+  // The plaintext is block-padded, so the text ends at the first NUL and never runs past `len`.
+  size_t text_len = 0;
+  while (text_len < len - 5 && plain[5 + text_len] != 0) text_len++;
+  if (text_len == 0) return false;
+  if (text_len > meshcore::kMaxText) text_len = meshcore::kMaxText;
+
+  *out = CliReply();
+  out->timestamp = ts;
+  out->txt_type = txt_type;
+  memcpy(out->text, plain + 5, text_len);
+  out->text[text_len] = '\0';
+  return true;
+}
+
 }  // namespace rptr
 }  // namespace om

@@ -168,5 +168,157 @@ constexpr uint16_t kBatteryMinMv = 2500;
 constexpr uint16_t kBatteryMaxMv = 4500;
 bool batteryPlausible(uint16_t milliVolts);
 
+// ====================================================================================== part 2a: settings
+// The SAFE settings EST-470 changes, and only those. Every LINE below is the one the repeater's own CLI parses
+// (firmware/lib/meshcore/helpers/CommonCLI.cpp and CommonRadioPrefs.cpp, both read, never guessed) and every
+// REPLY format is what that same handler answers. Radio, path hash, loop detect, advert timers, flood.max,
+// regions, silent mode and a free-form line are 2b.
+//
+// Upstream:  line                      handler                        answer
+//   set name <x>                       CommonCLI.cpp:531-537          "OK" / "Error, bad chars"
+//   set owner.info <x>                 CommonCLI.cpp:585-594          "OK"  ('|' becomes a newline on the repeater)
+//   set lat <x> / set lon <x>          CommonCLI.cpp:557-563          "OK"
+//   set repeat on|off                  CommonCLI.cpp:538-542          "OK - repeat is now ON" / "... OFF"
+//   powersaving on|off                 CommonCLI.cpp:439-457          "on - After 2 minutes" (ESP32) / "off"  [NO "set "]
+//   set tx <n>                         CommonRadioPrefs.cpp:141-145   "OK"
+//   advert.zerohop                     CommonCLI.cpp:203-206          "OK - zerohop advert sent"
+//   advert                             CommonCLI.cpp:207-210          "OK - Advert sent"
+//   clock sync                         CommonCLI.cpp:211-221          "OK - clock set: HH:MM - d/m/yyyy UTC"
+//   reboot                             CommonCLI.cpp:199-200          NO answer (board reboot() never returns)
+// Reads: `get <cfg>` answers "> <value>" (CommonCLI.cpp:701-...); `powersaving` answers a bare "on"/"off"
+// (:457-462); `get tx` answers "> <dbm>" (CommonRadioPrefs.cpp:137-139).
+
+constexpr int kOwnerMax = 119;    // NodePrefs::owner_info[120] (CommonCLI.h)
+// The 23-byte name cap: an advert's app_data is MAX_ADVERT_DATA_SIZE = 32 bytes (MeshCore.h:12) and a position
+// takes 1 flag byte + lat(4) + lon(4) = 9 of them (helpers/AdvertDataHelpers.cpp encodeTo), so a node that shares
+// its position keeps 32 - 9 = 23 for the name. Without a shared position the stored name may use 31
+// (NodePrefs::node_name[32], the L2's kNameMax).
+constexpr int kNameSharedMax = 23;
+constexpr uint8_t kTxMin = 1;     // the CLI's 1-22 dBm; upstream does NOT clamp `set tx` (CommonRadioPrefs.cpp
+constexpr uint8_t kTxMax = 22;    // stores atoi() straight), so the range is ours to enforce.
+
+// One row of the SETTINGS section, in the order the page draws them.
+enum class SetRow : uint8_t {
+  Name = 0,
+  Owner,
+  Position,
+  Repeat,
+  PowerSave,
+  TxPower,
+  AdvertLocal,
+  AdvertFlood,
+  ClockSync,
+  Reboot,
+  Count
+};
+constexpr int kSetRowCount = (int)SetRow::Count;
+
+const char* setRowLabel(int row);       // "Name", "Owner info", ... ("" out of range)
+bool        setRowIsText(int row);      // Name/Owner/Position: the shared text field
+bool        setRowIsToggle(int row);    // Repeat/Power save: Enter flips it (behind the confirm)
+bool        setRowIsStepper(int row);   // TX power: `+`/`-` move the draft, Enter opens the confirm
+bool        setRowIsAction(int row);    // Advert local/flood, Clock sync, Reboot
+const char* setRowReadCmd(int row);     // the first `get` line that fills this row, nullptr for an action
+const char* setRowReadCmd2(int row);    // Position's second line ("get lon"), nullptr otherwise
+const char* setRowActionCmd(int row);   // the line Enter sends for an action row, nullptr otherwise
+
+// What the repeater has ANSWERED so far. `*Ok == false` means "not read yet" and the page draws "…", never a
+// placeholder. reset() is what a fresh login (or a logout) starts from.
+struct Settings {
+  bool    nameOk = false;
+  char    name[kNameMax + 1] = "";
+  bool    ownerOk = false;
+  char    owner[kOwnerMax + 1] = "";
+  bool    latOk = false;
+  int32_t latE6 = 0;
+  bool    lonOk = false;
+  int32_t lonE6 = 0;
+  bool    repeatOk = false;
+  bool    repeat = true;
+  bool    psOk = false;
+  bool    powerSave = false;
+  bool    txOk = false;
+  uint8_t tx = 0;
+  void    reset() { *this = Settings(); }
+  bool    positionOk() const { return latOk && lonOk; }
+};
+
+// The row's value as the glass shows it. False = nothing read yet (the caller draws "…"); `out` is left empty.
+// Position is ONE row: "46.25000, 14.40000" only when BOTH halves have been answered.
+bool settingsRowValue(const Settings& s, int row, char* out, size_t cap);
+
+// The read-after-login script, in order: the seven `get` lines above that a repeater really answers. A row is
+// read again after every change (and the whole script on `r`), so no row ever keeps a value the finger made up.
+constexpr int kSetReadCount = 7;
+const char* setReadCmd(int i);                 // i < 0 or >= kSetReadCount -> nullptr
+int         setReadRow(const char* cmd);       // the SetRow a read fills, -1 when it is not one of ours
+
+// Read one answer into its row, keyed by the LINE that asked (not by the row: lat and lon share the Position
+// row, and only the line says which half this answer is). Returns false when the text is not that line's
+// format (a stray answer, an error line), in which case the row keeps what it had.
+bool settingsApplyRead(Settings* s, const char* read_cmd, const char* reply);
+
+// ------------------------------------------------------------------------------------- the CLI line builders
+// Each writes the exact line and returns its length, or 0 for a refused argument (out left empty).
+int cliName(char* out, size_t cap, const char* name, bool positionShared);
+int cliOwner(char* out, size_t cap, const char* owner);
+int cliLat(char* out, size_t cap, int32_t latE6);                       // "set lat 46.25000"
+int cliLon(char* out, size_t cap, int32_t lonE6);                       // "set lon 14.40000"
+int cliPosition(char* out, size_t cap, int32_t latE6, int32_t lonE6);   // both, " · " between (as cliRadioApply)
+int cliRepeat(char* out, size_t cap, bool on);
+int cliPowerSaving(char* out, size_t cap, bool on);
+int cliTx(char* out, size_t cap, unsigned dbm);                         // clamped to kTxMin..kTxMax
+int degreesText(char* out, size_t cap, int32_t e6);                     // "46.25000" (five decimals)
+
+constexpr const char* kCliAdvertLocal = "advert.zerohop";
+constexpr const char* kCliAdvertFlood = "advert";
+constexpr const char* kCliClockSync = "clock sync";
+constexpr const char* kCliClockRead = "clock";
+constexpr const char* kCliReboot = "reboot";
+constexpr const char* kCliGetName = "get name";
+constexpr const char* kCliGetOwner = "get owner.info";
+constexpr const char* kCliGetLat = "get lat";
+constexpr const char* kCliGetLon = "get lon";
+constexpr const char* kCliGetRepeat = "get repeat";
+constexpr const char* kCliPowerSavingRead = "powersaving";
+constexpr const char* kCliGetTx = "get tx";
+// 2025-01-01. Anything earlier is not a real clock: 0 is an unset RTC and 2024 is MeshCore's restart clock
+// (the L2's kClockRealSince). The automatic clock sync after a login is skipped while ours is below this, because
+// `clock sync` would only answer "ERR: clock cannot go backwards" (CommonCLI.cpp:211-221).
+constexpr uint32_t kClockRealSince = 1735689600u;
+
+// -------------------------------------------------------------------------------------- the answer parsers
+// A `set` answers "OK...", "ok", an "Error..." or an "ERR:..." line, and `??: <cfg>` is an unknown config.
+enum class CliAnswer : uint8_t { Ok = 0, Error, Unknown };
+CliAnswer cliAnswerKind(const char* text);
+bool      cliStripPrefix(const char* reply, char* out, size_t cap);   // "> value" -> "value"
+bool      cliParseOnOff(const char* reply, bool* out);                // "> on" / "on" / "off"
+bool      cliParseTx(const char* reply, uint8_t* out);                // "> 14"
+bool      cliParseCoord(const char* reply, int32_t* e6);              // "> 46.25000"
+// "lat, lon" as TYPED (the Position row's one field). Accepts an optional space after the comma and refuses an
+// empty half or an out-of-range value, so a typo never becomes a command.
+bool cliParseTypedPosition(const char* typed, int32_t* latE6, int32_t* lonE6);
+
+// ---------------------------------------------------------------------------------- the confirm sheet's words
+// Every change names the exact line that will go on the air and the value the row shows now (EST-470 item 3).
+int confirmWriteText(char* out, size_t cap, const char* line, const char* current);
+int confirmRebootText(char* out, size_t cap, const char* name);   // "Reboot X? It is off the mesh for ~10 s."
+
+// ------------------------------------------------------------------------ one line on the air at a time
+// A queue of ONE pending CLI line (EST-470 item 4). Nothing else is sent while `used`; a timeout clears it and
+// leaves every row as it was READ, because a lost answer means "we do not know", never "it worked".
+struct CliPending {
+  bool     used = false;
+  bool     isRead = false;   // a read (the answer becomes a value) or a change (the answer becomes a notice)
+  uint8_t  row = 0xFF;       // the SetRow this answer belongs to
+  char     line[64] = "";
+  uint32_t sentMs = 0;
+  uint32_t deadlineMs = 0;
+
+  void begin(const char* l, uint8_t r, bool read, uint32_t nowMs, uint32_t deadline);
+  void clear() { *this = CliPending(); }
+  bool timedOut(uint32_t nowMs) const { return used && (int32_t)(nowMs - deadlineMs) >= 0; }
+};
+
 }  // namespace rptr
 }  // namespace om
