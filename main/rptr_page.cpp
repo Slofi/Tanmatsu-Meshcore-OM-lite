@@ -35,11 +35,24 @@ void hexPrefix(char* out, size_t cap, const uint8_t* key) {
     snprintf(out, cap, "%02x%02x%02x", key[0], key[1], key[2]);
 }
 
+// S514 (Claude; Filip: "RPTRs list doesn't scroll"): the list always drew from row 0 and stopped at the bottom edge,
+// so a focused repeater below it was off screen. The first visible row now follows the focus the way the sound
+// picker does (EST-451): the gold frame stops at the last visible row and the list moves under it, and the same at
+// the top. Page-local state: the RPTR list is drawn by the main task only.
+int s_rptr_first = 0;
+
 void drawFoundRows(Screen& s, const RptrView& v, int x0, int x1, int top) {
     const int row_right = x1 - kTmRingInset;
-    for (int i = 0; v.found != nullptr && i < v.found->count; ++i) {
+    const int count     = v.found != nullptr ? v.found->count : 0;
+    int       visible   = (kTmH - kTmHintH - top) / kRptrRowH;
+    if (visible < 1) visible = 1;
+    if (v.focus < s_rptr_first) s_rptr_first = v.focus;
+    if (v.focus >= s_rptr_first + visible) s_rptr_first = v.focus - visible + 1;
+    if (s_rptr_first > count - visible) s_rptr_first = count - visible;
+    if (s_rptr_first < 0) s_rptr_first = 0;
+    for (int i = s_rptr_first; v.found != nullptr && i < count; ++i) {
         const rptr::Found& f = v.found->rows[i];
-        const int y0 = top + i * kRptrRowH;
+        const int y0 = top + (i - s_rptr_first) * kRptrRowH;
         const int y1 = y0 + kRptrRowH;
         if (y1 > kTmH - kTmHintH) break;
         const bool focused = (i == v.focus && v.mode == RptrMode::List);
@@ -242,12 +255,18 @@ void drawRptr(Screen& s, const RptrView& v) {
     drawFoundRows(s, v, list_x0, list_x1, work_top + 44);
     drawText(s, Face::Meta, list_x0, work_top + 18, "REPEATERS", kDim);
     {
-        const char* chip = v.scanning ? "SCAN…" : "SCAN  s";
-        const int fw = 90;
-        s.fillRect(list_x1 - kTmRingInset - fw, work_top + 4, fw, 24, kPanel);
-        s.frame(list_x1 - kTmRingInset - fw, work_top + 4, fw, 24, 1, kLine);
-        drawText(s, Face::Meta, list_x1 - kTmRingInset - fw / 2, textBaseline(s, Face::Meta, work_top + 4, 24),
-                 chip, kDim);
+        // S514 (Claude; Filip: the Scan button had "an extra s at the end, outside the border, and the text is not
+        // centred"): the text was drawn LEFT-aligned from the box's centre, so "SCAN  s" ran out of the box. It is
+        // measured and centred now, and the key is left to the hint bar ("s scan"), where every other key lives.
+        const char* chip = v.scanning ? "SCAN…" : "SCAN";
+        const int   fw   = 90;
+        const int   bx   = list_x1 - kTmRingInset - fw;
+        s.fillRect(bx, work_top + 4, fw, 24, kPanel);
+        s.frame(bx, work_top + 4, fw, 24, 1, kLine);
+        const Font* f  = fontFor(Face::Meta);
+        const int   tw = (f != nullptr && f->ready()) ? f->textWidth(chip) : fw - 16;
+        const int   tx = tw < fw ? bx + (fw - tw) / 2 : bx + 4;
+        drawText(s, Face::Meta, tx, textBaseline(s, Face::Meta, work_top + 4, 24), chip, kDim);
     }
     if (v.found != nullptr && v.found->count == 0 && !v.found->listening) {
         drawText(s, Face::Meta, list_x0, work_top + 70, "none answered", kDimmer);
