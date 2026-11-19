@@ -5,7 +5,17 @@
 - [x] **Step 0 + 1 (EST-424, done 2026-11-13 11:20, reviewed by Claude: right look; build section unverified because WadaMesh was not visible):** `docs/PLAN.md` + the Launcher home preview at 800×480 (`shots/`), then Nodes/Chat previews if time allowed.
 **Three decisions for Filip (Claude, 2026-11-13 11:40):** (1) **the look**: the six 800×480 previews in `tanmatsu/shots/` (Launcher, Nodes, Chat, Map, RPTR, Settings); DS asks whether the filled "cloud" key symbol should be an outline like the other four; (2) **the sandbox** opening below; (3) **where the Tanmatsu toolchain goes**: ESP-IDF 5.5.1 for the `esp32p4` (~3 GB, needs a download), nothing installed yet, so no real build is possible until then (PLAN.md § 6, cited from WadaMesh).
 
-## ▶ S513 (2026-11-18, Claude): where it stands now
+## ▶ S514 (2026-11-19, Claude): where it stands now
+
+The device runs **v55** (`405a6b3`). S514's tickets EST-443 … EST-457 are closed (records: the S514 entries at the top
+of `PROGRESS.md`); **EST-458 (RPTR part 2a, safe settings) was stopped at Filip's word**, its partial work is in
+`../wip/EST-458-rptr-part2a-partial-2026-11-19.patch`. Already DONE, do not re-propose: Settings (one tab per app),
+sounds, Nodes search/favourites/node menu with Ping/Trace, emoji, fast seek, RPTR part 1 (login + status, proven on the
+air). **The ordered TO-DO and the "what not to do" list live in `../pocket-mesh.md` § REBUILD "▶ TANMATSU: NEXT SESSION
+STARTS HERE (S514 close)"** (one home): the test tour with Filip, then RPTR part 2a re-filed, then 2b (radio).
+DS works IN PLACE in this folder (the fence binds it read-write, `.git` read-only); one run at a time.
+
+## (SUPERSEDED by S514, history) ▶ S513 (2026-11-18, Claude)
 
 The device runs **v42** (`0d8ec23`). S513's tickets EST-427 … EST-441 are all closed; their records are the S513
 entries at the top of `PROGRESS.md`. Everything below this block is older history. **The ordered TO-DO and the
