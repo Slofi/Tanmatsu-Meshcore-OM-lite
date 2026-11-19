@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "chrome.h"
+#include "menu_cards.h"   // EST-445: the menu focus includes the full-width Settings bar
 #include "tm_theme.h"
 #include "../../firmware/src/ui/theme.h"   // the L2 palette: one source of truth, never copied
 
@@ -71,7 +72,8 @@ void drawLauncher(Screen& s, const LauncherView& v) {
     if (count > 3) count = 3;
     int focused = v.focused;
     if (focused < 0) focused = 0;
-    if (count > 0 && focused >= count) focused = count - 1;
+    if (focused > tm::kMenuSettingsFocus) focused = tm::kMenuSettingsFocus;
+    const bool settings_focused = (focused == tm::kMenuSettingsFocus);
 
     const int top = head_bot + kTmMenuTop;
     const int cw  = (W - 2 * kTmPad - (count > 1 ? (count - 1) * kTmMenuGap : 0)) / (count > 0 ? count : 1);
@@ -112,17 +114,42 @@ void drawLauncher(Screen& s, const LauncherView& v) {
         }
     }
 
-    // ---- one short dim line about the FOCUSED card: what it owns, in the mesh's own numbers
-    if (count > 0 && v.cards[focused].owns)
-        drawText(s, Face::Body, kTmPad, textBaseline(s, Face::Body, top + kTmMenuCardH + kTmMenuOwnsGap, 24),
+    // ---- the full-width Settings bar under the cards (EST-445): Down from any card lands here, Enter opens
+    // Settings on General. Same plate recipe as a card, one row tall; the small dim line names what lives on
+    // the page so the bar is not just a word.
+    const int set_top = top + kTmMenuCardH + kTmMenuGap;
+    drawCardPlate(s, kTmPad, set_top, W - 2 * kTmPad, kTmMenuSettingsH, kTmMenuRadius,
+                  settings_focused ? (int)kTmRingW : 1,
+                  settings_focused ? (uint16_t)kAcc : (uint16_t)kLine,
+                  settings_focused ? (uint16_t)kSelBg : (uint16_t)kPanel);
+    drawText(s, Face::Title, kTmPad + 16, textBaseline(s, Face::Title, set_top + 4, 30), "Settings",
+             settings_focused ? (uint16_t)kAccInk : (uint16_t)kInk);
+    drawText(s, Face::Meta, kTmPad + 16, textBaseline(s, Face::Meta, set_top + 30, 22),
+             "node name · adverts · radio · device", kDim);
+    // The same chevron the Settings rows draw: a sub-page lives behind this bar, not an app card.
+    {
+        const int xs[3] = {W - kTmPad - 24, W - kTmPad - 19, W - kTmPad - 24};
+        const int ys[3] = {set_top + 22, set_top + 28, set_top + 34};
+        s.polyline(xs, ys, 3, 2, settings_focused ? (uint16_t)kAcc : (uint16_t)kDimmer);
+    }
+
+    // ---- one short dim line about the FOCUSED card: what it owns, in the mesh's own numbers. On the
+    // Settings bar the page's own line takes its place.
+    if (settings_focused) {
+        drawText(s, Face::Body, kTmPad, textBaseline(s, Face::Body, set_top + kTmMenuSettingsH + kTmMenuOwnsGap - 10, 24),
+                 "name, adverts, radio and device settings", kDim);
+    } else if (count > 0 && focused >= 0 && focused < count && v.cards[focused].owns) {
+        drawText(s, Face::Body, kTmPad, textBaseline(s, Face::Body, set_top + kTmMenuSettingsH + kTmMenuOwnsGap - 10, 24),
                  v.cards[focused].owns, kDim);
+    }
 
     // ---- hint bar: this page's actions left, the five symbol keys right (the triangle stays LAUNCHER).
     // The panel's generated faces are the L2 subset (ASCII + Latin-1/Extended-A, tools/mkfonts.py), so the
     // key chips say "l/r" and "ret" exactly like every other page's hint bar; the preview draws ←→ / ↵ in
-    // desktop DejaVu. The words are the ticket's: select / open / stop / quit.
-    static const HintItem hints[] = {{"l/r", "select"}, {"ret", "open"}, {"s", "stop"}, {"esc", "quit"}};
-    drawHintBar(s, tm::Page::Launcher, hints, 4);
+    // desktop DejaVu. The Settings key is first here so it can never be the chip pushed off the edge.
+    static const HintItem hints[] = {{",", "settings"}, {"l/r", "select"}, {"ret", "open"}, {"s", "stop"},
+                                     {"esc", "quit"}};
+    drawHintBar(s, tm::Page::Launcher, hints, 5);
 }
 
 }  // namespace ui

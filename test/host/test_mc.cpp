@@ -244,7 +244,7 @@ const char* kAdvertFrame =
 void testIdentityAdvert() {
     // NOTE: this vector uses the name "EDCT" on purpose even though the node is now "TNMT (SI)": the expected
     // bytes were signed by Python over exactly this name, and a fixed vector must not change with the product's
-    // naming. The device's own name lives in one place (mc_link.cpp, kNodeName).
+    // naming. The device's own name lives in one place (mc_link.cpp, nodeName()).
     uint8_t seed[32];
     for (size_t i = 0; i < sizeof(seed); i++) seed[i] = (uint8_t)i;
 

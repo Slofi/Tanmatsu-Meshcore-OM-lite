@@ -16,6 +16,7 @@
 #include "jpeg_decoder.h"         // espressif/esp_jpeg: the software decoder, and the fallback
 #include "map_pack.h"
 #include "map_view.h"
+#include "nvs.h"   // S514/EST-447: the MAP rows and the last position live in NVS "mcset"
 
 namespace om {
 namespace maplink {
@@ -58,6 +59,9 @@ OpenPack           g_pack;
 om::map::TileCache g_cache;
 uint16_t*          g_pixels[om::map::kCacheSlots] = {nullptr};
 bool               g_ready = false;
+
+// S514/EST-447: defined with the other MAP-settings helpers at the end of this file; begin() calls it once.
+void loadMapSettings();
 
 // The worker's queue: replaced wholesale by showView(), drained one tile at a time.
 om::map::TileRequest g_req[om::map::kMaxRequests];
@@ -495,6 +499,7 @@ void fillTask(void*) {
 void begin() {
     if (g_lock == nullptr) g_lock = xSemaphoreCreateMutex();
     if (g_wake == nullptr) g_wake = xSemaphoreCreateBinary();
+    loadMapSettings();   // S514/EST-447: NVS is up by now (app_main initialises it before the card mount)
 
     // Once the boot check has refused the codec, it stays refused: begin() can be called again (card remount) and
     // must not quietly resurrect a decoder that was measured to draw the wrong picture.
@@ -762,6 +767,165 @@ void verifyDecoders(double lat, double lon) {
     heap_caps_free(hw_px);
     heap_caps_free(sw_px);
     heap_caps_free(raw);
+}
+
+// ------------------------------------------------------------------------- S514/EST-447: the MAP settings
+// NVS "mcset": mapstart (u8), mapzoom (u8), lastz/lastwx/lastwy. The choices and the write timing are
+// core/map_settings.h; this file only persists them. The caches are filled by begin() (NVS is already up:
+// app_main initialises it before the card is mounted) so a Settings getter never opens NVS on a draw.
+
+namespace {
+uint8_t            g_start_position     = om::map::kStartLjubljana;
+uint8_t            g_start_zoom         = (uint8_t)om::map::kStartZoomDefault;
+bool               g_map_settings_loaded = false;
+om::map::SavedView g_last_view;
+bool               g_last_view_loaded   = false;
+
+void loadMapSettings() {
+    if (g_map_settings_loaded) return;
+    g_map_settings_loaded = true;
+    nvs_handle_t h;
+    if (nvs_open("mcset", NVS_READONLY, &h) != ESP_OK) return;
+    uint8_t v = 0;
+    if (nvs_get_u8(h, "mapstart", &v) == ESP_OK)
+        g_start_position = om::map::startPositionFromStored(v, true);
+    if (nvs_get_u8(h, "mapzoom", &v) == ESP_OK)
+        g_start_zoom = (uint8_t)om::map::startZoomFromStored(v, true);
+    nvs_close(h);
+    ESP_LOGI(TAG, "map settings: start %s, zoom z%u", om::map::startPositionLabel(g_start_position),
+             (unsigned)g_start_zoom);
+}
+
+bool writeU8(const char* key, uint8_t value) {
+    nvs_handle_t h;
+    if (nvs_open("mcset", NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t r = nvs_set_u8(h, key, value);
+    if (r == ESP_OK) r = nvs_commit(h);
+    nvs_close(h);
+    if (r != ESP_OK) ESP_LOGE(TAG, "map settings: %s write failed (%s)", key, esp_err_to_name(r));
+    return r == ESP_OK;
+}
+
+// A pack directory's cache slot, or -1 for a name this section does not show.
+int packSlot(const char* dir) {
+    if (dir == nullptr) return -1;
+    if (strcmp(dir, "slo") == 0) return 0;
+    if (strcmp(dir, "slo16") == 0) return 1;
+    if (strcmp(dir, "slo17") == 0) return 2;
+    return -1;
+}
+}  // namespace
+
+uint8_t mapStartPosition() {
+    loadMapSettings();
+    return g_start_position;
+}
+
+bool setMapStartPosition(uint8_t value) {
+    loadMapSettings();
+    if (value != om::map::kStartLjubljana && value != om::map::kStartLast) return false;
+    if (!writeU8("mapstart", value)) return false;
+    g_start_position = value;
+    ESP_LOGI(TAG, "map settings: start position -> %s", om::map::startPositionLabel(value));
+    return true;
+}
+
+uint8_t mapStartZoom() {
+    loadMapSettings();
+    return g_start_zoom;
+}
+
+bool setMapStartZoom(uint8_t zoom) {
+    loadMapSettings();
+    if (zoom < om::map::kStartZoomMin || zoom > om::map::kStartZoomMax) return false;
+    if (!writeU8("mapzoom", zoom)) return false;
+    g_start_zoom = zoom;
+    ESP_LOGI(TAG, "map settings: start zoom -> z%u", (unsigned)zoom);
+    return true;
+}
+
+bool loadLastView(om::map::SavedView* out) {
+    if (out == nullptr) return false;
+    if (!g_last_view_loaded) {
+        g_last_view_loaded = true;
+        nvs_handle_t h;
+        if (nvs_open("mcset", NVS_READONLY, &h) == ESP_OK) {
+            uint8_t z  = 0;
+            int32_t wx = 0;
+            int32_t wy = 0;
+            if (nvs_get_u8(h, "lastz", &z) == ESP_OK && nvs_get_i32(h, "lastwx", &wx) == ESP_OK &&
+                nvs_get_i32(h, "lastwy", &wy) == ESP_OK && z >= om::map::kSavedZoomMin &&
+                z <= om::map::kSavedZoomMax) {
+                g_last_view.valid = true;
+                g_last_view.z     = z;
+                g_last_view.wx    = wx;
+                g_last_view.wy    = wy;
+            }
+            nvs_close(h);
+        }
+    }
+    *out = g_last_view;
+    return g_last_view.valid;
+}
+
+bool saveLastView(const om::map::SavedView& view) {
+    if (!view.valid) return false;
+    nvs_handle_t h;
+    if (nvs_open("mcset", NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t r = nvs_set_u8(h, "lastz", view.z);
+    if (r == ESP_OK) r = nvs_set_i32(h, "lastwx", view.wx);
+    if (r == ESP_OK) r = nvs_set_i32(h, "lastwy", view.wy);
+    if (r == ESP_OK) r = nvs_commit(h);
+    nvs_close(h);
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "map settings: last view write failed (%s)", esp_err_to_name(r));
+        return false;
+    }
+    g_last_view        = view;
+    g_last_view_loaded = true;
+    ESP_LOGI(TAG, "map settings: last view saved (z%u, %ld,%ld)", (unsigned)view.z, (long)view.wx,
+             (long)view.wy);
+    return true;
+}
+
+bool packStatus(const char* dir, PackStatus* out) {
+    if (out == nullptr) return false;
+    const int slot = packSlot(dir);
+    if (slot < 0) return false;
+    static PackStatus cache[3];
+    static bool       cached[3] = {false, false, false};
+    if (!cached[slot]) {
+        cached[slot] = true;
+        PackStatus st;
+        char       path[80];
+        FILINFO    info;
+        for (char d = '0'; d <= '9'; d++) {
+            snprintf(path, sizeof(path), "%c:/maps/%s/tiles.pack", d, dir);
+            if (f_stat(path, &info) == FR_OK && info.fsize > 0) {
+                st.present = true;
+                st.bytes   = (uint64_t)info.fsize;
+                break;
+            }
+        }
+        if (st.present) {
+            // The index stays on stdio (the same path the map opens): its size / one record is the count,
+            // with no scan and without touching the map's own open handles.
+            snprintf(path, sizeof(path), "/sdcard/maps/%s/tiles.idx", dir);
+            FILE* idx = fopen(path, "rb");
+            if (idx != nullptr) {
+                if (fseek(idx, 0, SEEK_END) == 0) {
+                    const long size = ftell(idx);
+                    if (size > 0) st.tiles = (uint32_t)((size_t)size / om::map::kIdxRecordBytes);
+                }
+                fclose(idx);
+            }
+        }
+        cache[slot] = st;
+        ESP_LOGI(TAG, "map settings: pack %s %s, %u tiles, %llu B", dir, st.present ? "present" : "absent",
+                 (unsigned)st.tiles, (unsigned long long)st.bytes);
+    }
+    *out = cache[slot];
+    return true;
 }
 
 }  // namespace maplink

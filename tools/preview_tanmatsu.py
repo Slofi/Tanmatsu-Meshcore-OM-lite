@@ -565,6 +565,86 @@ def nodes():
     return save(img, '2026-11-13-nodes.png')
 
 
+# S514/EST-449: the search preview's fixture — six invented nodes, exactly TWO containing "era".
+NODES_SEARCH = [
+    ('client', 'TEST-Vera', 'direct', '8m', '4.1', True),
+    ('repeater', 'RPT-Kamera', 'path 2', '18m', '7.5', True),
+    ('repeater', 'RPT-Jug', 'path 2', '49m', '6.1', False),
+    ('repeater', 'RPT-Vzhod', 'path 3', '9h', '-1.4', False),
+    ('repeater', 'RPT-Zahod', 'path 3', '9h', '0.2', False),
+    ('client', 'LOCAL-KB', 'direct', '2d', '4.4', False),
+]
+
+
+def nodes_search():
+    """OM Lite > Nodes, S514/EST-449: the search bar as the list's TOP ROW, always visible.
+
+    Query "era" typed, "2 of 6", the two matches below. The bar is FOCUSED (the gold 2 px ring of a row)
+    and no list row is drawn as selected while the bar owns the keys. ONE field: the query left, the count
+    right, both 12 px clear of the plate's border (the L2's S508 correction). No magnifier glyph: the
+    firmware faces carry Latin-1 + Latin Extended-A only, so there is no U+2315 / U+1F50D to draw.
+    """
+    img, d = new_screen()
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    status_bar(d)
+
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Nodes', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    fm = font(FONT_MONO, TM['f_meta'])
+    text(d, (W - pad, y + TM['head_h'] // 2), '6 nodes heard · 2 in the last hour', fm, P['Dim'],
+         anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+    work_top = y + TM['head_h'] + 1
+
+    list_x0, list_x1 = pad, pad + TM['list_w']
+    bar_x1 = list_x1 - TM['ring_inset']
+    bar_y, bar_h = work_top + 4, 30
+    d.rectangle([list_x0, bar_y, bar_x1, bar_y + bar_h], fill=P['FieldBg'])
+    d.rectangle([list_x0, bar_y, bar_x1, bar_y + bar_h], outline=P['Acc'], width=TM['ring_w'])
+    text(d, (list_x0 + 12, bar_y + bar_h // 2), 'era', font(FONT_SANS, TM['f_body']), P['Ink'],
+         anchor='lm')
+    text(d, (bar_x1 - 12, bar_y + bar_h // 2), '2 of 6', font(FONT_MONO, TM['f_hint']), P['Dim'],
+         anchor='rm')
+
+    rows_top = bar_y + bar_h + 6
+    row_h = 46
+    row_right = list_x1 - TM['ring_inset']
+    shown = [n for n in NODES_SEARCH if 'era' in n[1].lower()]
+    for i, (kind, name, hops, age, snr, fav) in enumerate(shown):
+        y0 = rows_top + i * row_h
+        y1 = y0 + row_h
+        if i + 1 < len(shown):
+            hline(d, list_x0, row_right, y1, P['RowLine'])
+        col = P['Client'] if kind == 'client' else P['Green']
+        d.ellipse([list_x0 + 6, y0 + row_h // 2 - 4, list_x0 + 14, y0 + row_h // 2 + 4], fill=col)
+        text(d, (list_x0 + 24, y0 + 10), name, font(FONT_SANS, 16), P['Ink'])
+        meta = font(FONT_MONO, TM['f_meta'])
+        text(d, (list_x0 + 24, y0 + 29), hops, meta, P['Dimmer'])
+        text(d, (row_right - 74, y0 + 11), age, meta, P['Dim'], anchor='ra')
+        text(d, (row_right - 6, y0 + 29), snr + ' dB', meta, P['Dim'], anchor='ra')
+        if fav:
+            text(d, (row_right - 6, y0 + 11), '★', meta, P['Acc'], anchor='ra')
+
+    # detail pane: the first match (the list's own order)
+    vline(d, list_x1 + 8, work_top, H - TM['hint_h'] - 8, P['Line'])
+    x = list_x1 + 8 + 24
+    yy = work_top + 18
+    text(d, (x, yy), shown[0][1], font(FONT_SANS, 26), P['Ink'])
+    yy += 34
+    text(d, (x, yy), 'client · key ' + NODE_KEY + ' · favourite', fm, P['Dim'])
+    yy += 26
+    fk = font(FONT_MONO, TM['f_kv'])
+    for label, value in (('TYPE', 'client (companion)'), ('HOPS', 'direct · 0 hops'),
+                         ('SNR / RSSI', '4.1 dB / -71 dBm'), ('LAST HEARD', '8 m ago'),
+                         ('PUBLIC KEY', NODE_KEY), ('PATH', 'direct')):
+        text(d, (x, yy), label, fk, P['Dimmer'])
+        text(d, (x + 130, yy), value, fk, P['Ink'])
+        yy += 28
+
+    hint_bar(d, 'nodes', [('type', 'search'), ('↓', 'list'), ('esc', 'clear/back')])
+    return save(img, '2026-11-19-nodes-search.png')
+
+
 CHATS = [
     ('#', 'test-a', 'TEST-A1: morning, radio check', '3m', 2),
     ('#', 'test-b', 'LOCAL-KB: history save check', '12m', 0),
@@ -1097,7 +1177,7 @@ def settings():
     """
     img, d = new_screen()
     W, H, pad = TM['W'], TM['H'], TM['pad']
-    status_bar(d)
+    status_bar(d, clock='22:31')
 
     y = TM['status_h']
     text(d, (pad, y + TM['head_h'] // 2), 'Settings', font(FONT_SANS, TM['f_title']), P['Ink'],
@@ -1232,6 +1312,262 @@ def menu():
     return save(img, '2026-11-18-menu-cards.png')
 
 
+# ------------------------------------------------------------------------------------- settings general
+def settings_general():
+    """EST-445: Settings, part 1 — the frame and the General tab.
+
+    Same house style as the Chat/menu cards: the L2's status bar, the page head, the five-tab row
+    (General · Nodes · Chat · Map · RPTR, the current one gold with an underline), then the General
+    page as sections of label/value rows. Values are dim mono on the right, a chevron marks the Name
+    sub-page, and the focused row carries the 2 px gold ring. The body scrolls; the thumb at the right
+    shows there is more below (RADIO and DEVICE continue). All numbers are invented (public-repo rule 9).
+    """
+    img, d = new_screen()
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    status_bar(d, clock='22:31')
+
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Settings', font(FONT_SANS, TM['f_title']), P['Ink'],
+         anchor='lm')
+    text(d, (W - pad, y + TM['head_h'] // 2), 'general · tab 1 of 4',
+         font(FONT_MONO, TM['f_meta']), P['Dimmer'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+
+    # EST-448: one tab per OWNER (General + the registry), not one per function.
+    tab_top = y + TM['head_h'] + 1
+    tab_h = 30
+    tabs = ['General', 'OM Lite', 'OPS-TOC', 'Mesh-Torry']
+    ft = font(FONT_MONO, TM['f_label'])
+    for i, name in enumerate(tabs):
+        x0 = W * i // len(tabs)
+        x1 = W * (i + 1) // len(tabs)
+        on = (i == 0)
+        text(d, ((x0 + x1) // 2, tab_top + tab_h // 2), name, ft, P['Acc'] if on else P['Dimmer'],
+             anchor='mm')
+        if on:
+            d.rectangle([x0 + 18, tab_top + tab_h - 3, x1 - 18, tab_top + tab_h - 2],
+                        fill=P['Acc'])
+    hline(d, 0, W, tab_top + tab_h, P['Line'])
+
+    body_top = tab_top + tab_h
+    body_bot = H - TM['hint_h']
+    lx0, lx1 = pad, W - pad
+    row_h, sect_h = 34, 22
+
+    def section(yy, label):
+        spaced(d, (lx0 + 4, yy + 5), label, font(FONT_MONO, TM['f_label']), P['Dim'])
+        return yy + sect_h
+
+    yy = body_top + 4
+    total_rows = [
+        ('sect', 'NODE', None, None),
+        ('row', 'Name', 'TNMT (SI)', True),
+        ('row', 'Public key', 'a1b2c3d4e5f60718', False),
+        ('row', 'Advert now', 'Enter', False),
+        ('sect', 'ADVERT', None, None),
+        ('row', 'Automatic advert', '3 h', False),
+        ('sect', 'RADIO (READ ONLY)', None, None),
+        ('row', 'Frequency', '869.618 MHz', False),
+        ('row', 'Bandwidth', '62.5 kHz', False),
+        ('row', 'Spreading', 'SF 8', False),
+        ('row', 'Coding', '4/8', False),
+        ('row', 'TX power', '22 dBm', False),
+        ('row', 'Path hash', '2 B', False),
+        ('sect', 'DEVICE (READ ONLY)', None, None),
+        ('row', 'Time', '22:31 · rtc', False),
+        ('row', 'SD card', 'mounted · history on', False),
+        ('row', 'Contacts', '3 / 32', False),
+        ('row', 'App version', '44', False),
+        ('row', 'Free internal heap', '120 KB', False),
+        ('row', 'Free PSRAM', '26.1 MB', False),
+    ]
+    total_h = sum(sect_h if k == 'sect' else row_h for k, *_ in total_rows)
+
+    for kind, label, value, focused in total_rows:
+        if kind == 'sect':
+            if yy + sect_h > body_bot:
+                break
+            yy = section(yy, label)
+            continue
+        if yy + row_h > body_bot:
+            break
+        setrow(d, lx0, lx1, yy, label, value, focused=focused, chevron=(label == 'Name'))
+        yy += row_h + 2
+
+    scroll_indicator(d, (lx0, body_top, W - 8, body_bot), total_h, body_bot - body_top, 0)
+
+    # the ticket's five keys, plus the global Settings key. The bar fits them by shortening the labels
+    # (the device's chrome drops a chip that would run under the symbol keys).
+    hint_bar(d, 'settings', [('←→', 'tab'), ('↑↓', 'row'), ('↵', 'open/change'), ('esc', 'back'),
+                             (',', 'settings')])
+    return save(img, '2026-11-19-settings-general.png')
+
+
+def _settings_owner_frame(tab_index, right_text):
+    """The common chrome for an EST-448 owner tab: status bar, page head, the four owner tabs, body box."""
+    img, d = new_screen()
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    status_bar(d, clock='22:31')
+
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Settings', font(FONT_SANS, TM['f_title']), P['Ink'],
+         anchor='lm')
+    text(d, (W - pad, y + TM['head_h'] // 2), right_text,
+         font(FONT_MONO, TM['f_meta']), P['Dimmer'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+
+    tab_top = y + TM['head_h'] + 1
+    tab_h = 30
+    tabs = ['General', 'OM Lite', 'OPS-TOC', 'Mesh-Torry']
+    ft = font(FONT_MONO, TM['f_label'])
+    for i, name in enumerate(tabs):
+        x0 = W * i // len(tabs)
+        x1 = W * (i + 1) // len(tabs)
+        on = (i == tab_index)
+        text(d, ((x0 + x1) // 2, tab_top + tab_h // 2), name, ft, P['Acc'] if on else P['Dimmer'],
+             anchor='mm')
+        if on:
+            d.rectangle([x0 + 18, tab_top + tab_h - 3, x1 - 18, tab_top + tab_h - 2],
+                        fill=P['Acc'])
+    hline(d, 0, W, tab_top + tab_h, P['Line'])
+    return img, d, W, H, pad, tab_top + tab_h
+
+
+def _omlite_rows():
+    """The OM Lite tab's sections, as the device builds them (S514/EST-446 + EST-447).
+
+    One scrolling list: NODES · CHAT · MAP · RPTR, no new top tabs. Every number and name here is an
+    INVENTED fixture (public-repo rule 9); the channel scopes are the public, derivable ones and no private
+    key is ever drawn. `settings_nodes` and `settings_map` show the same list at a different focus/scroll.
+    """
+    return [
+        ('sect', 'NODES', None, None),
+        ('row', 'Contacts', '3 / 32', False),
+        ('row', 'Remove a contact', '', True),
+        ('row', 'Clear all contacts', '', False),
+        ('row', 'New-node notice', 'On', False),
+        ('sect', 'CHAT', None, None),
+        ('row', "Don't Panic", 'default', True),
+        ('row', 'Public', 'no scope', True),
+        ('row', '#slovenija', 'scope #si', True),
+        ('row', '#slovenia', 'scope #europe', True),
+        ('row', 'Add hashtag channel', '', True),
+        ('row', 'Add channel by key', '', True),
+        ('sect', 'MAP', None, None),
+        ('row', 'Start position', 'Ljubljana', False),
+        ('row', 'Start zoom', 'z16', False),
+        ('row', 'slo (z9-15)', '35496 tiles', False),
+        ('row', 'slo16 (z16)', '118240 tiles', False),
+        ('row', 'slo17 (z17)', '899104 tiles · 3.4 GB', False),
+        ('sect', 'RPTR', None, None),
+        ('row', 'Repeater admin comes later', '', False),
+    ]
+
+
+def _draw_omlite_rows(d, W, pad, body_top, body_bot, focus_label, scroll):
+    """Draw the OM Lite tab with the frame's own row arithmetic: headers 22, rows 34, focus by label,
+    clamped scroll, rows clipped to the body (the device draws no text on the chrome)."""
+    lx0, lx1 = pad, W - pad
+    row_h, sect_h = 34, 22
+    rows = _omlite_rows()
+    total = sum(sect_h if kind == 'sect' else row_h for kind, *_ in rows)
+    visible = body_bot - body_top
+    scroll = max(0, min(scroll, max(0, total - visible)))
+    yy = body_top - scroll
+    for kind, label, value, chevron in rows:
+        h = sect_h if kind == 'sect' else row_h
+        top, bot = yy, yy + h
+        yy = bot
+        if bot <= body_top or top >= body_bot:
+            continue
+        if top < body_top or bot > body_bot:
+            continue          # no text on the chrome, exactly like main/settings_page.cpp
+        if kind == 'sect':
+            spaced(d, (lx0 + 4, top + 5), label, font(FONT_MONO, TM['f_label']), P['Dim'])
+        else:
+            setrow(d, lx0, lx1, top, label, value, focused=(label == focus_label), chevron=chevron)
+    scroll_indicator(d, (lx0, body_top, W - 8, body_bot), total, visible, scroll)
+    return total
+
+
+def settings_omlite():
+    """EST-448 + EST-447: the OM Lite tab — ONE scrolling list with the same section treatment as General.
+
+    NODES · CHAT · MAP · RPTR are the pages' settings inside the app's own tab; the `,` key from a page opens
+    here at that page's section. All four sections are filled now (EST-446 channels, EST-447 contacts and
+    map); RPTR is still the one honest line.
+    """
+    img, d, W, H, pad, body_top = _settings_owner_frame(1, 'OM Lite · tab 2 of 4')
+    body_bot = H - TM['hint_h']
+    _draw_omlite_rows(d, W, pad, body_top, body_bot, "Don't Panic", 0)
+    hint_bar(d, 'settings', [('←→', 'tab'), ('↑↓', 'row'), ('↵', 'open/change'), ('esc', 'back'),
+                             (',', 'settings')])
+    return save(img, '2026-11-19-settings-omlite.png')
+
+
+
+def settings_opstoc():
+    """EST-448: a LATER app's tab — present, named, and honestly empty.
+
+    OPS-TOC is not built, so it supplies no settings data; the frame draws its ONE dim line instead of an
+    empty page or a fabricated row. The same state Mesh-Torry's tab is in today.
+    """
+    img, d, W, H, pad, body_top = _settings_owner_frame(2, 'OPS-TOC · tab 3 of 4')
+    text(d, (pad + 6, body_top + 16), 'Settings come with the app',
+         font(FONT_SANS, TM['f_body']), P['Dim'])
+    hint_bar(d, 'settings', [('←→', 'tab'), ('↑↓', 'row'), ('↵', 'open/change'), ('esc', 'back'),
+                             (',', 'settings')])
+    return save(img, '2026-11-19-settings-opstoc.png')
+
+
+def settings_chat():
+    """S514/EST-446 (+447): the OM Lite tab's CHAT section — the device's channels and their scopes.
+
+    Four rows, one per channel, name left and the ticket's words right: "default" / "no scope" /
+    "scope #si" / "scope #europe"; a chevron opens the channel page. Under them the two add pages.
+    Inside the OM Lite tab, never a second Settings (EST-448's structure). The scope strings are the
+    public, derivable ones; no private channel's key is ever drawn or stored here (rule 9).
+    """
+    img, d, W, H, pad, body_top = _settings_owner_frame(1, 'OM Lite · tab 2 of 4')
+    body_bot = H - TM['hint_h']
+    _draw_omlite_rows(d, W, pad, body_top, body_bot, "Don't Panic", 0)
+    hint_bar(d, 'settings', [('←→', 'tab'), ('↑↓', 'row'), ('↵', 'open/change'), ('esc', 'back'),
+                             (',', 'settings')])
+    return save(img, '2026-11-19-settings-chat.png')
+
+
+def settings_nodes():
+    """S514/EST-447: the OM Lite tab's NODES section — contacts, remove, clear, new-node notice.
+
+    The `,` key from the Nodes page lands here. Contacts is read only; Remove a contact opens the list
+    sub-page; Clear all raises the shared sheet; New-node notice is a stored toggle (default On). The rows
+    below it are the CHAT section, as on the device (one scrolling list, not a second tab).
+    """
+    img, d, W, H, pad, body_top = _settings_owner_frame(1, 'OM Lite · tab 2 of 4')
+    body_bot = H - TM['hint_h']
+    _draw_omlite_rows(d, W, pad, body_top, body_bot, 'Remove a contact', 0)
+    hint_bar(d, 'settings', [('←→', 'tab'), ('↑↓', 'row'), ('↵', 'open/change'), ('esc', 'back'),
+                             (',', 'settings')])
+    return save(img, '2026-11-19-settings-nodes.png')
+
+
+def settings_map():
+    """S514/EST-447: the OM Lite tab's MAP section — start position, start zoom, the packs on the card.
+
+    The page is SCROLLED so the section is in view exactly as the device's clamped scroll can place it:
+    NODES (4 rows) + CHAT (6 rows) above it, then MAP and RPTR below, which fits the 356 px body. The pack
+    counts and the z17 size are invented fixtures (rule 9); "not on card" is what a missing pack would say.
+    """
+    img, d, W, H, pad, body_top = _settings_owner_frame(1, 'OM Lite · tab 2 of 4')
+    body_bot = H - TM['hint_h']
+    # Height of everything above the MAP header in _omlite_rows(): NODES (22 + 4*34) + CHAT (22 + 6*34).
+    above_map = (22 + 4 * 34) + (22 + 6 * 34)
+    _draw_omlite_rows(d, W, pad, body_top, body_bot, 'Start position', above_map)
+    hint_bar(d, 'settings', [('←→', 'tab'), ('↑↓', 'row'), ('↵', 'open/change'), ('esc', 'back'),
+                             (',', 'settings')])
+    return save(img, '2026-11-19-settings-map.png')
+
+
 # ------------------------------------------------------------------------------------------------ dm send
 DM_THREAD = [
     # stamp, the delivery state drawn after OUR time (None for an incoming line), who, body, mine
@@ -1302,8 +1638,11 @@ def dm_enter():
     return save(img, '2026-11-19-dm-enter.png')
 
 
-RENDERERS = dict(launcher=launcher, menu=menu, nodes=nodes, chat=chat, chat2=chat_cards,
-                 chat_dm=chat_dm_column, dm_enter=dm_enter, map=map_page, rptr=rptr, settings=settings)
+RENDERERS = dict(launcher=launcher, menu=menu, nodes=nodes, nodes_search=nodes_search, chat=chat, chat2=chat_cards,
+                 chat_dm=chat_dm_column, dm_enter=dm_enter, map=map_page, rptr=rptr, settings=settings,
+                 settings_general=settings_general, settings_omlite=settings_omlite,
+                 settings_opstoc=settings_opstoc, settings_chat=settings_chat,
+                 settings_nodes=settings_nodes, settings_map=settings_map)
 
 
 def main(argv):

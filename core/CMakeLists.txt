@@ -45,6 +45,9 @@ idf_component_register(
          # S513/EST-440: per-channel flood scope (ported from the L2's S509) — the modes, the region name,
          # the sha256 region key, MeshCore's HMAC transport code and the transport-flood frame.
          "channel_scope.cpp"
+         # S514/EST-446: adding/removing a channel — the L2's hashtag normalisation and base64 rules, the
+         # duplicate refusal, and the NVS rewrite ORDER that makes a power cut at any step loadable.
+         "channel_admin.cpp"
          # Ed25519, vendored from firmware/lib/meshcore_ed25519 (orlp/ed25519, zlib licence): the same code
          # the L2 signs with, so the signatures match by construction rather than by hope.
          "ed25519/add_scalar.c" "ed25519/fe.c" "ed25519/ge.c" "ed25519/key_exchange.c"

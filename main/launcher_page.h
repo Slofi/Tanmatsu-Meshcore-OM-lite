@@ -26,7 +26,8 @@ constexpr int kTmMenuGap      = 16;
 constexpr int kTmMenuCardH    = 232;
 constexpr int kTmMenuTop      = 22;   // the cards start this far under the page head's line
 constexpr int kTmMenuRadius   = 6;
-constexpr int kTmMenuOwnsGap  = 28;   // the one dim line about the focused card sits this far under the row
+constexpr int kTmMenuSettingsH = 56;  // the full-width Settings bar under the cards (EST-445)
+constexpr int kTmMenuOwnsGap  = 28;   // the one dim line about the focused card sits this far under the bar
 
 // One large app card. `running`/`available` come from the core's registry in main.cpp; the chip text is
 // derived here so a card cannot say RUNNING while its booleans say otherwise.

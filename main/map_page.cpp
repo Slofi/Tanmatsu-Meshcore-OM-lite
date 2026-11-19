@@ -183,8 +183,8 @@ void drawMap(Screen& s, const MapView& v) {
     // Attribution, bottom right of the map area: the source's terms require it to be visible.
     drawTextRight(s, Face::Hint, kMapAreaX + kMapAreaW - 6, kMapAreaY + kMapAreaH - 6, attribution(), kWhite);
 
-    static const HintItem hints[] = {{"dpad", "pan"}, {"+/-", "zoom"}, {"esc", "back"}};
-    drawHintBar(s, tm::Page::Map, hints, 3);
+    static const HintItem hints[] = {{",", "settings"}, {"dpad", "pan"}, {"+/-", "zoom"}, {"esc", "back"}};
+    drawHintBar(s, tm::Page::Map, hints, 4);
 }
 
 }  // namespace ui

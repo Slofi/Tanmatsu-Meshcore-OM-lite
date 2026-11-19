@@ -15,6 +15,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"   // EST-445: the DEVICE rows read free internal heap and PSRAM
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
@@ -40,6 +41,7 @@ extern "C" {
 #include "chat_page.h"           // step 4: the Chat page
 #include "chrome.h"               // status bar, page head, hint bar: one home
 #include "nodes_page.h"          // step 4: the Nodes page
+#include "nodes_search.h"        // S514/EST-449: the Nodes search (matcher, count, focus rules)
 #include "sd_history.h"          // step 5: chat history on the card
 #include <unistd.h>
 #include "map_link.h"            // step 6: the map pack on the card
@@ -52,6 +54,12 @@ extern "C" {
 #include "radio_link.h"          // step 3a: the only path to the SX1262
 #include "radio_plan.h"          // step 3a: the numbers, host-tested in core/
 #include "screen.h"
+#include "settings.h"        // EST-445: the Settings frame + General rules (host-tested)
+#include "settings_page.h"   // EST-445: the Settings drawing
+#include "channel_admin.h"   // S514/EST-446: hashtag/base64 rules + the safe NVS rewrite order
+#include "channel_scope.h"   // S513/EST-440: the scope modes and the region-name rule the CHAT rows use
+#include "contact_admin.h"   // S514/EST-447: remove/clear a contact, type words, the notice default
+#include "map_settings.h"    // S514/EST-447: the MAP rows' choices and the last-position write rule
 #include "tm_theme.h"
 #include "../../firmware/src/ui/theme.h"   // the L2 palette (kBg/kInk/kDim): one source of truth, never copied
 
@@ -257,12 +265,487 @@ void omStop(tm::Core& core) {
     }
 }
 
-// Field order is core/module.h: id, name, meta, pages, available, owns, start, stop, tick, draw, onKey, onTop.
+// ---- Settings as data (S514/EST-448) -----------------------------------------------------------
+// General is the CORE's tab: these rows are the shell's own, and every value getter reads its real source
+// on each draw (NVS node name, mcid/advint, core/radio_plan, time_source, sdhistory, mc_store, the heap).
+// Nothing here is a stored-for-display copy.
+enum : uint16_t {
+    kSetRowName = 1,
+    kSetRowAdvertNow,
+    kSetRowAdvertInterval,
+};
+
+static char gset_name[32], gset_pub[32], gset_adv[8], gset_freq[24], gset_bw[16];
+static char gset_sf[12], gset_cr[12], gset_tx[12], gset_hash[8];
+static char gset_time[48], gset_sd[48], gset_contacts[24], gset_ver[12], gset_heap[24], gset_psram[24];
+
+const char* gsetName(tm::Core&) {
+    snprintf(gset_name, sizeof(gset_name), "%s", om::mc::nodeName());
+    return gset_name;
+}
+const char* gsetPublicKey(tm::Core&) {
+    snprintf(gset_pub, sizeof(gset_pub), "%s", om::mc::publicKeyHex());
+    return gset_pub;
+}
+const char* gsetAdvert(tm::Core&) {
+    snprintf(gset_adv, sizeof(gset_adv), "%s",
+             tm::advertIntervalLabel(tm::advertIntervalFromSeconds(om::mc::advertIntervalSeconds())));
+    return gset_adv;
+}
+const char* gsetFrequency(tm::Core&) {
+    snprintf(gset_freq, sizeof(gset_freq), "%.3f MHz", (double)tm::kSloPlan.freq_hz / 1000000.0);
+    return gset_freq;
+}
+const char* gsetBandwidth(tm::Core&) {
+    // bw_khz is the chip's integer step: 62 means 62.5 kHz (see core/radio_plan.h).
+    snprintf(gset_bw, sizeof(gset_bw), "%s kHz", tm::kSloPlan.bw_khz == 62 ? "62.5" : "?");
+    return gset_bw;
+}
+const char* gsetSpreading(tm::Core&) {
+    snprintf(gset_sf, sizeof(gset_sf), "SF %u", (unsigned)tm::kSloPlan.sf);
+    return gset_sf;
+}
+const char* gsetCoding(tm::Core&) {
+    snprintf(gset_cr, sizeof(gset_cr), "4/%u", (unsigned)tm::kSloPlan.cr);
+    return gset_cr;
+}
+const char* gsetTxPower(tm::Core&) {
+    snprintf(gset_tx, sizeof(gset_tx), "%u dBm", (unsigned)tm::kSloPlan.power_dbm);
+    return gset_tx;
+}
+const char* gsetPathHash(tm::Core&) {
+    snprintf(gset_hash, sizeof(gset_hash), "%u B", (unsigned)meshcore::kFloodPathHashSize);
+    return gset_hash;
+}
+const char* gsetTime(tm::Core&) {
+    snprintf(gset_time, sizeof(gset_time), "%s · %s", om::time_source::hhmm(), om::time_source::bootSource());
+    return gset_time;
+}
+const char* gsetSd(tm::Core&) {
+    if (g_sd_mounted)
+        snprintf(gset_sd, sizeof(gset_sd), "mounted · history %s", om::sdhistory::ready() ? "on" : "off");
+    else
+        snprintf(gset_sd, sizeof(gset_sd), "not mounted · history off");
+    return gset_sd;
+}
+const char* gsetContacts(tm::Core&) {
+    size_t contact_count = 0;
+    {
+        om::mc::StoreLock l;
+        contact_count = om::mc::contacts().count;
+    }
+    snprintf(gset_contacts, sizeof(gset_contacts), "%u / %u", (unsigned)contact_count,
+             (unsigned)om::mc::kMaxContacts);
+    return gset_contacts;
+}
+const char* gsetVersion(tm::Core&) {
+    snprintf(gset_ver, sizeof(gset_ver), "%s", tm::kAppVersion);
+    return gset_ver;
+}
+const char* gsetHeap(tm::Core&) {
+    const size_t bytes = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (bytes >= 1024u * 1024u)
+        snprintf(gset_heap, sizeof(gset_heap), "%.1f MB", (double)bytes / (1024.0 * 1024.0));
+    else
+        snprintf(gset_heap, sizeof(gset_heap), "%u KB", (unsigned)(bytes / 1024u));
+    return gset_heap;
+}
+const char* gsetPsram(tm::Core&) {
+    const size_t bytes = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    if (bytes >= 1024u * 1024u)
+        snprintf(gset_psram, sizeof(gset_psram), "%.1f MB", (double)bytes / (1024.0 * 1024.0));
+    else
+        snprintf(gset_psram, sizeof(gset_psram), "%u KB", (unsigned)(bytes / 1024u));
+    return gset_psram;
+}
+
+// The two General rows that change something. The frame only REPORTS the row; these handlers are what
+// actually touch the store, so a wrong row id can never silently write the wrong value.
+void generalAdvertNow(tm::Core&, const tm::SettingRow&) {
+    const om::mc::AdvertDecision d = om::mc::queueAdvert();
+    char text[48];
+    if (om::mc::advertRefusalText(d, text, sizeof(text)))
+        om::ui::noticeSet(text, 3000);
+    else
+        om::ui::noticeClear();
+}
+void generalCycleAdvert(tm::Core&, const tm::SettingRow&) {
+    const tm::AdvertInterval next =
+        tm::advertIntervalCycle(tm::advertIntervalFromSeconds(om::mc::advertIntervalSeconds()));
+    if (om::mc::setAdvertIntervalSeconds(tm::advertIntervalSeconds(next))) {
+        ESP_LOGI(TAG, "settings: advert interval -> %s", tm::advertIntervalLabel(next));
+    }
+}
+
+static const tm::SettingRow kGeneralNodeRows[] = {
+    {tm::SettingKind::SubPage, kSetRowName, "Name", "", gsetName, nullptr},
+    {tm::SettingKind::Info, 0, "Public key", "", gsetPublicKey, nullptr},
+    {tm::SettingKind::Action, kSetRowAdvertNow, "Advert now", "Enter", nullptr, generalAdvertNow},
+};
+static const tm::SettingRow kGeneralAdvertRows[] = {
+    {tm::SettingKind::Cycle, kSetRowAdvertInterval, "Automatic advert", "", gsetAdvert, generalCycleAdvert},
+};
+static const tm::SettingRow kGeneralRadioRows[] = {
+    {tm::SettingKind::Info, 0, "Frequency", "", gsetFrequency, nullptr},
+    {tm::SettingKind::Info, 0, "Bandwidth", "", gsetBandwidth, nullptr},
+    {tm::SettingKind::Info, 0, "Spreading", "", gsetSpreading, nullptr},
+    {tm::SettingKind::Info, 0, "Coding", "", gsetCoding, nullptr},
+    {tm::SettingKind::Info, 0, "TX power", "", gsetTxPower, nullptr},
+    {tm::SettingKind::Info, 0, "Path hash", "", gsetPathHash, nullptr},
+};
+static const tm::SettingRow kGeneralDeviceRows[] = {
+    {tm::SettingKind::Info, 0, "Time", "", gsetTime, nullptr},
+    {tm::SettingKind::Info, 0, "SD card", "", gsetSd, nullptr},
+    {tm::SettingKind::Info, 0, "Contacts", "", gsetContacts, nullptr},
+    {tm::SettingKind::Info, 0, "App version", "", gsetVersion, nullptr},
+    {tm::SettingKind::Info, 0, "Free internal heap", "", gsetHeap, nullptr},
+    {tm::SettingKind::Info, 0, "Free PSRAM", "", gsetPsram, nullptr},
+};
+static const tm::SettingsSection kGeneralSections[] = {
+    {"NODE", kGeneralNodeRows, 3},
+    {"ADVERT", kGeneralAdvertRows, 1},
+    {"RADIO (READ ONLY)", kGeneralRadioRows, 6},
+    {"DEVICE (READ ONLY)", kGeneralDeviceRows, 6},
+};
+constexpr int kGeneralSectionCount = 4;
+
+// The CORE's General tab. Not a module: the shell owns it, exactly as the L2's General does.
+const tm::SettingsSection* generalSettings(int* count) {
+    if (count != nullptr) *count = kGeneralSectionCount;
+    return kGeneralSections;
+}
+
+// OM Lite's tab: ONE scrolling list with the same sections General has. S514/EST-446 fills CHAT with the
+// device's LIVE channels and the two add pages; S514/EST-447 fills NODES and MAP. RPTR stays the one honest
+// line the ticket asks for.
+//
+// Everything below is read on EVERY draw (the scope getter through om::mc::channelScopeStored, the names
+// from the live table, the pack rows from maplink::packStatus's cache), so a channel added, a contact
+// removed or a pack pulled out shows up on the next frame without a restart.
+
+// ---- S514/EST-447: the NODES section ------------------------------------------------------------------
+// "Remove a contact" is a LIST sub-page (a SubPage row, built from the live table) and "Clear all contacts"
+// raises the same confirm sheet; both destructive paths are performed in the Settings key branch, where the
+// frame that owns the sheet lives. The notice row is a plain toggle through its handler.
+enum : uint16_t {
+    kNodesRowRemove = 1,
+    kNodesRowClear,
+    kNodesRowNotice,
+};
+
+const char* nodesNoticeValue(tm::Core&) { return om::mc::newNodeNoticeEnabled() ? "On" : "Off"; }
+
+void nodesToggleNotice(tm::Core&, const tm::SettingRow&) {
+    if (!om::mc::setNewNodeNoticeEnabled(!om::mc::newNodeNoticeEnabled()))
+        om::ui::noticeSet("New-node notice not saved", 3000);
+}
+
+static const tm::SettingRow kOmNodesRows[] = {
+    {tm::SettingKind::Info, 0, "Contacts", "", gsetContacts, nullptr},
+    {tm::SettingKind::SubPage, kNodesRowRemove, "Remove a contact"},
+    {tm::SettingKind::Action, kNodesRowClear, "Clear all contacts"},
+    {tm::SettingKind::Toggle, kNodesRowNotice, "New-node notice", "", nodesNoticeValue, nodesToggleNotice},
+};
+
+// ---- S514/EST-447: the MAP section --------------------------------------------------------------------
+enum : uint16_t {
+    kMapRowStartPos = 20,
+    kMapRowStartZoom,
+};
+
+const char* mapStartPositionValue(tm::Core&) {
+    return om::map::startPositionLabel(om::maplink::mapStartPosition());
+}
+
+void mapCycleStartPosition(tm::Core&, const tm::SettingRow&) {
+    const uint8_t next = om::map::startPositionCycle(om::maplink::mapStartPosition());
+    if (!om::maplink::setMapStartPosition(next)) om::ui::noticeSet("Start position not saved", 3000);
+}
+
+const char* mapStartZoomValue(tm::Core&) {
+    static char buf[8];
+    snprintf(buf, sizeof(buf), "z%u", (unsigned)om::maplink::mapStartZoom());
+    return buf;
+}
+
+void mapCycleStartZoom(tm::Core&, const tm::SettingRow&) {
+    const int next = om::map::startZoomCycle((int)om::maplink::mapStartZoom());
+    if (!om::maplink::setMapStartZoom((uint8_t)next)) om::ui::noticeSet("Start zoom not saved", 3000);
+}
+
+// The read-only pack rows. The tile count is the index file's size / one record; `bytes` is the pack file.
+void packText(const char* dir, bool with_bytes, char* out, size_t cap) {
+    if (out == nullptr || cap == 0) return;
+    out[0] = '\0';
+    if (!g_sd_mounted) {
+        snprintf(out, cap, "no card");
+        return;
+    }
+    om::maplink::PackStatus st;
+    if (!om::maplink::packStatus(dir, &st) || !st.present) {
+        snprintf(out, cap, "absent");
+        return;
+    }
+    if (!with_bytes) {
+        snprintf(out, cap, "%u tiles", (unsigned)st.tiles);
+        return;
+    }
+    const double gb = (double)st.bytes / (1024.0 * 1024.0 * 1024.0);
+    if (gb >= 1.0)
+        snprintf(out, cap, "%u tiles · %.1f GB", (unsigned)st.tiles, gb);
+    else
+        snprintf(out, cap, "%u tiles · %.0f MB", (unsigned)st.tiles, (double)st.bytes / (1024.0 * 1024.0));
+}
+
+const char* mapPackSloValue(tm::Core&) {
+    static char buf[40];
+    packText("slo", false, buf, sizeof(buf));
+    return buf;
+}
+const char* mapPackSlo16Value(tm::Core&) {
+    static char buf[40];
+    packText("slo16", false, buf, sizeof(buf));
+    return buf;
+}
+const char* mapPackSlo17Value(tm::Core&) {
+    static char buf[48];
+    packText("slo17", true, buf, sizeof(buf));
+    return buf;
+}
+
+static const tm::SettingRow kOmMapRows[] = {
+    {tm::SettingKind::Cycle, kMapRowStartPos, "Start position", "", mapStartPositionValue,
+     mapCycleStartPosition},
+    {tm::SettingKind::Cycle, kMapRowStartZoom, "Start zoom", "", mapStartZoomValue, mapCycleStartZoom},
+    {tm::SettingKind::Info, 0, "slo (z9-15)", "", mapPackSloValue, nullptr},
+    {tm::SettingKind::Info, 0, "slo16 (z16)", "", mapPackSlo16Value, nullptr},
+    {tm::SettingKind::Info, 0, "slo17 (z17)", "", mapPackSlo17Value, nullptr},
+};
+static const tm::SettingRow kOmRptrRows[] = {
+    {tm::SettingKind::Info, 0, "Repeater admin comes later", "", nullptr, nullptr},
+};
+
+// ---- S514/EST-446: the CHAT section's channels, and the pages behind them ------------------------------
+enum : uint16_t {
+    kChatRowAddTag      = 100,
+    kChatRowAddKey      = 101,
+    kChatRowChannelBase = 200,   // + slot, like the L2's A_ChanBase
+};
+// The channel page's own rows, and the scope page's three choices.
+enum : uint16_t {
+    kChatSubName = 1,
+    kChatSubScope,
+    kChatSubKeyShare,
+    kChatSubRemove,
+    kChatSubScopeDefault,
+    kChatSubScopeNone,
+    kChatSubScopeRegion,
+    kChatSubAddName,
+    kChatSubAddKey,
+    kChatSubAddCommit,
+    kChatSubKeyValue,
+};
+enum class ChatSub : uint8_t { None = 0, Channel, Scope, AddKey, KeyShown };
+enum class ChatField : uint8_t { None = 0, Tag, KeyName, KeyB64, ScopeRegion, Rename };
+enum class ConfirmTarget : uint8_t { Name = 0, RemoveChannel, ShowKey, RemoveContact, ClearContacts };
+
+ChatSub     g_chat_sub         = ChatSub::None;
+ChatField   g_chat_field       = ChatField::None;
+int         g_chat_channel     = -1;
+int         g_chat_sub_focus   = -1;
+int         g_chat_sub_scroll  = 0;
+const char* g_chat_sub_header  = "";
+char        g_chat_scope_text[meshcore::kMaxChannels][24];
+char        g_chat_names[meshcore::kMaxChannels][32];
+char        g_chat_show_key[25];
+char        g_chat_add_name[meshcore::kChannelLabelMax + 1];
+char        g_chat_add_key[64];
+char        g_chat_title[48];
+tm::SettingRow       g_chat_tab_rows[meshcore::kMaxChannels + 2];
+tm::SettingRow       g_chat_sub_rows[6];
+tm::SettingsSection  g_om_sections[4];
+tm::SettingsSection  g_chat_sub_sections[1];
+
+// S514/EST-447: the NODES list sub-page. Like the CHAT rows, it is rebuilt on every draw from the live table,
+// in the Nodes page's own order (favourites first, then most recently heard), so the list and the page agree.
+bool                g_nodes_list        = false;
+int                 g_nodes_sub_focus   = -1;
+int                 g_nodes_sub_scroll  = 0;
+char                g_nodes_names[om::mc::kMaxContacts][om::mc::kNameBytes];
+char                g_nodes_meta[om::mc::kMaxContacts][32];
+tm::SettingRow      g_nodes_sub_rows[om::mc::kMaxContacts];
+tm::SettingsSection g_nodes_sub_sections[1];
+int                 g_confirm_contact = -1;
+
+ConfirmTarget g_confirm_target  = ConfirmTarget::Name;
+int           g_confirm_channel = -1;
+char          g_confirm_title[48] = "Change the node name?";
+char          g_confirm_text[160] = "Other nodes will see the new name after the next advert";
+char          g_confirm_apply[16] = "Apply";
+bool          g_confirm_danger  = false;
+
+// One getter per row, with the ROW's id naming the slot (core/settings_model.h's row-aware getter). It
+// reads the live table + stored scope on every draw; the ticket's words are "default"/"no scope"/"scope #x".
+const char* chatScopeValue(tm::Core&, const tm::SettingRow& row) {
+    const size_t i = (size_t)(row.id - kChatRowChannelBase);
+    if (i >= meshcore::kMaxChannels) return "";
+    char stored[meshcore::kScopeNameMax + 1] = "";
+    om::mc::channelScopeStored(i, stored, sizeof(stored));
+    meshcore::channelScopeRowText(stored, g_chat_scope_text[i], sizeof(g_chat_scope_text[i]));
+    return g_chat_scope_text[i];
+}
+
+int buildChatTabRows() {
+    int n = 0;
+    const size_t count = om::mc::channelCount();
+    for (size_t i = 0; i < count && i < meshcore::kMaxChannels; ++i) {
+        snprintf(g_chat_names[i], sizeof(g_chat_names[i]), "%s", om::mc::channelName(i));
+        g_chat_tab_rows[n++] = tm::SettingRow(tm::SettingKind::SubPage, (uint16_t)(kChatRowChannelBase + i),
+                                              g_chat_names[i], "", tm::RowValueFn(chatScopeValue), nullptr);
+    }
+    g_chat_tab_rows[n++] = tm::SettingRow(tm::SettingKind::SubPage, kChatRowAddTag, "Add hashtag channel");
+    g_chat_tab_rows[n++] = tm::SettingRow(tm::SettingKind::SubPage, kChatRowAddKey, "Add channel by key");
+    return n;
+}
+
+void fillStoredScope(int slot) {
+    char stored[meshcore::kScopeNameMax + 1] = "";
+    if (slot >= 0) om::mc::channelScopeStored((size_t)slot, stored, sizeof(stored));
+    meshcore::channelScopeRowText(stored, g_chat_scope_text[slot >= 0 ? slot : 0],
+                                  sizeof(g_chat_scope_text[0]));
+}
+
+int buildChatSubRows() {
+    int n = 0;
+    switch (g_chat_sub) {
+        case ChatSub::Channel: {
+            g_chat_sub_header = "CHANNEL";
+            // The LIVE name, so a rename is visible on the very next frame (the table reloads on the radio
+            // task a moment later; this pointer is only used while drawing).
+            const char* chname = g_chat_channel >= 0 ? om::mc::channelName((size_t)g_chat_channel) : "Channel";
+            const bool hashtag = chname[0] == '#';
+            snprintf(g_chat_title, sizeof(g_chat_title), "%s", chname);
+            if (hashtag) {
+                // A hashtag's name IS its key: nothing to rename.
+                g_chat_sub_rows[n++] = tm::SettingRow(tm::SettingKind::Info, kChatSubName, "Name", chname);
+            } else {
+                g_chat_sub_rows[n++] = tm::SettingRow(tm::SettingKind::SubPage, kChatSubName, "Name", chname);
+            }
+            fillStoredScope(g_chat_channel);
+            g_chat_sub_rows[n++] = tm::SettingRow(tm::SettingKind::SubPage, kChatSubScope, "Region / scope",
+                                                  g_chat_scope_text[g_chat_channel >= 0 ? g_chat_channel : 0]);
+            if (!hashtag) {
+                // Only a private channel has a key worth sharing (a hashtag's is derivable by anyone).
+                g_chat_sub_rows[n++] = tm::SettingRow(tm::SettingKind::Action, kChatSubKeyShare, "Key", "share");
+            }
+            g_chat_sub_rows[n++] = tm::SettingRow(tm::SettingKind::Action, kChatSubRemove, "Remove channel");
+            break;
+        }
+        case ChatSub::Scope: {
+            g_chat_sub_header = "SEND SCOPE";
+            snprintf(g_chat_title, sizeof(g_chat_title), "Region / scope");
+            fillStoredScope(g_chat_channel);
+            const meshcore::ScopeMode mode =
+                meshcore::scopeModeFor(g_chat_scope_text[g_chat_channel >= 0 ? g_chat_channel : 0]);
+            g_chat_sub_rows[n++] = tm::SettingRow(tm::SettingKind::Action, kChatSubScopeDefault, "Default",
+                                                  mode == meshcore::ScopeMode::Default ? "now" : "");
+            g_chat_sub_rows[n++] = tm::SettingRow(tm::SettingKind::Action, kChatSubScopeNone, "No scope",
+                                                  mode == meshcore::ScopeMode::None ? "now" : "");
+            g_chat_sub_rows[n++] = tm::SettingRow(tm::SettingKind::Action, kChatSubScopeRegion, "Region",
+                                                  mode == meshcore::ScopeMode::Region ? "now" : "type a name");
+            break;
+        }
+        case ChatSub::AddKey: {
+            g_chat_sub_header = "ADD CHANNEL BY KEY";
+            snprintf(g_chat_title, sizeof(g_chat_title), "Add channel by key");
+            g_chat_sub_rows[n++] = tm::SettingRow(tm::SettingKind::SubPage, kChatSubAddName, "Name",
+                                                  g_chat_add_name[0] ? g_chat_add_name : "not set");
+            g_chat_sub_rows[n++] = tm::SettingRow(tm::SettingKind::SubPage, kChatSubAddKey, "Key",
+                                                  g_chat_add_key[0] ? "set" : "not set");
+            g_chat_sub_rows[n++] = tm::SettingRow(tm::SettingKind::Action, kChatSubAddCommit, "Add channel");
+            break;
+        }
+        case ChatSub::KeyShown: {
+            g_chat_sub_header = "CHANNEL KEY";
+            snprintf(g_chat_title, sizeof(g_chat_title), "Channel key");
+            g_chat_sub_rows[n++] = tm::SettingRow(tm::SettingKind::Info, kChatSubKeyValue, "Key", g_chat_show_key);
+            g_chat_sub_rows[n++] = tm::SettingRow(tm::SettingKind::Info, 0, "Shown on screen only.", "");
+            break;
+        }
+        default:
+            g_chat_sub_header = "";
+            break;
+    }
+    return n;
+}
+
+const tm::SettingsSection* chatSubSections(int* count) {
+    const int n = buildChatSubRows();
+    g_chat_sub_sections[0] = tm::SettingsSection(g_chat_sub_header, g_chat_sub_rows, n);
+    if (count != nullptr) *count = n > 0 ? 1 : 0;
+    return n > 0 ? g_chat_sub_sections : nullptr;
+}
+
+// S514/EST-447: the Remove-a-contact list. Built on every draw from the LIVE table, in the Nodes page's own
+// order, so a removal (or an advert that added somebody) is visible on the next frame. The row's id is the
+// STORE index, which is what contactRemoveAt() takes; the name and the type/last-heard pair are copied into
+// this file's buffers because the rows must outlive the store lock.
+int buildNodesSubRows() {
+    int n = 0;
+    om::mc::StoreLock l;
+    om::mc::ContactStore& cs = om::mc::contacts();
+    int order[om::mc::kMaxContacts];
+    const int count = (int)om::mc::contactsOrder(cs, order, om::mc::kMaxContacts);
+    if (count == 0) {
+        g_nodes_sub_rows[n++] = tm::SettingRow(tm::SettingKind::Info, 0, "No contacts yet");
+        return n;
+    }
+    const uint32_t now = om::time_source::epochNow();
+    for (int i = 0; i < count && n < (int)om::mc::kMaxContacts; ++i) {
+        const int idx = order[i];
+        const om::mc::Contact& c = cs.c[idx];
+        snprintf(g_nodes_names[n], sizeof(g_nodes_names[n]), "%s", c.name);
+        char age[12];
+        om::mc::formatAge(now, c.heard_at, age, sizeof(age));
+        // "now ago" would read wrong; the type then the age, in the L2's words.
+        if (strcmp(age, "now") == 0)
+            snprintf(g_nodes_meta[n], sizeof(g_nodes_meta[n]), "%s · now", om::mc::contactTypeLabel(c.type));
+        else
+            snprintf(g_nodes_meta[n], sizeof(g_nodes_meta[n]), "%s · %s ago", om::mc::contactTypeLabel(c.type),
+                     age);
+        g_nodes_sub_rows[n] = tm::SettingRow(tm::SettingKind::Action, (uint16_t)idx, g_nodes_names[n],
+                                             g_nodes_meta[n], nullptr, nullptr);
+        ++n;
+    }
+    return n;
+}
+
+const tm::SettingsSection* nodesSubSections(int* count) {
+    const int n = buildNodesSubRows();
+    g_nodes_sub_sections[0] = tm::SettingsSection("REMOVE A CONTACT", g_nodes_sub_rows, n);
+    if (count != nullptr) *count = n > 0 ? 1 : 0;
+    return n > 0 ? g_nodes_sub_sections : nullptr;
+}
+
+const tm::SettingsSection* omLiteSettings(tm::Core&, int* count) {
+    const int chat_n = buildChatTabRows();
+    g_om_sections[0] = tm::SettingsSection("NODES", kOmNodesRows,
+                                           (int)(sizeof(kOmNodesRows) / sizeof(kOmNodesRows[0])));
+    g_om_sections[1] = tm::SettingsSection("CHAT", g_chat_tab_rows, chat_n);
+    g_om_sections[2] = tm::SettingsSection("MAP", kOmMapRows,
+                                           (int)(sizeof(kOmMapRows) / sizeof(kOmMapRows[0])));
+    g_om_sections[3] = tm::SettingsSection("RPTR", kOmRptrRows, 1);
+    if (count != nullptr) *count = 4;
+    return g_om_sections;
+}
+
+// Field order is core/module.h: id, name, meta, pages, available, owns, start, stop, tick, draw, onKey, onTop,
+// settings.
 tm::Module g_om_lite = {
     "om-lite",
     "OM Lite",
-    "mesh companion · 4 pages",
-    0x1F,                 // all five pages (Launcher, Nodes, Chat, Map, Rptr)
+    "mesh companion · 5 pages",
+    0x3F,                 // all six pages (Launcher, Nodes, Chat, Map, Rptr, Settings)
     true,                 // available
     tm::Resource::Radio | tm::Resource::SdCard,
     omStart,
@@ -271,15 +754,18 @@ tm::Module g_om_lite = {
     nullptr,              // draw
     nullptr,              // onKey
     nullptr,              // onTop — installed in app_main, where the Chat open state lives (S514/EST-444)
+    omLiteSettings,       // S514/EST-448: this app's own tab, as data
 };
 
 // S513/EST-432: the two LATER modules are real registry rows with available = false, so the menu's LATER
 // chip comes from the registry and not from a string in the shell. They own nothing, have no pages and no
 // hooks: listed, never startable, and neither app is built.
+// Both are LATER and have no settings data yet, so Module::settings is nullptr and their tabs show the one
+// honest line. That is the state EST-446/447 will replace from inside each app, not from this shell.
 tm::Module g_ops_toc = {"ops-toc", "OPS-TOC", "field ops map & checklists", 0, false, tm::Resource::None,
-                        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+                        nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 tm::Module g_mesh_torry = {"mesh-torry", "Mesh-Torry", "the territory game", 0, false, tm::Resource::None,
-                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+                           nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 
 // --------------------------------------------------------------------------------------------- helpers
 void batteryPoll() {
@@ -583,6 +1069,12 @@ extern "C" void app_main(void) {
     // for itself lives here: its cursor, whether a channel is open, and the composer's text.
     constexpr size_t kChatPreview = 96;   // one "sender: text" line for the channel list
     int    nodes_focus   = 0;
+    // S514/EST-449: the Nodes search. SESSION-ONLY on purpose (never NVS): the query, its byte length and
+    // which half of the page owns the keys live as long as the app does, so leaving the page and coming
+    // back keeps the search. `nodes_focus` above is an index into the FILTERED list.
+    char   nodes_query[om::ui::kNodeQueryBytes] = {0};
+    size_t nodes_query_len = 0;
+    bool   nodes_bar       = false;   // true = the search bar has the focus; false = the list does
     // S513/EST-430: the Chat list is two columns of cards, so the selection is a (column, row) pair like the model
     // in core/chat_cards.h. `chat_focus` is the row in the Channels column (and therefore the channel index);
     // `chat_dm_focus` is the row in the Direct messages column, which cannot be focused while it has no cards.
@@ -611,9 +1103,14 @@ extern "C" void app_main(void) {
     int    chat_max_scroll = 0;
     static int chat_seen_count = -1;
     // Step 6: the Map page's view. wx/wy are the world pixel at the top-left of the map area; -1 means
-    // "not placed yet", which the first draw turns into central Slovenia at z16.
+    // "not placed yet", which the first draw places from the MAP settings (Last position or Ljubljana) at the
+    // chosen Start zoom (S514/EST-447; the default is still today's Ljubljana at z16).
     int64_t map_wx = -1, map_wy = -1;
-    int     map_z  = 16;
+    int     map_z  = om::map::startZoomFromStored((uint32_t)om::maplink::mapStartZoom(), true);
+    // The last-position write's state: the monotonic ms of the last successful write (0 = none this boot) and
+    // whether the view has moved since. The RULE is core/map_settings.h::lastPositionWriteDue (time passed in).
+    uint32_t map_last_write_ms = 0;
+    bool     map_view_changed  = false;
     char   composer[120] = {0};
     size_t composer_len  = 0;
     // S513: a short-lived line for the one thing the composer cannot say by itself — that a send was REFUSED
@@ -633,6 +1130,351 @@ extern "C" void app_main(void) {
         return (f != nullptr && f->ready()) ? f->textWidthRange(ptr, len) : 0;
     };
 
+    // ---- Settings (EST-445, per-app tabs S514/EST-448) ---------------------------------
+    // The frame's decisions are core/settings.h (host-tested); every tab's CONTENT is data: General from
+    // this shell, each app from Module::settings. The value getters read the real sources on every draw:
+    //   NODE .... mcid/name (om::mc::nodeName), mcid seed's public key (om::mc::publicKeyHex)
+    //   ADVERT .. mcid/advint (om::mc::advertIntervalSeconds) mapped by core/settings.h
+    //   RADIO ... tm::kSloPlan, the exact plan radio_link.cpp pushes to the chip, and
+    //             meshcore::kFloodPathHashSize, the value the advert/channel frames are built with
+    //   DEVICE .. time_source::hhmm/bootSource, g_sd_mounted + sdhistory::ready, mc_store's contact count,
+    //             tm::kAppVersion, heap_caps_get_free_size (internal / PSRAM)
+    tm::SettingsFrame settings_frame;
+    tm::Page           settings_return_page = tm::Page::Launcher;   // Esc returns HERE, not always the menu
+    // S514/EST-446: one shared field, so it must hold a pasted base64 key (24 chars) as well as a name.
+    char               settings_draft[64] = {0};
+    size_t             settings_draft_len = 0;
+    char               settings_pending_name[tm::kNodeNameMaxBytes + 1] = {0};
+
+    static tm::SettingsTabDef settings_tabs[tm::kSettingsMaxTabs];
+    int                       settings_tab_count = 0;
+
+    auto refreshSettingsTabs = [&]() {
+        settings_tab_count = tm::settingsTabDefs(core.registry(), settings_tabs, tm::kSettingsMaxTabs);
+    };
+    refreshSettingsTabs();
+
+    // The current tab's sections. General is the core's; every other tab asks its module through the hook.
+    // A nullptr/0 answer is valid and is what the one honest line draws.
+    auto settingsSectionsForTab = [&](int tab, int* count) -> const tm::SettingsSection* {
+        if (tab <= tm::kSettingsGeneralTab) return generalSettings(count);
+        if (tab < settings_tab_count) return tm::settingsTabContent(settings_tabs[tab], core, count);
+        if (count != nullptr) *count = 0;
+        return nullptr;
+    };
+
+    // A stopped module still SHOWS its stored settings; only an action that needs it running is refused.
+    auto settingsTabRunning = [&](int tab) -> bool {
+        if (tab <= tm::kSettingsGeneralTab) return true;   // the core
+        if (tab < settings_tab_count && settings_tabs[tab].module != nullptr)
+            return core.registry().isRunning(settings_tabs[tab].module->id);
+        return false;   // a LATER module
+    };
+
+    auto drawSettingsPage = [&]() {
+        refreshSettingsTabs();
+        // A registry that shrank must not leave the frame on a tab that no longer exists.
+        settings_frame.tab = tm::settingsTabIndex(settings_frame.tab, settings_tab_count);
+        int n = 0;
+        const tm::SettingsSection* sections = settingsSectionsForTab(settings_frame.tab, &n);
+        if (settings_frame.focus < 0 || settings_frame.focus >= tm::settingsElementCount(sections, n))
+            settings_frame.focusFirst(sections, n);
+        om::ui::SettingsView sv;
+        snprintf(sv.clock, sizeof(sv.clock), "%s", clockText());
+        sv.battery_pct   = view.battery_pct;
+        sv.charging      = view.charging;
+        sv.tabs          = settings_tabs;
+        sv.tab_count     = settings_tab_count;
+        sv.tab           = settings_frame.tab;
+        sv.sections      = sections;
+        sv.section_count = n;
+        sv.core          = &core;
+        sv.tab_running   = settingsTabRunning(settings_frame.tab);
+        sv.focus         = settings_frame.focus;
+        sv.scroll        = settings_frame.scroll;
+        sv.sub_page      = settings_frame.subPage();
+        sv.sub_title     = "Node name";
+        sv.draft         = settings_draft;
+        sv.draft_len     = settings_draft_len;
+        // S514/EST-446: a chat LIST sub-page draws its own sections with the frame's own row renderer;
+        // a chat TEXT page draws the shared field with that page's rules. The General Name editor keeps
+        // the defaults above.
+        if (settings_frame.subPage() && g_chat_field != ChatField::None) {
+            sv.sections      = nullptr;
+            sv.section_count = 0;
+            sv.sub_title     = g_chat_title;
+            switch (g_chat_field) {
+                case ChatField::Tag:
+                    sv.sub_hint = "One #, no spaces; A-Z becomes a-z. 30 characters maximum";
+                    sv.sub_max  = meshcore::kChannelTagMax;
+                    break;
+                case ChatField::KeyB64:
+                    sv.sub_hint = "Base64 of 16 bytes; spaces are ignored, = ends the text";
+                    sv.sub_max  = 64;
+                    break;
+                case ChatField::ScopeRegion:
+                    sv.sub_hint = "Region, #tag characters, 30 maximum; case matters";
+                    sv.sub_max  = meshcore::kScopeNameMax;
+                    break;
+                default:
+                    sv.sub_hint = "Allowed: letters, digits, space; no [ ] \\ : , ? *";
+                    sv.sub_max  = tm::kNodeNameMaxBytes;
+                    break;
+            }
+        } else if (settings_frame.subPage() && g_nodes_list) {
+            // S514/EST-447: the NODES list sub-page. Same row renderer as a tab; the focus/scroll are its own.
+            int sn = 0;
+            sv.sections      = nodesSubSections(&sn);
+            sv.section_count = sn;
+            sv.sub_title     = "Remove a contact";
+            sv.focus         = g_nodes_sub_focus;
+            sv.scroll        = g_nodes_sub_scroll;
+        } else if (settings_frame.subPage() && g_chat_sub != ChatSub::None) {
+            int sn = 0;
+            sv.sections      = chatSubSections(&sn);
+            sv.section_count = sn;
+            sv.sub_title     = g_chat_title;
+            sv.focus         = g_chat_sub_focus;
+            sv.scroll        = g_chat_sub_scroll;
+        }
+        sv.confirm       = settings_frame.confirmOpen();
+        sv.confirm_title = g_confirm_title;
+        sv.confirm_text  = g_confirm_text;
+        sv.confirm_apply = g_confirm_apply;
+        sv.confirm_danger = g_confirm_danger;
+        om::ui::drawSettings(g_screen, sv);
+        if (sv.confirm) om::ui::drawConfirmSheet(g_screen, sv);
+    };
+
+    // ---- S514/EST-446: the chat pages' actions, in ONE place so a tab row and a sub-page row run the same
+    // code. The key itself is only ever copied into g_chat_show_key for the on-screen page; it is never
+    // logged, and the tab rows read names/scopes from the live table on every draw.
+    auto closeChatPage = [&]() {
+        settings_frame.closeSubPage();
+        g_chat_sub     = ChatSub::None;
+        g_chat_field   = ChatField::None;
+        g_chat_channel = -1;
+        settings_draft[0] = '\0';
+        settings_draft_len = 0;
+        g_chat_sub     = ChatSub::None;
+        g_chat_field   = ChatField::None;
+        g_chat_channel = -1;
+    };
+    auto openChatList = [&](ChatSub sub) {
+        g_chat_sub   = sub;
+        g_chat_field = ChatField::None;
+        if (!settings_frame.subPage()) settings_frame.openSubPage();
+        int n = 0;
+        const tm::SettingsSection* ss = chatSubSections(&n);
+        g_chat_sub_focus  = tm::settingsFirstFocusable(ss, n);
+        g_chat_sub_scroll = 0;
+    };
+
+    // S514/EST-447: the NODES list sub-page. Its own two state variables, so closing it cannot disturb the
+    // chat pages' focus/scroll (and vice versa); the frame's sub-page depth is shared, as it is for every page.
+    auto closeNodesPage = [&]() {
+        settings_frame.closeSubPage();
+        g_nodes_list       = false;
+        g_nodes_sub_focus  = -1;
+        g_nodes_sub_scroll = 0;
+    };
+    auto openNodesPage = [&]() {
+        g_nodes_list = true;
+        g_chat_sub   = ChatSub::None;
+        g_chat_field = ChatField::None;
+        g_chat_channel = -1;
+        if (!settings_frame.subPage()) settings_frame.openSubPage();
+        int n = 0;
+        const tm::SettingsSection* ss = nodesSubSections(&n);
+        g_nodes_sub_focus  = tm::settingsFirstFocusable(ss, n);
+        g_nodes_sub_scroll = 0;
+    };
+    auto openChatFieldPage = [&](ChatField f, const char* initial, const char* title) {
+        g_chat_field = f;
+        snprintf(g_chat_title, sizeof(g_chat_title), "%s", title);
+        snprintf(settings_draft, sizeof(settings_draft), "%s", initial != nullptr ? initial : "");
+        settings_draft_len = strlen(settings_draft);
+        if (!settings_frame.subPage()) settings_frame.openSubPage();
+    };
+    auto fieldMax = [](ChatField f) -> size_t {
+        switch (f) {
+            case ChatField::Tag:         return meshcore::kChannelTagMax;
+            case ChatField::KeyB64:      return 64;
+            case ChatField::ScopeRegion: return meshcore::kScopeNameMax;
+            default:                     return tm::kNodeNameMaxBytes;
+        }
+    };
+    auto fieldAllows = [](ChatField f, char c) -> bool {
+        const unsigned char u = (unsigned char)c;
+        if (u < 0x20 || u > 0x7E) return false;
+        switch (f) {
+            case ChatField::Tag:         return true;   // the normaliser removes '#' and spaces, lowercases A-Z
+            case ChatField::KeyB64:      return (u >= 'A' && u <= 'Z') || (u >= 'a' && u <= 'z') ||
+                                                (u >= '0' && u <= '9') || u == '+' || u == '/' || u == '=' ||
+                                                u == ' ';
+            case ChatField::ScopeRegion: return u == '#' || u == ' ' || meshcore::scopeNameChar(c);
+            default:                     return tm::nodeNameCharAllowed(c);
+        }
+    };
+    auto applyChatField = [&]() {
+        switch (g_chat_field) {
+            case ChatField::Tag: {
+                char name[meshcore::kChannelTagMax + 1];
+                if (om::mc::channelsAddHashtag(settings_draft, name, sizeof(name))) {
+                    char m[64];
+                    snprintf(m, sizeof(m), "Added %s", name);
+                    om::ui::noticeSet(m, 3000);
+                    closeChatPage();
+                } else {
+                    om::ui::noticeSet("Not added: duplicate or not a hashtag", 3000);
+                }
+                return;
+            }
+            case ChatField::KeyName:
+                snprintf(g_chat_add_name, sizeof(g_chat_add_name), "%s", settings_draft);
+                g_chat_field = ChatField::None;
+                openChatList(ChatSub::AddKey);
+                return;
+            case ChatField::KeyB64:
+                snprintf(g_chat_add_key, sizeof(g_chat_add_key), "%s", settings_draft);
+                g_chat_field = ChatField::None;
+                openChatList(ChatSub::AddKey);
+                return;
+            case ChatField::ScopeRegion: {
+                char canon[meshcore::kScopeNameMax + 1];
+                if (g_chat_channel >= 0 &&
+                    meshcore::scopeNameCanonical(settings_draft, canon, sizeof(canon)) > 0 &&
+                    om::mc::channelScopeSet((size_t)g_chat_channel, canon)) {
+                    om::ui::noticeSet("Scope saved", 3000);
+                    g_chat_field = ChatField::None;
+                    openChatList(ChatSub::Scope);
+                } else {
+                    om::ui::noticeSet("Region: 1-30 chars, letters/digits - $ #", 3000);
+                }
+                return;
+            }
+            case ChatField::Rename:
+                if (g_chat_channel >= 0 && om::mc::channelsRename((size_t)g_chat_channel, settings_draft))
+                    om::ui::noticeSet("Name saved", 3000);
+                else
+                    om::ui::noticeSet("Name not saved", 3000);
+                g_chat_field = ChatField::None;
+                openChatList(ChatSub::Channel);
+                return;
+            default:
+                return;
+        }
+    };
+    auto chatSubAction = [&](uint16_t id) {
+        const size_t ch = g_chat_channel >= 0 ? (size_t)g_chat_channel : 0;
+        switch (id) {
+            case kChatSubName:
+                openChatFieldPage(ChatField::Rename, om::mc::channelName(ch), "Channel name");
+                break;
+            case kChatSubScope:
+                fillStoredScope(g_chat_channel);
+                openChatList(ChatSub::Scope);
+                break;
+            case kChatSubKeyShare:
+                g_confirm_target  = ConfirmTarget::ShowKey;
+                g_confirm_channel = g_chat_channel;
+                snprintf(g_confirm_title, sizeof(g_confirm_title), "Show the key?");
+                snprintf(g_confirm_text, sizeof(g_confirm_text), "Show the secret key on screen?");
+                snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Show");
+                g_confirm_danger = false;
+                settings_frame.beginConfirm(g_chat_sub_focus);
+                break;
+            case kChatSubRemove:
+                g_confirm_target  = ConfirmTarget::RemoveChannel;
+                g_confirm_channel = g_chat_channel;
+                snprintf(g_confirm_title, sizeof(g_confirm_title), "Remove channel");
+                snprintf(g_confirm_text, sizeof(g_confirm_text),
+                         "Remove %s? Its history stays on the card.", om::mc::channelName(ch));
+                snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Remove");
+                g_confirm_danger = true;
+                settings_frame.beginConfirm(g_chat_sub_focus);
+                break;
+            case kChatSubScopeDefault:
+                if (om::mc::channelScopeSet(ch, "")) om::ui::noticeSet("Scope: default", 3000);
+                fillStoredScope(g_chat_channel);
+                openChatList(ChatSub::Scope);
+                break;
+            case kChatSubScopeNone:
+                if (om::mc::channelScopeSet(ch, meshcore::kScopeNone)) om::ui::noticeSet("Scope: none", 3000);
+                fillStoredScope(g_chat_channel);
+                openChatList(ChatSub::Scope);
+                break;
+            case kChatSubScopeRegion: {
+                char stored[meshcore::kScopeNameMax + 1] = "";
+                om::mc::channelScopeStored(ch, stored, sizeof(stored));
+                const char* initial =
+                    meshcore::scopeModeFor(stored) == meshcore::ScopeMode::Region ? stored : "";
+                openChatFieldPage(ChatField::ScopeRegion, initial, "Region name");
+                break;
+            }
+            case kChatSubAddName:
+                openChatFieldPage(ChatField::KeyName, g_chat_add_name, "Channel name");
+                break;
+            case kChatSubAddKey:
+                openChatFieldPage(ChatField::KeyB64, g_chat_add_key, "Channel key");
+                break;
+            case kChatSubAddCommit:
+                if (om::mc::channelsAddByKey(g_chat_add_name, g_chat_add_key)) {
+                    om::ui::noticeSet("Channel added", 3000);
+                    closeChatPage();
+                } else {
+                    om::ui::noticeSet("Not added: bad key, name or duplicate", 3000);
+                }
+                break;
+            default:
+                break;
+        }
+    };
+
+    // S514/EST-447: Enter on a contact in the Remove-a-contact list. The NAME is copied now, under the lock,
+    // so the sheet's question still names the right node even if an advert refreshes the table while the
+    // question is up; the APPLY path removes by the store index captured here, and contactRemoveAt() refuses
+    // an index that no longer exists rather than removing a different row.
+    auto nodesSubAction = [&](uint16_t id) {
+        char name[om::mc::kNameBytes] = {0};
+        {
+            om::mc::StoreLock l;
+            om::mc::ContactStore& cs = om::mc::contacts();
+            if ((size_t)id < cs.count) snprintf(name, sizeof(name), "%s", cs.c[id].name);
+        }
+        if (name[0] == '\0') snprintf(name, sizeof(name), "this contact");
+        g_confirm_target  = ConfirmTarget::RemoveContact;
+        g_confirm_contact = (int)id;
+        snprintf(g_confirm_title, sizeof(g_confirm_title), "Remove contact");
+        snprintf(g_confirm_text, sizeof(g_confirm_text),
+                 "Remove %s? A DM from it cannot be opened until it advertises again.", name);
+        snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Remove");
+        g_confirm_danger = true;
+        settings_frame.beginConfirm(g_nodes_sub_focus);
+    };
+
+    // Clear-all's question, raised from the NODES root row. The count is read at the moment the sheet opens;
+    // the Apply path re-reads the live table, so the number in the question is never used as a target.
+    auto raiseClearContacts = [&](int focus_row) {
+        size_t n = 0;
+        {
+            om::mc::StoreLock l;
+            n = om::mc::contacts().count;
+        }
+        if (n == 0) {
+            om::ui::noticeSet("No contacts yet", 3000);
+            return;
+        }
+        g_confirm_target = ConfirmTarget::ClearContacts;
+        snprintf(g_confirm_title, sizeof(g_confirm_title), "Clear all contacts");
+        snprintf(g_confirm_text, sizeof(g_confirm_text),
+                 "Remove all %u contacts? A DM from one cannot be opened until it advertises again.",
+                 (unsigned)n);
+        snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Remove all");
+        g_confirm_danger = true;
+        settings_frame.beginConfirm(focus_row);
+    };
+
     // Both page views are BUILT and DRAWN under the store lock; the lock is released before the panel blit, so
     // the radio task never waits for an 800x480 push, and a draw never sees a half-refreshed node.
     auto drawNodesPage = [&]() {
@@ -641,19 +1483,35 @@ extern "C" void app_main(void) {
         nv.battery_pct = view.battery_pct;
         nv.charging    = view.charging;
         int order[om::mc::kMaxContacts];
+        int shown[om::mc::kMaxContacts];
         {
             om::mc::StoreLock l;
             nv.store       = &om::mc::contacts();
-            nv.order       = order;
-            nv.order_count = (int)om::mc::contactsOrder(om::mc::contacts(), order, om::mc::kMaxContacts);
+            const int total = (int)om::mc::contactsOrder(om::mc::contacts(), order, om::mc::kMaxContacts);
+            // S514/EST-449: the list shows the FILTERED order; the bar prints "N of M" against the whole
+            // contact table (store->count), exactly the L2's count line.
+            nv.order       = shown;
+            nv.order_count = om::ui::nodeSearchFilter(&om::mc::contacts(), order, total, nodes_query, shown);
             if (nodes_focus >= nv.order_count) nodes_focus = nv.order_count > 0 ? nv.order_count - 1 : 0;
             if (nodes_focus < 0) nodes_focus = 0;
+            nv.query          = nodes_query;
+            nv.search_focused = nodes_bar;
             const uint32_t now = om::time_source::epochNow();
             nv.focused         = nodes_focus;
             nv.now             = now;
             nv.in_last_hour    = (int)om::mc::contactsHeardWithin(om::mc::contacts(), now, 3600);
             om::ui::drawNodes(g_screen, nv);
         }
+    };
+
+    // S514/EST-449: how many rows the current query keeps. The key handler needs the count for Down from
+    // the bar (the first MATCH) and the list's clamp; it is the SAME filter the draw uses, not a second one.
+    auto nodesShownCount = [&]() -> int {
+        int order[om::mc::kMaxContacts];
+        int shown[om::mc::kMaxContacts];
+        om::mc::StoreLock l;
+        const int total = (int)om::mc::contactsOrder(om::mc::contacts(), order, om::mc::kMaxContacts);
+        return om::ui::nodeSearchFilter(&om::mc::contacts(), order, total, nodes_query, shown);
     };
 
     auto drawChatPage = [&]() {
@@ -854,18 +1712,51 @@ extern "C" void app_main(void) {
             mv.problem = "No card: the map packs live on the SD card.";
         } else {
             if (map_wx < 0 || map_wy < 0) {
-                // First draw: centre ON Ljubljana (Presernov trg, 46.0514 N 14.5060 E), Filip's ask in S513. It used
-                // to centre the TILE containing 46.15 N 14.99 E (near Litija), so the map opened somewhere else and
-                // up to half a tile off. The bounds of the data are wider than the screen, so clamping here only
-                // matters if the pack covers less than a screen at this zoom.
-                map_wx = om::map::worldPxXForLon(14.5060, map_z) - om::ui::kMapAreaW / 2;
-                map_wy = om::map::worldPxYForLat(46.0514, map_z) - om::ui::kMapAreaH / 2;
+                // First draw. S514/EST-447: the MAP settings decide. "Last position" restores the centre of the
+                // view the Map page was left at (NVS), converted to the chosen Start zoom; Ljubljana is the
+                // default and today's behaviour. Either answer is clamped, and a missing/invalid saved view
+                // falls back to Ljubljana rather than guessing.
+                bool placed = false;
+                if (om::map::startPositionFromStored(om::maplink::mapStartPosition(), true) == om::map::kStartLast) {
+                    om::map::SavedView saved;
+                    if (om::maplink::loadLastView(&saved)) {
+                        placed = om::map::startViewFromSaved(saved, map_z, om::ui::kMapAreaW, om::ui::kMapAreaH,
+                                                            &map_wx, &map_wy);
+                    }
+                }
+                if (!placed) {
+                    // Centre ON Ljubljana (Presernov trg, 46.0514 N 14.5060 E), Filip's ask in S513. It used to
+                    // centre the TILE containing 46.15 N 14.99 E (near Litija), so the map opened somewhere else
+                    // and up to half a tile off.
+                    map_wx = om::map::worldPxXForLon(14.5060, map_z) - om::ui::kMapAreaW / 2;
+                    map_wy = om::map::worldPxYForLat(46.0514, map_z) - om::ui::kMapAreaH / 2;
+                }
                 om::map::clampWorldPixel(map_z, &map_wx, &map_wy, om::ui::kMapAreaW, om::ui::kMapAreaH);
             }
             mv.wx = map_wx;
             mv.wy = map_wy;
         }
         om::ui::drawMap(g_screen, mv);
+    };
+
+    // S514/EST-447: the Map page's "last position". The RULE (core/map_settings.h) is: only when the view moved,
+    // while on the page at most once a minute, and ALWAYS on leaving. `leaving` is why this is not called from a
+    // key handler (a pan marks the view changed; the loop decides when that may reach flash).
+    auto saveMapLastView = [&](bool leaving) {
+        if (!om::maplink::ready() || !g_sd_mounted) return;   // nothing on screen to remember
+        if (map_wx < 0 || map_wy < 0) return;
+        if (om::map::startPositionFromStored(om::maplink::mapStartPosition(), true) != om::map::kStartLast) return;
+        const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+        if (!om::map::lastPositionWriteDue(leaving, map_view_changed, now_ms, map_last_write_ms)) return;
+        om::map::SavedView saved;
+        saved.valid = true;
+        saved.wx    = (int32_t)map_wx;
+        saved.wy    = (int32_t)map_wy;
+        saved.z     = (uint8_t)map_z;
+        if (om::maplink::saveLastView(saved)) {
+            map_last_write_ms = now_ms;
+            map_view_changed  = false;
+        }
     };
 
     auto drawPlaceholder = [&](tm::Page p) {
@@ -932,6 +1823,51 @@ extern "C" void app_main(void) {
             om::ui::noticeSet(text, 3000);
         } else {
             om::ui::noticeClear();
+        }
+        dirty = true;
+    };
+
+    // EST-445/EST-448: the one way into Settings. The tab and SECTION come from the registry
+    // (core/settings.h::settingsTargetForPage): an OM Lite page lands on the OM Lite tab at that page's
+    // section (Nodes->NODES, Chat->CHAT, Map->MAP, RPTR->RPTR), the menu and the Settings bar land on
+    // General. `from` is remembered because Esc at the root returns THERE, not always to the Launcher.
+    auto openSettings = [&](tm::Page from) {
+        settings_return_page = from;
+        refreshSettingsTabs();
+        const tm::SettingsTarget target = tm::settingsTargetForPage(core.registry(), from);
+        settings_frame.reset(target.tab, settings_tab_count);
+        settings_frame.setBodyHeight(om::ui::kSetBodyH);
+        settings_draft[0] = '\0';
+        settings_draft_len = 0;
+        // A previous visit may have ended on a list sub-page; the frame's depth is reset above, and these
+        // flags must not outlive it (S514/EST-447: the NODES list has its own flag, like the CHAT pages).
+        g_nodes_list = false;
+        g_chat_sub   = ChatSub::None;
+        g_chat_field = ChatField::None;
+        g_chat_channel = -1;
+        if (!cards[0].running) {
+            const tm::StartResult r = core.start("om-lite");
+            ESP_LOGI(TAG, "settings: start om-lite: code=%d busy=%s", (int)r.code, tm::resource_name(r.busy));
+            if ((bool)r) {
+                cards[0].running = true;
+                om_started_us    = esp_timer_get_time();
+                refreshOmNumbers();
+            }
+        }
+        if (cards[0].running) {
+            // Land on the requested section (or the tab's first row) before the first frame is drawn.
+            int ns = 0;
+            const tm::SettingsSection* secs = settingsSectionsForTab(settings_frame.tab, &ns);
+            if (target.section >= 0)
+                settings_frame.focusSection(secs, ns, target.section);
+            else
+                settings_frame.focusFirst(secs, ns);
+            core.goPage(tm::Page::Settings);
+            ESP_LOGI(TAG, "settings: opened on %s%s (from %s)",
+                     tm::settingsTabLabel(settings_tabs, settings_tab_count, settings_frame.tab),
+                     target.section >= 0 ? " at its page's section" : "", tm::page_name(from));
+        } else {
+            om::ui::noticeSet("OM Lite is not running", 3000);
         }
         dirty = true;
     };
@@ -1087,6 +2023,254 @@ extern "C" void app_main(void) {
                         handled = true;
                         dirty   = true;
                     }
+                } else if (page_now == tm::Page::Settings) {
+                    // EST-445: the frame + General. core/settings.h decides; this branch only feeds it the
+                    // keys and performs the row actions against the real stores.
+                    if (tm::is_symbol(k)) {
+                        handled = false;   // the core's page route still wins on a symbol key
+                    } else {
+                        handled = true;
+                        const bool is_char = (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD);
+                        const char ch      = is_char ? (char)ev.args_keyboard.ascii : '\0';
+
+                        if (settings_frame.confirmOpen()) {
+                            // The shared sheet owns every key: Enter = Apply, Esc = Cancel, everything else is
+                            // swallowed so a held arrow cannot move the page behind the question.
+                            const tm::SetKey sk = (k == tm::Key::Enter) ? tm::SetKey::Enter
+                                                   : (k == tm::Key::Esc) ? tm::SetKey::Esc
+                                                                         : tm::SetKey::None;
+                            const tm::SettingsKeyResult r =
+                                tm::settingsKey(settings_frame, sk, nullptr, 0);
+                            if (r.event == tm::SettingsEvent::ConfirmApplied) {
+                                // S514/EST-446: the ONE sheet serves the name, the channel removal and the
+                                // key display. The target was set where the sheet was raised; Cancel never
+                                // reaches this branch, so it changes nothing on any of the three paths.
+                                if (g_confirm_target == ConfirmTarget::RemoveChannel) {
+                                    if (g_confirm_channel >= 0 &&
+                                        om::mc::channelsRemove((size_t)g_confirm_channel)) {
+                                        om::ui::noticeSet("Channel removed; its history stays", 3000);
+                                    } else {
+                                        om::ui::noticeSet("Channel not removed", 3000);
+                                    }
+                                    closeChatPage();
+                                } else if (g_confirm_target == ConfirmTarget::ShowKey) {
+                                    uint8_t key[meshcore::kKeyBytes];
+                                    if (g_confirm_channel >= 0 &&
+                                        om::mc::channelsKeyCopy((size_t)g_confirm_channel, key) &&
+                                        meshcore::channelKeyToBase64(key, g_chat_show_key,
+                                                                     sizeof(g_chat_show_key))) {
+                                        g_chat_sub   = ChatSub::KeyShown;
+                                        g_chat_field = ChatField::None;
+                                        openChatList(ChatSub::KeyShown);
+                                        ESP_LOGI(TAG, "settings: channel key shown on screen");
+                                    } else {
+                                        om::ui::noticeSet("Key not available", 3000);
+                                    }
+                                } else if (g_confirm_target == ConfirmTarget::RemoveContact) {
+                                    // S514/EST-447: remove ONE contact from RAM; contactsPersistTick() below
+                                    // rewrites the mcct blob on this pass. Its DM logs are not touched.
+                                    if (g_confirm_contact >= 0 &&
+                                        om::mc::contactsRemove((size_t)g_confirm_contact)) {
+                                        om::ui::noticeSet("Contact removed; its DM history stays", 3000);
+                                    } else {
+                                        om::ui::noticeSet("Contact not removed", 3000);
+                                    }
+                                    closeNodesPage();
+                                } else if (g_confirm_target == ConfirmTarget::ClearContacts) {
+                                    const size_t removed = om::mc::contactsClear();
+                                    if (removed > 0)
+                                        om::ui::noticeSet("All contacts removed; their DM history stays", 3000);
+                                    else
+                                        om::ui::noticeSet("No contacts to clear", 3000);
+                                    // This sheet was raised at the ROOT (the Clear row), so there is no
+                                    // sub-page to close; closing one would restore a stale root focus.
+                                    if (settings_frame.subPage()) closeNodesPage();
+                                } else if (om::mc::setNodeName(settings_pending_name)) {
+                                    om::ui::noticeSet("Node name saved", 3000);
+                                    ESP_LOGI(TAG, "settings: node name saved");
+                                } else {
+                                    om::ui::noticeSet("Name not saved", 3000);
+                                }
+                            } else if (r.event == tm::SettingsEvent::ConfirmCancelled) {
+                                ESP_LOGI(TAG, "settings: change cancelled; the old value stays");
+                            }
+                            dirty = true;
+                        } else if (settings_frame.subPage() && g_chat_field != ChatField::None) {
+                            // A chat TEXT page: the shared field, with THAT page's character rules. Esc goes
+                            // back to the list it was opened from, or closes the page when there is none.
+                            if (k == tm::Key::Esc) {
+                                if (g_chat_sub != ChatSub::None)
+                                    g_chat_field = ChatField::None;
+                                else
+                                    closeChatPage();
+                                dirty = true;
+                            } else if (k == tm::Key::Backspace) {
+                                while (settings_draft_len > 0) {
+                                    const unsigned char c =
+                                        (unsigned char)settings_draft[--settings_draft_len];
+                                    if ((c & 0xC0) != 0x80) break;
+                                }
+                                settings_draft[settings_draft_len] = '\0';
+                                dirty = true;
+                            } else if (k == tm::Key::Enter) {
+                                applyChatField();
+                                dirty = true;
+                            } else if (is_char && fieldAllows(g_chat_field, ch)) {
+                                if (settings_draft_len + 1 < sizeof(settings_draft) &&
+                                    settings_draft_len < fieldMax(g_chat_field)) {
+                                    settings_draft[settings_draft_len++] = ch;
+                                    settings_draft[settings_draft_len]   = '\0';
+                                }
+                                dirty = true;
+                            }
+                        } else if (settings_frame.subPage() && g_nodes_list) {
+                            // S514/EST-447: the Remove-a-contact list. Same row arithmetic as every other list
+                            // sub-page; Enter on a contact raises the shared sheet (nodesSubAction), Esc closes.
+                            tm::SetKey sk = tm::SetKey::None;
+                            if (k == tm::Key::Up) sk = tm::SetKey::Up;
+                            else if (k == tm::Key::Down) sk = tm::SetKey::Down;
+                            else if (k == tm::Key::Enter) sk = tm::SetKey::Enter;
+                            else if (k == tm::Key::Esc) sk = tm::SetKey::Esc;
+                            else if (is_char && ch == ',') sk = tm::SetKey::Settings;
+
+                            int sn = 0;
+                            const tm::SettingsSection* ss = nodesSubSections(&sn);
+                            const tm::SettingsKeyResult r =
+                                tm::settingsSubPageKey(settings_frame, sk, ss, sn, &g_nodes_sub_focus,
+                                                       &g_nodes_sub_scroll,
+                                                       om::ui::kSetBodyH + om::ui::kSetTabH);
+                            if (r.event == tm::SettingsEvent::CloseSubPage) {
+                                closeNodesPage();
+                            } else if (r.event == tm::SettingsEvent::ActionRow) {
+                                const tm::SettingRow* row = tm::settingsRowAt(ss, sn, r.row);
+                                if (row != nullptr) nodesSubAction(row->id);
+                            }
+                            dirty = true;
+                        } else if (settings_frame.subPage() && g_chat_sub != ChatSub::None) {
+                            // A chat LIST page (channel / scope / add-by-key): the frame's own row arithmetic
+                            // through settingsSubPageKey, and the same event vocabulary as the root.
+                            tm::SetKey sk = tm::SetKey::None;
+                            if (k == tm::Key::Up) sk = tm::SetKey::Up;
+                            else if (k == tm::Key::Down) sk = tm::SetKey::Down;
+                            else if (k == tm::Key::Enter) sk = tm::SetKey::Enter;
+                            else if (k == tm::Key::Esc) sk = tm::SetKey::Esc;
+                            else if (is_char && ch == ',') sk = tm::SetKey::Settings;
+
+                            int sn = 0;
+                            const tm::SettingsSection* ss = chatSubSections(&sn);
+                            const tm::SettingsKeyResult r =
+                                tm::settingsSubPageKey(settings_frame, sk, ss, sn, &g_chat_sub_focus,
+                                                       &g_chat_sub_scroll,
+                                                       om::ui::kSetBodyH + om::ui::kSetTabH);
+                            if (r.event == tm::SettingsEvent::CloseSubPage) {
+                                closeChatPage();
+                            } else if (r.event == tm::SettingsEvent::OpenSubPage ||
+                                       r.event == tm::SettingsEvent::ActionRow) {
+                                const tm::SettingRow* row = tm::settingsRowAt(ss, sn, r.row);
+                                if (row != nullptr) chatSubAction(row->id);
+                            }
+                            dirty = true;
+                        } else if (settings_frame.subPage()) {                        } else {
+                            tm::SetKey sk = tm::SetKey::None;
+                            if (k == tm::Key::Up) sk = tm::SetKey::Up;
+                            else if (k == tm::Key::Down) sk = tm::SetKey::Down;
+                            else if (k == tm::Key::Left) sk = tm::SetKey::Left;
+                            else if (k == tm::Key::Right) sk = tm::SetKey::Right;
+                            else if (k == tm::Key::Enter) sk = tm::SetKey::Enter;
+                            else if (k == tm::Key::Esc) sk = tm::SetKey::Esc;
+                            else if (is_char && ch == ',') sk = tm::SetKey::Settings;
+
+                            int ns = 0;
+                            const tm::SettingsSection* secs = settingsSectionsForTab(settings_frame.tab, &ns);
+                            settings_frame.setTabRunning(settingsTabRunning(settings_frame.tab));
+                            const tm::SettingsKeyResult r = tm::settingsKey(settings_frame, sk, secs, ns);
+                            const tm::SettingRow* row = tm::settingsRowAt(secs, ns, r.row);
+                            switch (r.event) {
+                                case tm::SettingsEvent::TabChanged: {
+                                    // The NEW tab's sections, then its first row and the running state of
+                                    // its owner (a LATER app is stopped, so its actions say so).
+                                    refreshSettingsTabs();
+                                    secs = settingsSectionsForTab(settings_frame.tab, &ns);
+                                    settings_frame.setTabRunning(settingsTabRunning(settings_frame.tab));
+                                    settings_frame.focusFirst(secs, ns);
+                                    break;
+                                }
+                                case tm::SettingsEvent::OpenSubPage:
+                                    if (row != nullptr && row->id == kNodesRowRemove) {
+                                        // S514/EST-447: the Remove-a-contact list sub-page.
+                                        openNodesPage();
+                                    } else if (row != nullptr && row->id >= kChatRowChannelBase) {
+                                        g_chat_channel = row->id - kChatRowChannelBase;
+                                        fillStoredScope(g_chat_channel);
+                                        openChatList(ChatSub::Channel);
+                                    } else if (row != nullptr && row->id == kChatRowAddTag) {
+                                        g_chat_add_name[0] = '\0';
+                                        g_chat_add_key[0]  = '\0';
+                                        g_chat_sub         = ChatSub::None;
+                                        openChatFieldPage(ChatField::Tag, "", "Add hashtag");
+                                    } else if (row != nullptr && row->id == kChatRowAddKey) {
+                                        g_chat_add_name[0] = '\0';
+                                        g_chat_add_key[0]  = '\0';
+                                        openChatList(ChatSub::AddKey);
+                                    } else if (row != nullptr && row->id == kSetRowName) {
+                                        g_confirm_target  = ConfirmTarget::Name;
+                                        g_confirm_channel = -1;
+                                        snprintf(g_confirm_title, sizeof(g_confirm_title),
+                                                 "Change the node name?");
+                                        snprintf(g_confirm_text, sizeof(g_confirm_text),
+                                                 "Other nodes will see the new name after the next advert");
+                                        snprintf(g_confirm_apply, sizeof(g_confirm_apply), "Apply");
+                                        g_confirm_danger  = false;
+                                        snprintf(settings_draft, sizeof(settings_draft), "%s",
+                                                 om::mc::nodeName());
+                                        settings_draft_len = strlen(settings_draft);
+                                    }
+                                    break;
+                                case tm::SettingsEvent::ToggleValue:
+                                case tm::SettingsEvent::CycleValue:
+                                case tm::SettingsEvent::ActionRow:
+                                    // The row carries its own handler for the plain changes (a toggle, a cycle).
+                                    // Two rows need the SHEET or the map's own state, which live in this scope:
+                                    // Clear all contacts raises the shared confirm, and a MAP start row
+                                    // re-places the map so the next Map draw uses the new choice.
+                                    if (row != nullptr && row->id == kNodesRowClear) {
+                                        raiseClearContacts(r.row);
+                                    } else {
+                                        if (row != nullptr && row->on_enter != nullptr)
+                                            row->on_enter(core, *row);
+                                        if (row != nullptr &&
+                                            (row->id == kMapRowStartPos || row->id == kMapRowStartZoom)) {
+                                            map_z            = (int)om::maplink::mapStartZoom();
+                                            map_wx           = -1;
+                                            map_wy           = -1;
+                                            map_view_changed = false;
+                                        }
+                                    }
+                                    break;
+                                case tm::SettingsEvent::NeedsRunning: {
+                                    char msg[48];
+                                    snprintf(msg, sizeof(msg), "%s is not running",
+                                             tm::settingsTabLabel(settings_tabs, settings_tab_count,
+                                                                  settings_frame.tab));
+                                    om::ui::noticeSet(msg, 3000);
+                                    break;
+                                }
+                                case tm::SettingsEvent::LeaveSettings: {
+                                    // Esc at the root leaves Settings for the page it was opened from (the
+                                    // Launcher if it was opened from the menu).
+                                    const tm::Page back = settings_return_page;
+                                    if (back == tm::Page::Settings || back == tm::Page::Count)
+                                        core.goPage(tm::Page::Launcher);
+                                    else
+                                        core.goPage(back);
+                                    break;
+                                }
+                                default:
+                                    break;
+                            }
+                            dirty = true;
+                        }
+                    }
                 } else if (page_now == tm::Page::Map) {
                     // Pan by a quarter of a tile per press: fine enough to place a town, coarse enough to cross the
                     // country without holding the key. Zoom keeps the centre (core/map_view::zoomTo).
@@ -1095,6 +2279,7 @@ extern "C" void app_main(void) {
                         const int dx = (k == tm::Key::Left) ? -step : (k == tm::Key::Right) ? step : 0;
                         const int dy = (k == tm::Key::Up) ? -step : (k == tm::Key::Down) ? step : 0;
                         om::map::panBy(map_z, &map_wx, &map_wy, dx, dy, om::ui::kMapAreaW, om::ui::kMapAreaH);
+                        map_view_changed = true;   // the once-a-minute / on-leaving rule decides the write
                         handled = true;
                         dirty   = true;
                     } else if (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD &&
@@ -1103,20 +2288,80 @@ extern "C" void app_main(void) {
                         const int want = (ev.args_keyboard.ascii == '-') ? map_z - 1 : map_z + 1;
                         map_z = om::map::zoomTo(map_z, want, &map_wx, &map_wy, om::ui::kMapAreaW,
                                                 om::ui::kMapAreaH);
+                        map_view_changed = true;
                         handled = true;
                         dirty   = true;
                     }
                 } else if (page_now == tm::Page::Nodes) {
-                    if (k == tm::Key::Up || k == tm::Key::Down) {
-                        nodes_focus += (k == tm::Key::Down) ? 1 : -1;
-                        if (nodes_focus < 0) nodes_focus = 0;
+                    // S514/EST-449: the search bar is the list's top row and owns the keys while it has the
+                    // focus. A symbol key is a NAVIGATION event, never a Char, so the page switch still works
+                    // from either half.
+                    const bool is_char = (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD);
+                    const char ch      = is_char ? (char)ev.args_keyboard.ascii : '\0';
+
+                    if (tm::is_symbol(k)) {
+                        handled = false;   // the core's page switch wins
+                    } else if (nodes_bar) {
                         handled = true;
                         dirty   = true;
+                        if (k == tm::Key::Esc) {
+                            // Esc clears a non-empty query first; a second Esc (empty) returns to the list.
+                            om::ui::nodesFocusEsc(&nodes_bar, nodes_query, &nodes_query_len, &nodes_focus);
+                        } else if (k == tm::Key::Backspace) {
+                            om::ui::nodeSearchBackspace(nodes_query, &nodes_query_len);
+                            nodes_focus = 0;   // the list just changed under the bar
+                        } else if (k == tm::Key::Down) {
+                            om::ui::nodesFocusDown(&nodes_bar, &nodes_focus, nodesShownCount());
+                        } else if (k == tm::Key::Up) {
+                            // The bar IS the top row: Up there does nothing (and must never type).
+                        } else if (is_char) {
+                            // The BSP hands the whole UTF-8 sequence in utf8[] (Alt_R+e -> "é"); `ascii`
+                            // is only the base key, so appending it would lose a non-ASCII letter. The
+                            // buffer and Backspace stay the composer's rules (bytes in, whole sequence out).
+                            const char* ins   = ev.args_keyboard.utf8;
+                            bool        added = false;
+                            if (ins[0] != '\0') {
+                                for (int i = 0; ins[i] != '\0'; ++i) {
+                                    if (om::ui::nodeSearchAppend(nodes_query, sizeof(nodes_query),
+                                                                 &nodes_query_len, ins[i]))
+                                        added = true;
+                                }
+                            } else {
+                                added = om::ui::nodeSearchAppend(nodes_query, sizeof(nodes_query),
+                                                                 &nodes_query_len, ch);
+                            }
+                            if (added) nodes_focus = 0;   // a new query starts at its first match
+                        }
+                        ESP_LOGI(TAG, "nodes search: %u byte(s), %d shown", (unsigned)nodes_query_len,
+                                 nodesShownCount());
+                    } else {
+                        // The LIST has the focus. Up/Down move; Up from the FIRST row goes to the bar; `/`
+                        // opens it from anywhere. Every other key keeps its old meaning (the `!handled`
+                        // block below: ',' = Settings, 'a' = advert, Esc = back).
+                        if (k == tm::Key::Up) {
+                            om::ui::nodesFocusUp(&nodes_bar, &nodes_focus);
+                            handled = true;
+                            dirty   = true;
+                        } else if (k == tm::Key::Down) {
+                            om::ui::nodesFocusDown(&nodes_bar, &nodes_focus, nodesShownCount());
+                            handled = true;
+                            dirty   = true;
+                        } else if (is_char && om::ui::nodesSlashOpensSearch(ch)) {
+                            nodes_bar = true;
+                            handled   = true;
+                            dirty     = true;
+                            ESP_LOGI(TAG, "nodes search: opened with '/'");
+                        }
                     }
                 }
 
                 if (!handled) {
-                    if (tm::is_symbol(k)) {
+                    if (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD &&
+                        ev.args_keyboard.ascii == ',') {
+                        // EST-445: `,` opens Settings from any OM Lite page, on the tab matching that page.
+                        // (An open Chat composer consumed the comma above, so this cannot steal a typed ','.)
+                        openSettings(page_now);
+                    } else if (tm::is_symbol(k)) {
                         core.handleKey(k);   // the core's route: a module never sees a symbol key
                         dirty = true;
                     } else if (page_now == tm::Page::Launcher) {
@@ -1132,8 +2377,9 @@ extern "C" void app_main(void) {
                             leaveToLauncher();
                         } else if (k == tm::Key::Left || k == tm::Key::Right || k == tm::Key::Up ||
                                    k == tm::Key::Down) {
-                            // Left/Right (Up/Down aliases) move between the cards; core/menu_cards clamps at
-                            // both ends, so there is no wrap.
+                            // Left/Right move between the three cards (clamped, no wrap); Down lands on the
+                            // full-width Settings bar under them, Up from it returns to the first card. All of
+                            // that is core/menu_cards, host-tested.
                             const tm::MenuMove move = (k == tm::Key::Left)     ? tm::MenuMove::Left
                                                       : (k == tm::Key::Right) ? tm::MenuMove::Right
                                                       : (k == tm::Key::Up)    ? tm::MenuMove::Up
@@ -1141,35 +2387,41 @@ extern "C" void app_main(void) {
                             menu_focus = tm::menuFocusMove(menu_focus, move, view.card_count);
                             dirty      = true;
                         } else if (k == tm::Key::Enter) {
-                            const tm::MenuAction act = tm::menuEnterAction(cards[menu_focus].available);
-                            if (act == tm::MenuAction::Open) {
-                                if (!cards[menu_focus].running) {
-                                    // Enter OPENS: a stopped app is started first, then the router goes to its
-                                    // home page (OM Lite: Nodes). Only OM Lite is available today.
-                                    const tm::StartResult r = core.start(kCardIds[menu_focus]);
-                                    ESP_LOGI(TAG, "open -> start %s: code=%d busy=%s", kCardIds[menu_focus],
-                                             (int)r.code, tm::resource_name(r.busy));
-                                    if ((bool)r) {
-                                        cards[menu_focus].running = true;
-                                        om_started_us             = esp_timer_get_time();
-                                        refreshOmNumbers();
+                            if (menu_focus == tm::kMenuSettingsFocus) {
+                                // EST-445: Enter on the full-width Settings bar opens Settings on General.
+                                openSettings(tm::Page::Launcher);
+                            } else {
+                                const tm::MenuAction act =
+                                    tm::menuEnterActionAt(menu_focus, cards[menu_focus].available, view.card_count);
+                                if (act == tm::MenuAction::Open) {
+                                    if (!cards[menu_focus].running) {
+                                        // Enter OPENS: a stopped app is started first, then the router goes to its
+                                        // home page (OM Lite: Nodes). Only OM Lite is available today.
+                                        const tm::StartResult r = core.start(kCardIds[menu_focus]);
+                                        ESP_LOGI(TAG, "open -> start %s: code=%d busy=%s", kCardIds[menu_focus],
+                                                 (int)r.code, tm::resource_name(r.busy));
+                                        if ((bool)r) {
+                                            cards[menu_focus].running = true;
+                                            om_started_us             = esp_timer_get_time();
+                                            refreshOmNumbers();
+                                        }
                                     }
-                                }
-                                if (cards[menu_focus].running) {
-                                    core.goPage(kCardHome[menu_focus]);
+                                    if (cards[menu_focus].running) {
+                                        core.goPage(kCardHome[menu_focus]);
+                                        dirty = true;
+                                    }
+                                } else if (act == tm::MenuAction::ComingLater) {
+                                    // A LATER card changes nothing visible except a three-second notice in the
+                                    // head's right slot (the EST-428 pattern: main.cpp only passes it while live).
+                                    snprintf(launcher_notice, sizeof(launcher_notice), "%s: coming later",
+                                             cards[menu_focus].name);
+                                    launcher_notice_until_us = esp_timer_get_time() + 3 * 1000 * 1000;
+                                    ESP_LOGI(TAG, "open: %s is not available yet", cards[menu_focus].name);
                                     dirty = true;
                                 }
-                            } else if (act == tm::MenuAction::ComingLater) {
-                                // A LATER card changes nothing visible except a three-second notice in the
-                                // head's right slot (the EST-428 pattern: main.cpp only passes it while live).
-                                snprintf(launcher_notice, sizeof(launcher_notice), "%s: coming later",
-                                         cards[menu_focus].name);
-                                launcher_notice_until_us = esp_timer_get_time() + 3 * 1000 * 1000;
-                                ESP_LOGI(TAG, "open: %s is not available yet", cards[menu_focus].name);
-                                dirty = true;
                             }
                         } else if (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD &&
-                                   ev.args_keyboard.ascii == 's') {
+                                   ev.args_keyboard.ascii == 's' && menu_focus < view.card_count) {
                             // s STOPS the focused running app: no confirm, it is reversible. The leak line
                             // is logged exactly as before.
                             const tm::MenuAction act =
@@ -1188,9 +2440,12 @@ extern "C" void app_main(void) {
                             dirty = true;   // a non-symbol key a module claimed (none on the menu today)
                         }
                     } else if (page_now == tm::Page::Nodes && k == tm::Key::Char &&
-                               ev.type == INPUT_EVENT_TYPE_KEYBOARD && ev.args_keyboard.ascii == 'a') {
+                               ev.type == INPUT_EVENT_TYPE_KEYBOARD && ev.args_keyboard.ascii == 'a' &&
+                               om::ui::nodesAdvertAllowed(nodes_bar)) {
                         // S513/EST-432: the advert key is on the Nodes page too (its empty-list text points at
                         // it), so the page that shows who was heard can ask for a fresh advert without leaving.
+                        // S514/EST-449: ONLY while the list has focus; in the search bar 'a' is a typed letter
+                        // (that branch consumes it, so this is belt-and-braces with the rule in one place).
                         pressAdvert();
                     } else if (k == tm::Key::Esc) {
                         core.handleKey(k);   // back one page through the router's history
@@ -1198,6 +2453,11 @@ extern "C" void app_main(void) {
                     }
                 }
             }
+
+            // S514/EST-447: leaving the Map page is the one write that ignores the once-a-minute floor (the
+            // ticket: "written at most once a minute and on leaving"). It is still only written when the view
+            // moved, so opening and closing the page without touching it writes nothing.
+            if (page_now == tm::Page::Map && core.router().current() != tm::Page::Map) saveMapLastView(true);
         }
 
         // A tile the worker finished: repaint, so the map fills in from the centre out while the keys stay live.
@@ -1227,6 +2487,10 @@ extern "C" void app_main(void) {
             refreshOmNumbers();   // the running card's memory + uptime, refreshed with the rest of the chrome
         }
 
+        // S514/EST-447: while the Map page is on screen, a moved view is written at most once a minute. The
+        // RULE is core/map_settings.h (time passed in); this only supplies the monotonic clock and the view.
+        if (core.router().current() == tm::Page::Map) saveMapLastView(false);
+
         // S513/EST-437: the contact table's one NVS write, on the MAIN task. The radio task only raised a flag;
         // a structural change goes on this pass, last-heard/SNR waits for the blob's 10-minute floor. Cheap when
         // nothing is dirty, which is almost always.
@@ -1255,6 +2519,9 @@ extern "C" void app_main(void) {
                     break;
                 case tm::Page::Map:
                     drawMapPage();
+                    break;
+                case tm::Page::Settings:
+                    drawSettingsPage();
                     break;
                 default:
                     drawPlaceholder(core.router().current());

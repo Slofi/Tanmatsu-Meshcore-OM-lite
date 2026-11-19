@@ -269,20 +269,38 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
     const int cy = hy + kTmHintH / 2;
     const int bl = textBaseline(s, Face::Hint, hy, kTmHintH);
 
-    int hx = kTmPad;
-    for (int i = 0; i < hint_count && hints && i < 4; i++) {
-        if (hints[i].key == nullptr || hints[i].key[0] == '\0') continue;
-        const int kw = 30;
-        drawKeyCap(s, hx, cy - 9, kw, 18, hints[i].key, kDim);
-        hx += kw + 6;
-        drawText(s, Face::Hint, hx, bl, hints[i].label, kDimmer);
-        const Font* f = fontFor(Face::Hint);
-        hx += 14 + (f && f->ready() ? f->textWidth(hints[i].label) : 30) + 16;
-    }
-
     static const char* page_names[5] = {"LAUNCHER", "NODES", "CHAT", "MAP", "RPTR"};
     const Font*        hf            = fontFor(Face::Hint);
-    int                sx            = W - kTmPad;
+
+    // Where the right-hand symbol cluster begins. The LEFT hints are drawn only while they fit before it,
+    // so adding the Settings key (and a page's own four actions) can never push a chip under the sigils.
+    // This matters since EST-445: every page now carries `, settings` plus its own hints.
+    int sx = W - kTmPad;
+    for (int i = 4; i >= 0; i--) {
+        const int tw = (hf && hf->ready()) ? hf->textWidth(page_names[i]) : 40;
+        sx -= tw;
+        sx -= 22;
+        sx -= 18;
+    }
+    const int right_start = sx;
+
+    int hx = kTmPad;
+    for (int i = 0; i < hint_count && hints && i < 6; i++) {
+        if (hints[i].key == nullptr || hints[i].key[0] == '\0') continue;
+        const int kw = 30;
+        const int lw = (hf && hf->ready()) ? hf->textWidth(hints[i].label) : 30;
+        // Tighter than the old 6/14/16 spacing: EST-445 puts FIVE hints on a page (`, settings` plus
+        // four actions), and the ticket's Settings bar must show all of them without running under the
+        // symbol cluster. The chip is still 30 px (key names like "up/dn" are five glyphs).
+        const int item_w = kw + 4 + 8 + lw + 10;
+        if (hx + item_w > right_start - 8) break;   // no room: stop rather than overlap the page keys
+        drawKeyCap(s, hx, cy - 9, kw, 18, hints[i].key, kDim);
+        hx += kw + 4;
+        drawText(s, Face::Hint, hx, bl, hints[i].label, kDimmer);
+        hx += 8 + lw + 10;
+    }
+
+    sx = W - kTmPad;
     for (int i = 4; i >= 0; i--) {
         const bool on = (static_cast<int>(active) == i);
         const int  tw = (hf && hf->ready()) ? hf->textWidth(page_names[i]) : 40;

@@ -147,7 +147,7 @@ void test_start_stop_start_keeps_memory() {
 
   static const tm::Module mod = {"alpha", "Alpha", "test module", tm::page_bit(tm::Page::Nodes), true,
                                  tm::Resource::Settings | tm::Resource::Clock,
-                                 alpha_start, alpha_stop, alpha_tick, alpha_draw, alpha_key, nullptr};
+                                 alpha_start, alpha_stop, alpha_tick, alpha_draw, alpha_key, nullptr, nullptr};
   tm::Core core;
   CHECK(core.registry().add(mod));
 
@@ -198,7 +198,7 @@ void test_leak_is_reported_by_name() {
 
   static const tm::Module mod = {"leaky", "Leaky", "leaks on stop", tm::page_bit(tm::Page::Chat), true,
                                  tm::Resource::None, leaky_start, leaky_stop, nullptr, nullptr,
-                                 nullptr, nullptr};
+                                 nullptr, nullptr, nullptr};
   tm::Core core;
   CHECK(core.registry().add(mod));
 
@@ -239,9 +239,9 @@ void test_second_radio_owner_is_refused() {
 
   static const tm::Module om = {"om-lite", "OM Lite", "mesh client", kAllOmPages, true,
                                 tm::Resource::Radio | tm::Resource::SdCard, om_start, om_stop_clean,
-                                nullptr, om_draw, om_key, nullptr};
+                                nullptr, om_draw, om_key, nullptr, nullptr};
   static const tm::Module probe = {"probe", "Probe", "also wants the radio", 0, true, tm::Resource::Radio,
-                                   probe_start, nullptr, nullptr, nullptr, nullptr, nullptr};
+                                   probe_start, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
   tm::Core core;
   CHECK(core.registry().add(om));
   CHECK(core.registry().add(probe));
@@ -281,7 +281,7 @@ void test_symbol_keys_route_and_are_not_swallowed() {
 
   static const tm::Module om = {"om-lite", "OM Lite", "mesh client", kAllOmPages, true,
                                 tm::Resource::Radio, om_start, om_stop_clean, nullptr, om_draw,
-                                om_key, nullptr};
+                                om_key, nullptr, nullptr};
   tm::Core core;
   CHECK(core.registry().add(om));
 
@@ -373,7 +373,7 @@ void test_own_symbol_key_returns_to_the_page_top() {
 
   static const tm::Module om = {"om-lite", "OM Lite", "mesh client", kAllOmPages, true,
                                 tm::Resource::Radio, om_start, om_stop_clean, nullptr, om_draw,
-                                om_key, om_top};
+                                om_key, om_top, nullptr};
   tm::Core core;
   CHECK(core.registry().add(om));
   CHECK(core.start("om-lite"));
@@ -441,9 +441,9 @@ void test_states_and_one_drawing_owner() {
 
   static const tm::Module om = {"om-lite", "OM Lite", "mesh client", kAllOmPages, true,
                                 tm::Resource::Radio, om_start, om_stop_clean, nullptr, om_draw,
-                                om_key, nullptr};
+                                om_key, nullptr, nullptr};
   static const tm::Module later = {"mesh-torry", "Mesh-Torry", "game", 0, false, tm::Resource::None,
-                                   nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+                                   nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
   tm::Core core;
   CHECK(core.registry().add(om));
   CHECK(core.registry().add(later));

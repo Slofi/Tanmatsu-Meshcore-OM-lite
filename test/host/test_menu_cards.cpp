@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT
-// Host tests for the start menu's rules (S513/EST-432). Real exit code: 0 = every check passed.
+// Host tests for the start menu's rules (S513/EST-432, extended by EST-445).
+// Real exit code: 0 = every check passed.
 //
-// The ticket's three rules are three groups, so a broken one has one obvious failing line:
-//   1. Left/Right (Up/Down as aliases) move between the three cards and STOP at both ends — no wrapping;
-//   2. Enter on an available card opens, on a LATER card only says "coming later";
-//   3. s stops a running card and does nothing on a stopped or LATER one.
+// The menu is three app cards plus a full-width Settings bar under them:
+//   1. Left/Right move between the three cards and STOP at both ends — no wrapping;
+//   2. Down from any card lands on the Settings bar, Up from the bar returns to the first card;
+//   3. Enter on a card opens (available) or says "coming later" (LATER); Enter on the bar opens Settings;
+//   4. s stops a running card and does nothing on a stopped or LATER card.
 //
 // Build/run: sh test/host/run.sh (g++ -std=c++17 -Wall -Wextra -Werror).
 #include <stdio.h>
@@ -33,47 +35,57 @@ int g_failures = 0;
     const long w_ = static_cast<long>(want);                                         \
     if (g_ != w_) {                                                                  \
       printf("FAIL %s:%d  %s == %s (got %ld, want %ld)\n", __FILE__, __LINE__,      \
-                  #got, #want, g_, w_);                                              \
+             #got, #want, g_, w_);                                                    \
       ++g_failures;                                                                  \
       return;                                                                        \
     }                                                                                \
   } while (0)
 
 // ------------------------------------------------------------------------------------- 1. focus movement
-void test_focus_stops_at_both_ends() {
-  printf("test  Left/Right (Up/Down aliases) move between the cards, no wrap\n");
+void test_focus_cards_and_settings_bar() {
+  printf("test  Left/Right over the cards, Down to the Settings bar, Up back\n");
 
-  // the row starts on OM Lite (0)
-  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Left), 0);        // clamped at the first card
-  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Up), 0);          // Up is the same direction as Left
+  // The row starts on OM Lite (0); Left is clamped at the first card.
+  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Left), 0);
+  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Up), 0);          // Up on the card row stays on the card
   CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Right), 1);
   CHECK_EQ(tm::menuFocusMove(1, tm::MenuMove::Right), 2);
-  CHECK_EQ(tm::menuFocusMove(1, tm::MenuMove::Down), 2);        // Down is the same direction as Right
   CHECK_EQ(tm::menuFocusMove(2, tm::MenuMove::Right), 2);       // clamped at the last card
-  CHECK_EQ(tm::menuFocusMove(2, tm::MenuMove::Down), 2);
 
-  CHECK_EQ(tm::menuFocusMove(2, tm::MenuMove::Left), 1);
-  CHECK_EQ(tm::menuFocusMove(1, tm::MenuMove::Left), 0);
-  CHECK_EQ(tm::menuFocusMove(1, tm::MenuMove::Up), 0);
-  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Left), 0);         // still no wrap back to 2
+  // EST-445: Down from ANY card lands on the full-width Settings bar (index 3).
+  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Down), tm::kMenuSettingsFocus);
+  CHECK_EQ(tm::menuFocusMove(1, tm::MenuMove::Down), tm::kMenuSettingsFocus);
+  CHECK_EQ(tm::menuFocusMove(2, tm::MenuMove::Down), tm::kMenuSettingsFocus);
+  CHECK_EQ(tm::menuFocusMove(3, tm::MenuMove::Down), tm::kMenuSettingsFocus);   // clamped on the bar
 
-  // an out-of-range focus is clamped into the row first, then moved
+  // Up from the bar returns to the first card; Left/Right on the bar do nothing.
+  CHECK_EQ(tm::menuFocusMove(3, tm::MenuMove::Up), 0);
+  CHECK_EQ(tm::menuFocusMove(3, tm::MenuMove::Left), 3);
+  CHECK_EQ(tm::menuFocusMove(3, tm::MenuMove::Right), 3);
+  CHECK_EQ(tm::menuFocusMove(3, tm::MenuMove::Up), 0);
+
+  // a focus outside the menu is clamped into it first
   CHECK_EQ(tm::menuFocusMove(-3, tm::MenuMove::Right), 1);
-  CHECK_EQ(tm::menuFocusMove(99, tm::MenuMove::Left), 1);
+  CHECK_EQ(tm::menuFocusMove(99, tm::MenuMove::Left), 3);   // 99 -> the bar; Left on the bar stays
 
   // degenerate rows never index outside
-  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Right, 1), 0);
-  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Left, 1), 0);
-  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Right, 0), 0);
-  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Left, 0), 0);
+  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Down, 0), 0);
+  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Down, 1), 1);
+  CHECK_EQ(tm::menuFocusMove(1, tm::MenuMove::Up, 1), 0);
 }
 
-// ------------------------------------------------------------------------------- 2./3. Enter and stop
+// ------------------------------------------------------------------------------- 2./3./4. Enter and stop
 void test_enter_and_stop_actions() {
-  printf("test  Enter opens available, notices LATER; s stops only a running card\n");
+  printf("test  Enter opens available / notices LATER / opens Settings; s stops only a running card\n");
 
   CHECK(tm::menuEnterAction(true) == tm::MenuAction::Open);              // OM Lite
   CHECK(tm::menuEnterAction(false) == tm::MenuAction::ComingLater);      // OPS-TOC / Mesh-Torry
+
+  // The Settings bar is not a card and answers its own action, never indexing past the three cards.
+  CHECK(tm::menuEnterActionAt(tm::kMenuSettingsFocus, false, tm::kMenuCards) == tm::MenuAction::OpenSettings);
+  CHECK(tm::menuEnterActionAt(0, true, tm::kMenuCards) == tm::MenuAction::Open);
+  CHECK(tm::menuEnterActionAt(1, false, tm::kMenuCards) == tm::MenuAction::ComingLater);
+  CHECK(tm::menuEnterActionAt(9, true, tm::kMenuCards) == tm::MenuAction::None);
 
   CHECK(tm::menuStopAction(true, true) == tm::MenuAction::Stop);         // a running module
   CHECK(tm::menuStopAction(true, false) == tm::MenuAction::None);        // already stopped
@@ -84,7 +96,7 @@ void test_enter_and_stop_actions() {
 }  // namespace
 
 int main() {
-  test_focus_stops_at_both_ends();
+  test_focus_cards_and_settings_bar();
   test_enter_and_stop_actions();
 
   printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);

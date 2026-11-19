@@ -15,6 +15,510 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-19 · S514 (EST-449) · Nodes search bar
+
+> Written by **DeepSeek** for ticket **EST-449**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed or committed. Starts AFTER EST-445/446/447/448 are in the tree and keeps their work. **Version: 44.**
+> Ports the L2's S508 Nodes search (`firmware/src/ui/nodes_search.h`) to the 800×480 Nodes page, with the two
+> corrections Filip made on the L2's glass: **ONE input field**, and **text never on the field's border**.
+
+### What this changes
+
+- **A search bar as the TOP ROW of the Nodes list** (always visible): dim `search nodes` placeholder while it is
+  empty, the query once typed, and `N of M` on its right. No magnifier glyph: the six VLW faces carry Latin-1 +
+  Latin Extended-A only (319 glyphs; U+2315 / U+1F50D are absent), so per the ticket the bar has none.
+- **Focus:** the bar is focusable like a row. **Up from the first node**, or the **`/` key anywhere on the Nodes
+  page**, puts the focus in it. **Down from the bar** lands on the first MATCH (and stays in the bar when nothing
+  matches). **Esc** clears a non-empty query first; a second Esc (query now empty) leaves the bar for the list.
+- **Typing (bar focused):** printable keys append byte-for-byte under the composer's own UTF-8 rule (one event is
+  one byte; Backspace drops the whole trailing sequence), the list filters **LIVE**, and `N of M` tracks it.
+  While the **LIST** has focus the keys keep their meaning (`a` = advert now, `,` = Settings, Esc = back).
+- **Session-only state:** the query lives in the main loop's variables, never in NVS; leaving the Nodes page and
+  coming back keeps it, the same lifetime as `nodes_focus`.
+- **Empty filtered result:** `No matching nodes` is drawn in the LIST area; `No nodes yet` still means the contact
+  table itself is empty.
+- **Pure + host-tested** (new `core/nodes_search.h`, `test/host/test_nodes_search.cpp`): the matcher (case,
+  substring, UTF-8 name, empty query = all), the `N of M` text, the filtered order, the focus moves (Up from the
+  first row → bar, Down from the bar → first match, Esc twice) and `a` being the advert key only while the list
+  has focus.
+
+### Results
+
+- **Host:** `sh test/host/run.sh` → **exit 0**, **14,053 checks, 0 failures** (before: 13,953; **+100** for the
+  new stage). `test_nodes_search.cpp` covers the matcher (case, substring, UTF-8 name, empty query = all), the
+  `N of M` text (incl. the 999 clamp and a tiny buffer), the filtered order over the page's own order, the UTF-8
+  typing/Backspace rule, the focus moves (Up from the first row → bar, Down from the bar → first match, clamped
+  at the last), Esc twice, `a` only while the list has focus, and the `/` shortcut.
+- **ARM two** (broke the real tree twice, captured the FAIL lines, then restored — `core/nodes_search.h` was
+  diffed identical to its backup afterwards):
+  1. case fold removed from `nodeSearchFold`:
+     `FAIL test/host/test_nodes_search.cpp:80  om::ui::nodeSearchMatches("RPT-Kamera", "KAM")`
+     `FAIL test/host/test_nodes_search.cpp:143  om::ui::nodeSearchFilter(&s, order, 6, "ERA", out) == 2 (got 0, want 2)`
+  2. `nodesFocusUp` no longer enters the bar from the first row:
+     `FAIL test/host/test_nodes_search.cpp:214  bar`
+- **Build:** `make build` exit 0. `application.bin` **0x16fe50 bytes (1,506,896 B, 1471.6 KiB)**, well under the
+  **3,200 KiB per-app ceiling**; the build's own check says `0x901b0` (**28 %**) free in the 2 MB app partition.
+- **Preview:** `shots/2026-11-19-nodes-search.png` (800×480, host render): query `era` in the focused bar,
+  `2 of 6`, and the two matches (`TEST-Vera`, `RPT-Kamera`) with the first one's detail pane.
+- **Files:** new `core/nodes_search.h`, `test/host/test_nodes_search.cpp`; changed `main/nodes_page.h`,
+  `main/nodes_page.cpp`, `main/main.cpp`, `test/host/run.sh`, `tools/preview_tanmatsu.py`, `docs/PROGRESS.md`;
+  new `shots/2026-11-19-nodes-search.png`.
+- **Not done / honest limits:** nothing installed, flashed or committed; EST-445/446/447/448's uncommitted work is
+  untouched and still builds. No magnifier glyph exists in the six faces (319 glyphs, Latin-1 + Latin Extended-A),
+  so the bar draws none, as the ticket allows. The bar reads the **whole** `args_keyboard.utf8[]` sequence the BSP
+  provides (so Alt_R+e lands as `é`, not `e`), and Backspace removes the whole trailing sequence; the Chat
+  composer still types from `ascii` only — a pre-existing difference, not changed here. The query is session-only
+  as asked: it is never written to NVS.
+
+## 2026-11-19 · S514 (EST-447) · Settings part 3: Nodes + Map
+
+> Written by **DeepSeek** for ticket **EST-447**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed or committed. Starts AFTER EST-446 is in the tree; builds inside EST-448's OM Lite tab as the NODES and
+> MAP sections (never as new top tabs) and reuses EST-445's rows, sub-pages and confirm sheet. **Version: 44.**
+> Read the L2's Settings Nodes and Map pages (`firmware/src/ui/settings_layout.h`, `src/main.cpp` cases
+> `SetPage::NodesRoot` / `SetPage::MapRoot`) and ported what applies to the Tanmatsu. This entry is open first,
+> as the ticket asks; Results and files are filled in as the work finishes.
+
+### What this changes
+
+- **NODES section:** `Contacts N / 32` (read only) · **Remove a contact** (a list sub-page: name, type, last heard;
+  Enter raises the shared sheet **"Remove <name>? A DM from it cannot be opened until it advertises again."** and
+  Apply removes it from RAM and rewrites NVS `mcct` without it; its DM history stays on the card) · **Clear all
+  contacts** (the same sheet, same consequence stated) · **New-node notice** On/Off, stored in NVS, default On,
+  honoured where the "New node: ..." notice is raised.
+- **MAP section:** **Start position** Ljubljana (default) / Last position (the last place the Map page was left,
+  NVS, written at most once a minute and on leaving, never per keypress) · **Start zoom** 12..17, default 16,
+  cycled with Enter · **Packs on the card**, read only: which of `slo` / `slo16` / `slo17` are present, their tile
+  counts from the index, and the z17 file size.
+- **RPTR:** unchanged, the one honest line "Repeater admin comes later".
+- **Pure and host-tested:** contact removal + compaction and the clear-all, the encoded NVS `mcct` blob round
+  trip without the removed rows, the start-position choice, the zoom range, and the last-position write rule with
+  the time passed in.
+
+### Results (real exit codes)
+
+- `sh test/host/run.sh` → **exit 0**. **13,953 checks, 0 failures** (before: 13,856; **+97** for the new
+  nodes-map stage). Per stage: core 229 · clock 91 · store 127 · history 84 · layout 62 · mc 115 · dm 45 ·
+  mc-ASan 115 · dm-ASan 45 · dm_send 140 · dm_send-ASan 140 · map 10,393 · txqueue 93 · chat-cards 99 ·
+  menu 28 · **settings 273** · channel-admin 162 · advert 162 · contact-blob 1,190 · channel-scope 94 ·
+  dm guard 169 · **nodes-map 97**. Log: `paperclip-pilot/sweep/est447/host-final.log`.
+- **ARMED, twice** (logs beside it; the rule restored and re-verified after each):
+  - **Compaction removed** (`contactRemoveAt` drops the count without shifting, so the removed row's
+    neighbour stays) → red: `FAIL test_nodes_map.cpp:80  "Bravo" == "Charlie"`, `:117` the same on the
+    round trip (80 checks, 2 failures). `arm1-no-compaction.log`
+  - **The 60 s floor made strict** (`>=` → `>`, so exactly one minute is not due) → red:
+    `FAIL test_nodes_map.cpp:221  om::map::lastPositionWriteDue(false, true, 61000, 1000)` (92 checks,
+    1 failure). `arm2-write-floor.log`
+- `make build` → **exit 0**. `application.bin` **0x16f830 = 1,505,328 B (1,470.0 KiB)** — **45.9 % of the
+  3,200 KiB per-app ceiling**; the build's own check says `0x907d0` (**28 %**) free in the 2 MB app
+  partition. Log: `paperclip-pilot/sweep/est447/build-final.log`.
+- `python3 tools/preview_tanmatsu.py settings_nodes settings_map settings_omlite settings_chat` → **exit 0**:
+  `shots/2026-11-19-settings-nodes.png` (the NODES section: Contacts 3/32, Remove a contact focused, Clear
+  all contacts, New-node notice On, CHAT below), `shots/2026-11-19-settings-map.png` (scrolled to MAP: Start
+  position, Start zoom, the three pack rows, RPTR), and the om-lite/chat renders re-run because their old
+  NODES/MAP placeholder rows are gone.
+
+### Files changed
+
+- **new** `core/contact_admin.h` — remove one contact with compaction (and the vacated row zeroed), the
+  clear-all, the type words (`client`/`repeater`/`room`/`sensor`/`node`, now the one definition the advert
+  log also uses), and the new-node notice's stored rule (absent/corrupt = On, only 0 = Off).
+- **new** `core/map_settings.h` — the start-position choice (Ljubljana unless a stored 1), the 12..17 start
+  zoom with its default, the last-position write rule (`lastPositionWriteDue`, time passed in, wrap-safe),
+  and `startViewFromSaved` (keeps the saved CENTRE when the start zoom differs).
+- **new** `test/host/test_nodes_map.cpp` — the 97 checks and two arm targets.
+- `core/module.h`/`core/settings_model.h`: unchanged (the hook already generalised settings as data).
+- `main/mc_link.h/.cpp` — `contactsRemove` / `contactsClear` under the store lock, raising the existing
+  structural dirty flag so `contactsPersistTick()` rewrites `mcct` on the same pass; the new-node notice
+  cached from NVS `mcset`/`newnode` and honoured where "New node: ..." is set; `advertTypeName` now
+  delegates to `contactTypeLabel`.
+- `main/map_link.h/.cpp` — NVS `mcset`: start position, start zoom, last view (z + world pixel); the
+  last-position write; `packStatus()` (presence, tile count from the index size, file bytes), cached per pack
+  and quiet when a pack is absent.
+- `main/main.cpp` — the NODES section (read-only Contacts, Remove-a-contact list sub-page with the shared
+  sheet, Clear-all with the same sheet, New-node notice toggle), the MAP section (two cycle rows + three
+  read-only pack rows), the NODES list key branch and confirm targets, the row counts derived with
+  `sizeof` (EST-448 had left NODES/MAP at 1), and the Map page: place from Last position / Start zoom on
+  the first draw, mark a move, write per the rule while open and on leaving, re-place when a start row
+  changes.
+- `test/host/run.sh` — the nodes-map stage (links `contact_blob.cpp` + `mc_store.cpp`, so the round trip is
+  the real codec).
+- `tools/preview_tanmatsu.py` — one `_omlite_rows()`/`_draw_omlite_rows()` pair used by all four OM Lite
+  previews, plus `settings_nodes` and `settings_map`.
+- `docs/PROGRESS.md` — this entry.
+- `shots/2026-11-19-settings-nodes.png`, `shots/2026-11-19-settings-map.png` (+ om-lite/chat re-rendered).
+
+### Self-sweep (what it found, and what it did not)
+
+- **Found and fixed — EST-448 built only one row of NODES and MAP.** `omLiteSettings` passed a hard-coded
+  `1` for both sections, so an EST-447 provider with four NODES rows and five MAP rows would have drawn only
+  its first row each. Both counts are now `sizeof(array)/sizeof(array[0])`.
+- **Found and fixed — a stale root focus after Clear all.** The Clear sheet is raised at the ROOT, and the
+  first version called `closeNodesPage()` on Apply; `closeSubPage()` at depth 0 restores the last sub-page's
+  saved focus, so the Settings page would jump to a row the user never left. The Apply path now closes only
+  when a sub-page is actually open.
+- **Found and fixed — "now ago".** `formatAge` answers `now` for a fresh advert; the list row now says
+  "client · now" instead of "client · now ago".
+- **Swept the pack rows:** they read `maplink::packStatus`, which caches per pack (a getter runs on every
+  draw) and says `no card` when the SD never mounted, `absent` for a missing pack, so the MAP section cannot
+  turn into 30 failed `f_stat`s on a card-less boot.
+- **Swept the write rule's corners:** no change = no write; leaving ignores the floor; a 32-bit wrap is
+  measured as the real gap (both "not yet" and "due" pinned). The Map save is additionally gated on the map
+  being ready and the card mounted, so a key press on a "No card" page cannot store a view that was never
+  drawn.
+- **Swept the removal against arming:** the list row's id is the STORE index captured from the live order;
+  a stale row is refused (`index >= count`) rather than removing a neighbour, and the confirm text's count
+  is never used as a target for Clear all.
+
+### What could NOT be checked
+
+- **Nothing was installed, flashed or committed.** No device, no serial port, no server.
+- The panel on glass: the NODES list's focus ring/scroll with 32 contacts, the "now"/age value column at
+  800 px, and the sheet over the list.
+- NVS after a real reboot: `mcct` after a removal/clear, `mcset`'s start position/zoom/last view across a
+  power cycle. The codec and the rules are host-tested; the flash on the device is not.
+- The real pack counts and the z17 file size on Filip's card: the preview's numbers are invented (rule 9)
+  and `packStatus` was not run against the card.
+- The once-a-minute rule at wall-clock speed on the device (host-tested at exact instants only).
+
+### Next step
+
+A device session should walk: remove one contact (watch `contacts: removed row N` and the next
+`contacts: N stored to NVS`), clear all, toggle the notice and hear a new advert silently, set Last position
+and z17, leave the Map page (watch `map settings: last view saved`), reopen it and land on the same place.
+EST-447 completes the three-part Settings rebuild; the next ticket can be the whole-Om-Lite review.
+
+## 2026-11-19 · S514 (EST-446) · Settings part 2: channels + scope
+
+> Written by **DeepSeek** for ticket **EST-446**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed or committed. Starts AFTER EST-445 and EST-448 (their uncommitted work is the base). **Version: 44.**
+> This entry is open first, as the ticket asks; Results and files are filled in as the work finishes.
+>
+> **Never in the tree:** no channel key appears in this repo, the notes, a test or a log line. The host oracle uses
+> derivable hashtag keys and public PSK-style vectors only; the private "Don't Panic" key exists only on the device.
+
+### What this changes
+
+- **Inside the OM Lite tab, not a second Settings:** the ticket's "CHAT tab" is the **CHAT section** of the OM Lite
+  tab from EST-448 (the per-app structure is the newer decision). Its rows are the device's live channels.
+- **CHANNELS:** one row per channel — name left; right `scope #si` / `no scope` / `default`; a chevron into the
+  channel page. Below them `Add hashtag channel` and `Add channel by key`.
+- **Channel page:** Name (read-only for a `#hashtag`; a private channel can be renamed), Region / scope (the L2's
+  Default / No scope / Region choice, Region opens the shared field), Key (base64 shown ON SCREEN only after the
+  confirm "Show the secret key on screen?"), Remove channel (the shared sheet: "Remove <name>? Its history stays on
+  the card."). Index 0 is removable like any other.
+- **Add:** hashtag normalisation is the L2's (`channels.cpp:424-441`): one `#`, no spaces, LOWERCASED; the key is
+  `sha256(tag)[0..15]`. Add-by-key uses the L2's base64 decoder rules (`channels.cpp:388-410`): spaces/tabs
+  skipped, `=` ends, bad characters refused, exactly 16 bytes. A duplicate is refused with a notice.
+- **Storage:** the existing NVS `mcch` layout (`cnt`, `n<i>`, `k<i>`, `s<hh>`), rewritten in a safe order — new
+  entries first, `cnt` last, cleanup after — so a power cut at any step leaves a loadable table. Remove compacts
+  the indices and erases `s<hh>` only when no remaining channel has that hash.
+- **No restart:** the main task writes NVS, then asks the radio task (the one owner of the table) to reload; the
+  chat list and the radio's view see the new table on its next loop.
+
+### Results (real exit codes)
+
+- `sh test/host/run.sh` → **exit 0**. **13,856 checks, 0 failures** (before: 13,680; +162 for the new
+  channel-admin stage and **+14** for the list sub-page keys). Per stage: core 229 · clock 91 · store 127 ·
+  history 84 · layout 62 · mc 115 · dm 45 · mc-ASan 115 · dm-ASan 45 · dm_send 140 · dm_send-ASan 140 ·
+  map 10,393 · txqueue 93 · chat-cards 99 · menu 28 · **settings 273** · **channel-admin 162** · advert 162 ·
+  contact-blob 1,190 · channel-scope 94 · dm guard 169. Log: `paperclip-pilot/sweep/est446/host-final.log`.
+- **ARMED, twice** (logs beside it; `channel_admin.cpp` restored and re-verified after each):
+  - **Hashtag lowercasing removed** → red: `FAIL test_channel_admin.cpp:75  "#Slovenija" == "#slovenija"`,
+    `:108` the same on the hashlib vector (124 checks, 2 failures). `arm1-lowercase.log`
+  - **`cnt` written FIRST instead of last** (the unsafe order) → red:
+    `FAIL test_channel_admin.cpp:345  plan[0].op == meshcore::ChannelNvsOp::SetKey` (88 checks, 1 failure).
+    `arm2-count-first.log`
+- `make build` → **exit 0**. `application.bin` **0x16d7c0 = 1,497,024 B (1,461.9 KiB)** — **45.7 % of the
+  3,200 KiB per-app ceiling**; the build's own check says `0x92840` (**29 %**) free in the 2 MB app partition.
+  Log: `paperclip-pilot/sweep/est446/build-final.log`.
+- `python3 tools/preview_tanmatsu.py settings_chat` → **exit 0**: `shots/2026-11-19-settings-chat.png`
+  (800×480), the OM Lite tab's CHAT section with the four real channels and their scopes, the focus ring on
+  the first channel and the two add rows.
+
+### Self-sweep (what it found, and what it did not)
+
+- **Found and fixed — every EST-448 row became ambiguous.** The first row-aware getter was a second
+  `(Core&, const char*, …, SettingsValueFn, …)` overload; a row that passed `nullptr` as its getter then
+  matched BOTH constructors, and test_settings.cpp stopped compiling. The getter now travels in a
+  `RowValueFn` wrapper, so `nullptr` can never select it.
+- **Found and fixed — a duplicated scope erase.** Two removed slots can share one 1-byte hash; the first
+  plan emitted `EraseScope` twice for it. It now emits each hash once (the test pins `erased == 1`).
+- **Found and fixed — a stale sub-page name.** The channel page first read a name captured by the TAB
+  builder, so a rename would show the old label for one frame. It reads `mc_link::channelName()` live.
+- **Swept against call sites:** every `beginConfirm` now sets a target (name / remove / show key) and Cancel
+  cannot reach any of the three; the field's character rule is per page (a hashtag allows `#` and lowercases
+  in the normaliser, the key allows base64 + spaces, the region uses MeshCore's own `is_name_char`); the
+  text field was widened to 64 bytes for a pasted key while the node-name path keeps its 31-byte rule.
+- **Not swept / not visible here:** the panel itself (nothing installed or flashed); the real NVS after a
+  reboot; and the store's channel-index remap after a remove — the history FILES stay on the card (the
+  ticket's wording) but the RAM message ring is still indexed by the OLD slot until the next boot. That is
+  the one honest limitation of this part.
+
+### Files changed
+
+- **new** `core/channel_admin.h/.cpp` — hashtag normalisation (the L2's `channels.cpp:424-441`), the
+  sha256 tag key, base64 encode/decode (the L2's `channels.cpp:76-85, 388-410`), duplicate refusal, the
+  scope row text, and `channelRewritePlan` (new entries first, `cnt` last, cleanup after; one `EraseScope`
+  per removed hash that no survivor carries).
+- **new** `test/host/test_channel_admin.cpp` — 162 checks: normalisation, keys against Python's hashlib,
+  base64 good/short/bad/too-long, duplicate refusal, the rewrite plan cut after EVERY step (a counted slot
+  always has a key, no invented key, the full plan loads `after`), remove + compaction, scope cleanup with
+  and without a hash collision, and the three row texts.
+- `core/settings_model.h` — the row-aware getter (`RowValueFn`), so one row per channel can read its slot.
+- `core/settings.h` — `settingsSubPageKey`: a LIST sub-page uses the same row arithmetic and events.
+- `core/CMakeLists.txt` — `channel_admin.cpp`.
+- `main/mc_link.h/.cpp` — `channelsAddHashtag`, `channelsAddByKey`, `channelsRename`, `channelsRemove`,
+  `channelsKeyCopy`, `channelApplyPlan` (commit per step), and the radio task's reload flag/revision in
+  `serviceRequests()`; names are logged, keys never.
+- `main/main.cpp` — the OM Lite CHAT section built from the LIVE table (one row per channel + the two add
+  rows), the channel / scope / add-by-key list sub-pages, the shared field for hashtag, region and key, the
+  one confirm sheet for remove and "show the key", and the field's per-page rules.
+- `main/settings_page.h/.cpp` — a list sub-page draws through the same body renderer as a tab; the shared
+  field takes its hint and maximum from the page.
+- `test/host/run.sh` — the channel-admin stage and the Python hashlib/base64 oracle (temp dir, never
+  committed).
+- `test/host/test_settings.cpp` — +14 checks for the list sub-page keys.
+- `tools/preview_tanmatsu.py` — `settings_chat`.
+- `docs/PROGRESS.md` — this entry.
+- `shots/2026-11-19-settings-chat.png`.
+
+### Items done (the ticket's numbers)
+
+1. **CHAT section** (the ticket's "CHAT tab", inside EST-448's OM Lite tab): one row per channel, name left,
+   `scope #si` / `no scope` / `default` right, a chevron; then **Add hashtag channel** and **Add channel by
+   key**.
+2. **Channel page:** Name (Info for a `#hashtag`, editable for a private channel) · Region / scope (the L2's
+   Default / No scope / Region, Region opens the shared field) · Key "share" after the confirm **"Show the
+   secret key on screen?"**, on screen only, never logged · **Remove channel** through the sheet **"Remove
+   <name>? Its history stays on the card."** Index 0 removable like any other (the host test removes 0 and 1).
+3. **Add:** the L2's normalisation (one `#`, no spaces, lowercased) and `sha256(tag)[0..15]`; add-by-key uses
+   the L2's base64 rules; duplicates and bad keys are refused with a notice.
+4. **Storage:** the existing `mcch` layout rewritten in the safe order (host test cuts after every step),
+   remove compacts and erases `s<hh>` only when no survivor has that hash, and the radio task reloads the
+   live table + its view without a restart.
+5. **Host tests + two arms** — above.
+6. **Preview** — `shots/2026-11-19-settings-chat.png` with the four real channels: Don't Panic `default`,
+   Public `no scope`, #slovenija `#si`, #slovenia `#europe`.
+
+### What could NOT be checked
+
+- **Nothing was installed, flashed or committed.** No device, no serial port, no server.
+- The panel on glass: the list sub-page's focus ring/scroll, the key page's base64 at 800 px, and the
+  confirm sheet over a sub-page (drawn by the same code, but not photographed).
+- NVS after a real power cut and a reboot; the reload's timing against a frame the user is looking at.
+- The RAM message ring's channel indices after a remove (see the self-sweep's last bullet).
+
+### Next step
+
+**EST-447** fills the NODES and MAP sections from the same module hook (contacts/keys/favourites, map tiles,
+zoom range, centre). A device session should then walk: add `#si`, remove channel 0, show a private key,
+read the log to prove the key never appears.
+
+## 2026-11-19 · S514 (EST-448) · Settings per app: one tab per owner, modules supply their own rows
+
+> Written by **DeepSeek** for ticket **EST-448**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed or committed. Starts AFTER EST-445 is in the tree and BEFORE EST-446/447. **Version: 44.** This entry is
+> open first, as the ticket asks; Results and files are filled in as the work finishes.
+
+### What this changes
+
+- **Top tabs are owners, not functions:** General (the core) · OM Lite · OPS-TOC · Mesh-Torry, in the start menu's
+  order after General. The tab list is DERIVED from the module registry, never a second hard-coded table.
+- **The module hook** (`core/module.h`): a module returns its settings as data — a list of sections (header + rows),
+  each row carrying its label, a value getter that reads the real store, a kind (info / toggle / cycle / sub-page /
+  action) and its handler. The Settings frame draws whatever the module returns.
+- **A module with no settings data** (`settings == nullptr`) shows one dim line, "Settings come with the app".
+  OPS-TOC and Mesh-Torry are both still LATER, so that is what their tabs show today.
+- **A stopped module still shows its settings** (they are stored values); an action row that needs the module
+  running is refused with a notice instead of silently doing nothing.
+- **The OM Lite tab** is one scrolling list with the same section treatment as General: NODES · CHAT · MAP · RPTR.
+  RPTR carries the one honest line "Repeater admin comes later". EST-445's four separate Nodes/Chat/Map/RPTR tabs
+  move here as sections; EST-446 (channels) and EST-447 (contacts + map) will fill the CHAT / NODES / MAP sections.
+- **The `,` key** from an OM Lite page opens the OM Lite tab scrolled to that page's section (Nodes -> NODES,
+  Chat -> CHAT, Map -> MAP, RPTR -> RPTR). From the start menu (`,`) or the Settings bar it opens General.
+- **Kept from EST-445:** the frame's key arithmetic (tabs clamped, focus skipping section headers, scroll following
+  focus, Esc's two levels), the one shared confirm sheet, and every value read from its real source.
+
+### Results (real exit codes)
+
+- `sh test/host/run.sh` → **exit 0**. **13,680 checks, 0 failures** (before this ticket: 13,604). The Settings
+  stage is now **259 checks** (was 183; +76 for the registry tabs, the module hook/placeholder, the `,` target and
+  NeedsRunning). Per stage: core 229 · clock 91 · store 127 · history 84 · layout 62 · mc 115 · dm 45 · mc-ASan 115 ·
+  dm-ASan 45 · dm_send 140 · dm_send-ASan 140 · map 10,393 · txqueue 93 · chat-cards 99 · menu 28 · **settings 259** ·
+  advert 162 · contact-blob 1,190 · channel-scope 94 · dm guard 169. Log:
+  `paperclip-pilot/sweep/est448/host-final.log`.
+- **ARMED, twice** (logs in `paperclip-pilot/sweep/est448/`; `settings.h` restored and re-verified after each):
+  - **Tab order** — the registry loop walked BACKWARDS, so the tabs were no longer General · OM Lite · OPS-TOC ·
+    Mesh-Torry → red at `test_settings.cpp:299` `"Mesh-Torry" == "OM Lite"`, `:334` `om != nullptr`, `:464`
+    (229 checks, 3 failures). `arm1-tab-order.log`
+  - **`,` section mapping** — Chat mapped to section 0 (NODES) instead of 1 (CHAT) → red at
+    `test_settings.cpp:365` `t.section == 1 (got 0, want 1)` (246 checks, 1 failure). `arm2-comma-section.log`
+- `make build` → **exit 0**. `application.bin` **0x16a8c0 = 1,484,992 B (1,450.2 KiB)** — **45.3 % of the
+  3,200 KiB per-app ceiling**, well under it; the build's own check says `0x95740` (**29 %**) free in the 2 MB app
+  partition. Log: `paperclip-pilot/sweep/est448/build-final.log`.
+- `python3 tools/preview_tanmatsu.py settings_general settings_omlite settings_opstoc` → **exit 0**:
+  `shots/2026-11-19-settings-general.png`, `shots/2026-11-19-settings-omlite.png` (OM Lite tab, CHAT focused/in
+  view, NODES · CHAT · MAP · RPTR) and `shots/2026-11-19-settings-opstoc.png` (the one honest dim line).
+
+### Self-sweep (what it found, and what it did not)
+
+- **Found and fixed:** `kSettingsMaxTabs` was 8 while the registry allows **8 modules + General = 9**, so the last
+  app's tab would silently vanish at full capacity. It is now `Registry::kMaxModules + 1`. Also, a shrunken
+  registry could leave the frame on a tab index that no longer exists; the draw now clamps it with
+  `settingsTabIndex` first.
+- **Swept against call sites:** the module hook (null provider in one helper), every row's getter (called on every
+  draw, never a display copy), the frame's Enter/NeedsRunning path, the shell's id → row mapping for the Name
+  sub-page, and the `,` handler's precedence over the menu branch (an open Chat composer still eats its comma).
+- **Not swept / not visible here:** the panel itself (nothing installed or flashed), and real NVS values after a
+  reboot.
+
+### Files changed
+
+- **new** `core/settings_model.h` — the data shape: `SettingRow` (label, value getter, kind Info/Toggle/Cycle/
+  SubPage/Action, handler, `needs_running`), `SettingsSection` (header + rows), `SettingsHook` and
+  `kSettingsPlaceholder`.
+- `core/module.h` — the hook itself: `SettingsHook settings` as the last `Module` field.
+- `core/settings.h` — the tab list DERIVED from the registry (`settingsTabDefs`), `settingsTargetForPage`
+  (`tab + section`), section-aware focus/scroll arithmetic, `focusSection`, the new row kinds/events
+  (`ToggleValue`, `NeedsRunning`), and the unchanged name/advert/confirm rules. `kAppVersion` stays `"44"`.
+- `main/settings_page.h/.cpp` — dynamic owner tabs, sections from the tab's provider, each value read through its
+  getter, the one-line placeholder, and the same focus ring / thumb / confirm sheet as EST-445.
+- `main/main.cpp` — General as the CORE's data (sections + getters + Advert-now/automatic-advert handlers), OM Lite's
+  four-section provider, the two LATER apps' `settings = nullptr`, `,` landing on tab+section, and the key branch
+  calling the row's handler instead of switching on ids.
+- `test/host/test_settings.cpp` — 259 checks: registry tab order (including a reversed registry), a stopped
+  module still answering, `nullptr` → the one-line state, `,` → tab+section for all four pages, a LATER tab
+  present, section jump/scroll, header-skipping focus, NeedsRunning, Cancel/Apply, and the EST-445 name/advert/
+  menu checks.
+- `test/host/run.sh` — links `registry.cpp` + `alloc.cpp` into the Settings stage (the tab list needs the real
+  registry).
+- `test/host/test_core.cpp` — the new `Module::settings` field in every test module (all `nullptr`).
+- `tools/preview_tanmatsu.py` — `settings_omlite` + `settings_opstoc`, and General's tab row is now the four owners.
+- `docs/PROGRESS.md` — this entry.
+- `shots/2026-11-19-settings-omlite.png`, `shots/2026-11-19-settings-opstoc.png` (+ General re-rendered).
+
+### Items done (the ticket's numbers)
+
+1. **Top tabs** — General · OM Lite · OPS-TOC · Mesh-Torry, derived from the registry in menu order, General first.
+2. **Module hook** — `Module::settings` returning `SettingsSection*` with rows (label, getter, kind, handler); a
+   `nullptr` hook is the one dim line; a stopped module still shows stored values and an action that needs it
+   running is refused with a notice.
+3. **OM Lite tab** — one scrolling list: NODES · CHAT · MAP · RPTR (RPTR = "Repeater admin comes later"); `,` from
+   Nodes/Chat/Map/RPTR lands on that section; menu/`,`/Settings bar land on General.
+4. **EST-445 kept** — frame key rules, confirm sheet, read-from-real-source; the four new host checks plus two arms
+   are above.
+5. **Previews** — both PNG paths above.
+
+### What could NOT be checked
+
+- **Nothing was installed, flashed or committed.** The frames are host renders; the four-tab row, the section
+  scroll on glass, the placeholder line and the Name confirm sheet still need a device session.
+- **`main/` is not host-tested.** The providers, getters and the key branch compile with `make build`; every
+  DECISION they call is in `core/settings.h` and tested.
+- **Opening Settings still starts OM Lite first** (it is the module that owns `Page::Settings`), so on the device
+  General is reached with OM Lite running. The data model and tests cover the stopped-module case, but the page
+  cannot be drawn with every module stopped until Settings gets its own core-owned page.
+- **NVS after a reboot** and the real 1/3/6/12 h schedule were not run.
+
+## 2026-11-19 · S514 (EST-445) · Settings, part 1: the frame + General
+
+> Written by **DeepSeek** for ticket **EST-445**: fenced Paperclip run, no session start/end, nothing installed,
+> flashed or committed. On top of commit `d3943e8` (v43) plus EST-444's uncommitted work, kept as it is. **Version:
+> 44.** Read `BRIEF.md`, `docs/PLAN.md` §4-5, this file's S513-S514 entries, the L2's `ui/settings_layout.h`,
+> `ui/settings_prefs.h`, `ui/settings_actions.h`, `ui/screen_settings.*`, `core/router.*`, `core/pages.h`,
+> `main/main.cpp`, `main/chrome.*` and `tools/preview_tanmatsu.py`. This entry is written FIRST, as the ticket asks;
+> Results is filled in as the work finishes.
+
+### What this part builds (and what it deliberately leaves to EST-446/447)
+
+- **The frame:** five tabs (General · Nodes · Chat · Map · RPTR), Left/Right clamped; Up/Down over the rows, clamped
+  at both ends and skipping section headers; the scroll follows the focused row. Enter opens a sub-page, cycles a
+  value, or runs a row action. Esc closes a sub-page, then leaves Settings for the page it was opened from. The
+  Settings key (`,`) inside a sub-page returns to the Settings root (the router's "own key = page top" rule).
+- **Reaching it:** from the start menu, Down from the three cards lands on a full-width Settings bar; from any OM
+  Lite page, `,` opens Settings on the tab that matches the page (`settingsTabForPage`: Nodes→Nodes, Chat→Chat,
+  Map→Map, RPTR→RPTR, menu→General). Every hint bar shows `, settings`.
+- **General tab, part 1 only:** Name (sub-page + confirm sheet), Public key, Advert now, Automatic advert
+  (Off/1/3/6/12 h), then the read-only RADIO (the numbers actually pushed to the chip, from `core/radio_plan`) and
+  DEVICE sections. Nodes/Chat/Map/RPTR show "coming next" bodies: EST-446/447.
+- **One shared confirm sheet** (the L2's EST-422 pattern): the row keeps its OLD value behind the sheet until
+  Apply; Cancel changes nothing.
+
+### Results (real exit codes)
+
+- `sh test/host/run.sh` → **exit 0**. **13,604 checks, 0 failures** (before this ticket: 13,393). The new
+  `test_settings` stage is **183 checks**; the start menu's stage is now **28** and is actually RUN — the old
+  `run.sh` compiled `test_menu_cards.cpp` but never executed it, so the "before" number did not include it.
+  Per stage: core 229 · clock 91 · store 127 · history 84 · layout 62 · mc 115 · dm 45 · mc-ASan 115 · dm-ASan 45 ·
+  dm_send 140 · dm_send-ASan 140 · map 10,393 · txqueue 93 · chat-cards 99 · menu 28 · **settings 183** · advert 162 ·
+  contact-blob 1,190 · channel-scope 94 · dm guard 169. Full log:
+  `paperclip-pilot/sweep/est445-host-final3.log`.
+- **ARMED, twice** (the ticket's two reds; copies under `paperclip-pilot/sweep/est445/arm-*`):
+  - **Name rule** — `[ ] \ : , ? *` wrongly allowed → the test is red:
+    `FAIL test/host/test_settings.cpp:63  !tm::nodeNameCharAllowed('[')`;
+    `FAIL test/host/test_settings.cpp:102  !tm::nodeNameValid("A[")`;
+    `FAIL test/host/test_settings.cpp:126  !tm::nodeNameDraftPut('[', 3, &ok)` (163 checks, 3 failures).
+  - **Name length** — the over-long check removed, so a 32-byte name would be silently truncated →
+    `FAIL test/host/test_settings.cpp:110  !tm::nodeNameApply(max32, applied, sizeof(applied))`
+    (180 checks, 1 failure).
+  - **Frame keys** — tabs wrapping instead of clamping, focus stepping onto section headers, scroll not following
+    focus → `FAIL test/host/test_settings.cpp:223  tm::settingsTabMove(0, -1) == 0 (got 4, want 0)`;
+    `FAIL test/host/test_settings.cpp:252  tm::settingsFocusMove(kRows, kRowCount, 3, 1) == 5 (got 4, want 5)`;
+    `FAIL test/host/test_settings.cpp:288  r.event == tm::SettingsEvent::None` (132 checks, 3 failures).
+  - With the real `core/settings.h`: **183 checks, 0 failures**.
+- `make build` → **exit 0**. `application.bin` **0x16a060 = 1,482,848 B** (1,448.09 KiB) — **45.3 % of the
+  3,200 KiB per-app ceiling**, well under it; the build's own size check says `0x95fa0` (**29 %**) free in the
+  2 MB app partition. Log: `paperclip-pilot/sweep/est445-build-final3.log`.
+- `python3 tools/preview_tanmatsu.py settings_general` → **exit 0**, wrote
+  `shots/2026-11-19-settings-general.png` (800×480).
+
+### Files changed
+
+- **new** `core/settings.h` — the frame's pure rules: five tabs + `settingsTabForPage`, focus/scroll arithmetic
+  that skips section headers, `SettingsFrame` + the shared confirm sheet state, `settingsKey`, the node-name rule
+  (1..31 printable ASCII, `[ ] \ : , ? *` refused, trimming), the advert-interval mapping (Off/1/3/6/12 h) and
+  `advertScheduleDue`, and `kAppVersion = "44"`.
+- **new** `main/settings_page.h/.cpp` — the drawing only: status bar, page head, tab row, section rows, label/value
+  rows, vector chevron, gold focus ring, scroll thumb, the Name sub-page and the shared sheet.
+- **new** `test/host/test_settings.cpp` — 183 checks (name rules, interval mapping incl. Off vs the manual 'a' path,
+  tabs/focus/scroll, Enter by row kind, Esc's two levels, Cancel/Apply, the menu's Settings bar).
+- `core/menu_cards.h/.cpp` — the menu is now three cards + the full-width Settings bar (`kMenuSettingsFocus`),
+  Down from any card reaches it, Up returns to the first card, `menuEnterActionAt` answers `OpenSettings`.
+- `core/mc_wire.h` — `kFloodPathHashSize = 2`, the ONE value `advertBuild` / `buildScopedChannelText` are given
+  and the RADIO row reads.
+- `main/mc_link.h/.cpp` — the node name now comes from NVS `mcid/name` (default `TNMT (SI)`) and feeds adverts AND
+  the channel-text sender; `setNodeName`; the automatic interval from `mcid/advint` (seconds, 0 = Off) read by
+  `serviceRequests()` every loop; `setAdvertIntervalSeconds`; the two flood-builder literals use
+  `kFloodPathHashSize`.
+- `main/main.cpp` — the Settings state and row builder (every value read from its real source), the key branch
+  (frame, Name editor, confirm sheet), `,` opens Settings on the page's tab, Esc returns to the page it came from,
+  `module.pages` now includes Settings, and the menu's Settings bar / Down focus.
+- `main/launcher_page.h/.cpp` — the full-width Settings bar under the three cards and the `, settings` hint.
+- `main/chrome.cpp` — hint chips may be five and stop before the symbol cluster; compacted spacing so the ticket's
+  Settings hints all fit.
+- `main/CMakeLists.txt` — `settings_page.cpp` in the app.
+- `main/nodes_page.cpp`, `main/chat_page.cpp`, `main/map_page.cpp` — `, settings` added to every hint bar.
+- `test/host/run.sh` — the new Settings stage, and `"$MENU"` so the menu test is actually executed.
+- `test/host/test_menu_cards.cpp` — the Settings-bar focus/Enter rules.
+- `tools/preview_tanmatsu.py` — `settings_general` renderer and the PNG above.
+- `docs/PROGRESS.md` — this entry.
+
+### What could NOT be checked
+
+- **Nothing was installed, flashed or committed.** The look is a host render, not a panel frame; the tab row, the
+  focus ring, the Name editor and the confirm sheet on glass are for the next device session.
+- **NVS on the device.** `mcid/name` and `mcid/advint` are read/written through the same NVS calls as the identity
+  and channel code, but the write survives a reboot only on the panel: this run could not reboot the device.
+- **The schedule over hours.** The mapping and `advertScheduleDue` are host-tested; a real 3 h (or Off) wait is not.
+- **`main/` is not host-tested.** `settings_page.cpp`, the `main.cpp` branches and the NVS glue need the IDF; they
+  are compiled by `make build` and reviewed, while every DECISION they call is in `core/settings.h` and tested.
+- **A DM's "sender name".** MeshCore direct messages carry no name field (the peer is identified by its key), so the
+  rename affects adverts and channel-text senders — the two places the old `kNodeName` was used. The DM view still
+  names the peer from its contact advert.
+- **The full General tab does not fit one 800×480 screen.** The body scrolls and the preview shows the top (NODE,
+  ADVERT, the start of RADIO) with the scroll thumb; the DEVICE rows are built and drawn when scrolled to.
+
 ## 2026-11-19 · S514 (EST-444) · own symbol key = page top; Enter key cap
 
 > Written by **DeepSeek** for ticket **EST-444**: fenced Paperclip run, no session start/end, nothing installed,

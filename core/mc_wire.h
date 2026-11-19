@@ -38,6 +38,11 @@ constexpr size_t   kMaxPlain     = 168;   // MAX_PACKET_PAYLOAD - CIPHER_BLOCK_S
 constexpr size_t   kMaxNameChars = 31;
 
 // --- header bits (Packet.h:5-11, 25-40) ----------------------------------------
+// EST-445: the flood frames this app sends (an advert and a channel text) use 2-byte path hashes. The
+// Settings RADIO section reads this ONE value, so the row cannot drift from what advertBuild and
+// buildScopedChannelText are actually given.
+constexpr uint8_t kFloodPathHashSize = 2;
+
 constexpr uint8_t kRouteTransportFlood = 0x00;   // flood + two transport codes (Packet.h:14)
 constexpr uint8_t kRouteFlood     = 0x01;
 constexpr uint8_t kTypeGrpTxt     = 0x05;

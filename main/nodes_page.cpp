@@ -6,6 +6,7 @@
 
 #include "chrome.h"
 #include "launcher_page.h"   // drawText* / textBaseline
+#include "nodes_search.h"    // S514/EST-449: the "N of M" text (one home for the rule)
 #include "tm_theme.h"
 #include "../../firmware/src/ui/theme.h"
 
@@ -109,14 +110,38 @@ void drawNodes(Screen& s, const NodesView& v) {
     const int work_top = head_bot;
     const int work_bot = H - kTmHintH;
 
-    // ---- list header
-    drawText(s, Face::Meta, list_x0, work_top + 24, "NODES", kDimmer);
-    char count[32];
-    snprintf(count, sizeof(count), "%d of %d", v.order_count, (int)(v.store ? v.store->count : 0));
-    drawTextRight(s, Face::Hint, list_x1 - kTmRingInset, work_top + 24, count, kDimmer);
+    // ---- S514/EST-449: the search bar is the list's TOP ROW, always visible.
+    // ONE field (Filip's L2 correction), the query on the left and "N of M" on the right, both clear of the
+    // border. The generated faces carry Latin-1 + Latin Extended-A only and have no magnifier glyph, so the
+    // bar draws none; the dim placeholder says what the field is.
+    const int bar_x0 = list_x0;
+    const int bar_x1 = list_x1 - kTmRingInset;
+    const int bar_w  = bar_x1 - bar_x0;
+    const int bar_y  = work_top + 4;
+    const int bar_h  = 30;
+    s.fillRect(bar_x0, bar_y, bar_w, bar_h, kFieldBg);
+    s.frame(bar_x0, bar_y, bar_w, bar_h, v.search_focused ? (int)kTmRingW : 1,
+            v.search_focused ? (uint16_t)kAcc : (uint16_t)kLine);
 
-    int       y       = work_top + 34;
+    const char* query     = (v.query != nullptr) ? v.query : "";
+    const bool  has_query = query[0] != 0;
+    drawTextClipped(s, Face::Body, bar_x0 + 12, textBaseline(s, Face::Body, bar_y, bar_h),
+                    bar_w - 12 - 84, has_query ? query : "search nodes",
+                    has_query ? (uint16_t)kInk : (uint16_t)kDimmer);
+    char count[32];
+    nodeSearchCountText(count, sizeof(count), v.order_count, (int)(v.store ? v.store->count : 0));
+    drawTextRight(s, Face::Hint, bar_x1 - 12, textBaseline(s, Face::Hint, bar_y, bar_h), count, kDim);
+
+    int       y       = bar_y + bar_h + 6;
+    const int rows_top = y;
     const int visible = (work_bot - 8 - y) / kNodesRowH;
+
+    // An empty FILTERED result says so in the list area; an empty contact table is the right pane's
+    // "No nodes yet", so the two cannot be confused.
+    if (v.order_count == 0 && v.store != nullptr && v.store->count > 0) {
+        drawTextCentred(s, Face::Body, (list_x0 + list_x1) / 2, rows_top + (work_bot - 8 - rows_top) / 2,
+                        "No matching nodes", kDim);
+    }
     // Keep the focused row on screen without moving the list until it must: the same rule as the Launcher.
     int first = 0;
     if (v.focused >= visible) first = v.focused - visible + 1;
@@ -124,7 +149,7 @@ void drawNodes(Screen& s, const NodesView& v) {
 
     for (int i = first; i < v.order_count && y + kNodesRowH <= work_bot - 8; i++) {
         const mc::Contact& c  = v.store->c[v.order[i]];
-        const bool         f  = (i == v.focused);
+        const bool         f  = (i == v.focused) && !v.search_focused;
         if (f) {
             s.fillRect(list_x0, y, list_x1 - kTmRingInset - list_x0, kNodesRowH - 2, kSelBg);
             s.frame(list_x0, y, list_x1 - kTmRingInset - list_x0, kNodesRowH - 2, kTmRingW, kAcc);
@@ -153,7 +178,7 @@ void drawNodes(Screen& s, const NodesView& v) {
 
     // The scroll indicator: only when there is something above or below, like the L2's gold thumb.
     if (v.order_count > visible && visible > 0) {
-        const int track_top = work_top + 34, track_bot = work_bot - 8;
+        const int track_top = rows_top, track_bot = work_bot - 8;
         const int track_h   = track_bot - track_top;
         const int thumb_h   = track_h * visible / (v.order_count > visible ? v.order_count : 1);
         const int max_first = v.order_count - visible;
@@ -167,11 +192,14 @@ void drawNodes(Screen& s, const NodesView& v) {
     const int rx = list_x1 + kPaneGap + kTmPad;
     s.fillRect(rx - kTmPad + 4, work_top + 1, W - (rx - kTmPad + 4), work_bot - work_top - 2, kScreen);
 
-    if (v.store == nullptr || v.order_count == 0) {
+    if (v.store == nullptr || v.store->count == 0) {
         drawText(s, Face::Title, rx, textBaseline(s, Face::Title, work_top, 44), "No nodes yet", kInk);
         drawText(s, Face::Body, rx, work_top + 80, "An advert from another node fills this page.", kDim);
         drawText(s, Face::Body, rx, work_top + 104, "Ours goes out at start and every 3 hours;", kDimmer);
         drawText(s, Face::Body, rx, work_top + 128, "\"a\" forces one now.", kDimmer);
+    } else if (v.order_count == 0) {
+        // The FILTER matched nothing. The list area already says "No matching nodes"; the detail pane stays
+        // quiet instead of claiming the contact table is empty.
     } else {
         const mc::Contact& c = v.store->c[v.order[v.focused < v.order_count ? v.focused : 0]];
         drawTextClipped(s, Face::Title, rx, textBaseline(s, Face::Title, work_top, 44), W - rx - kTmPad, 
@@ -199,13 +227,20 @@ void drawNodes(Screen& s, const NodesView& v) {
                             W - (rx + 190) - kTmPad, values[i], kInk);
             kv_y += 30;
         }
-        drawText(s, Face::Body, rx, kv_y + 26, "DM, trace and favourite arrive with the", kDimmer);
-        drawText(s, Face::Body, rx, kv_y + 48, "reply-path slice: no button that does nothing.", kDimmer);
+        // S514 (Claude): DMs exist since v40/v41, so the old "DM ... arrive later" line was no longer true.
+        drawText(s, Face::Body, rx, kv_y + 26, "DM this node from the Chat page (right column).", kDimmer);
+        drawText(s, Face::Body, rx, kv_y + 48, "Trace and favourite come later.", kDimmer);
     }
 
     // S513/EST-432: the advert key works on this page too, so it is a hint and not only the empty-list line.
-    static const HintItem hints[] = {{"up/dn", "move"}, {"a", "advert"}, {"esc", "back"}};
-    drawHintBar(s, tm::Page::Nodes, hints, 3);
+    // S514/EST-449: `/` opens the search, and while the BAR has the focus it gets its own (shorter) hints.
+    static const HintItem hints_list[] = {{",", "settings"}, {"up/dn", "move"}, {"a", "advert"},
+                                          {"/", "search"}, {"esc", "back"}};
+    static const HintItem hints_search[] = {{"type", "search"}, {"dn", "list"}, {"esc", "clear/back"}};
+    if (v.search_focused)
+        drawHintBar(s, tm::Page::Nodes, hints_search, 3);
+    else
+        drawHintBar(s, tm::Page::Nodes, hints_list, 5);
 }
 
 }  // namespace ui

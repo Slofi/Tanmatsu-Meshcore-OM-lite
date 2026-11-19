@@ -18,11 +18,16 @@ namespace ui {
 
 struct NodesView {
     const mc::ContactStore* store = nullptr;
-    const int*              order = nullptr;   // contactsOrder(): favourites first, then newest heard
-    int                     order_count = 0;
+    const int*              order = nullptr;   // contactsOrder(), FILTERED by `query` (S514/EST-449)
+    int                     order_count = 0;   // N in "N of M": rows after the search filter
     int                     focused = 0;       // index INTO order
     int                     in_last_hour = 0;
     uint32_t                now = 0;
+
+    // S514/EST-449: the search bar is the list's top row. `query` is the live filter text (null/empty =
+    // all nodes) and `search_focused` means the BAR owns the keys, so no row is drawn as selected.
+    const char* query = nullptr;
+    bool        search_focused = false;
 
     // chrome
     const char* clock = "--:--";

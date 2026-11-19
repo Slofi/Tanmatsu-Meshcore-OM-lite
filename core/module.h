@@ -15,6 +15,7 @@
 
 #include "keys.h"
 #include "pages.h"
+#include "settings_model.h"   // S514/EST-448: a module supplies its settings as DATA
 
 namespace tm {
 
@@ -90,6 +91,11 @@ struct Module {
   // the top (nothing changes, the key is still consumed). nullptr = no page of this module has an
   // inner level today. A symbol key is NEVER passed to onKey().
   bool (*onTop)(Core&, Page page);
+  // S514/EST-448: THIS module's settings, as data. The Settings frame has one top tab per registry row
+  // and draws exactly what this returns; a stopped or LATER module still answers (its values are stored),
+  // and its own action rows say when they need it running. nullptr = no settings data yet, which the
+  // frame shows as the honest one-line state (kSettingsPlaceholder), never an empty page.
+  SettingsHook settings;
 };
 
 }  // namespace tm

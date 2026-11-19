@@ -46,6 +46,29 @@ bool channelScopeSet(size_t i, const char* setting);
 // Tanmatsu has no node default, so Default is unscoped today).
 void channelScopeHead(size_t i, char* out, size_t cap);
 
+// ---------------------------------------------------------- S514/EST-446: add, remove and rename a channel
+// The MAIN task calls these. Each one writes the new NVS "mcch" table in the safe order from
+// core/channel_admin.h (new entries first, `cnt` last), so a power cut at any step leaves a loadable table,
+// and then asks the radio task to reload — the radio task is the one owner of the live table, so a
+// channel becomes usable (and disappears) without a restart. Names are logged; keys never are.
+//
+// channelsAddHashtag: the L2's normalisation (one '#', no spaces, lowercased); the key is sha256(tag)[0..15].
+// `out_name` receives the normalised tag. False on a bare '#', a full table, or a duplicate.
+bool channelsAddHashtag(const char* typed, char* out_name, size_t cap);
+// channelsAddByKey: the L2's base64 rules (16 bytes, spaces skipped, '=' ends, bad characters refused).
+// False on a bad name, a bad key, a full table, or a duplicate key.
+bool channelsAddByKey(const char* name, const char* key_b64);
+// Rename a PRIVATE channel (a hashtag's name IS its key, so the UI never offers this for one).
+bool channelsRename(size_t i, const char* name);
+// Remove slot i (index 0 included); the table compacts and the radio's view follows on its next loop.
+bool channelsRemove(size_t i);
+// Copy one channel's 16-byte key, for the on-screen "share" only. It is never logged or stored.
+bool channelsKeyCopy(size_t i, uint8_t out[16]);
+// A manual reload request for callers that changed NVS themselves.
+void channelsRequestReload();
+// Goes up by one each time the radio task reloads the table, so a page can notice it changed.
+uint32_t channelsRevision();
+
 // Decode one received frame and print what it is: a channel text for us, a group text for a channel we do not
 // have, an advert (name + key prefix), or something else. Never throws, never blocks.
 void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db);
@@ -70,7 +93,19 @@ AdvertDecision queueAdvert();
 
 // This node's name on the mesh: what an advert announces and what a message is signed "from" ("TNMT (SI)",
 // Filip, S501 — the same <device> (<country>) shape the L2 uses for "ERA-3 (SI)"). One definition, in mc_link.cpp.
+// EST-445: it is read from NVS mcid/name at begin() and used for adverts AND as the channel/DM sender, so the
+// two can never announce different identities. The default when nothing is stored is tm::kDefaultNodeName.
 const char* nodeName();
+
+// EST-445: apply a new node name. The caller validates with tm::nodeNameApply (1..31 bytes, MeshCore's
+// allowed characters, trimmed); this re-checks it and only moves the live name when NVS mcid/name accepted it.
+bool setNodeName(const char* name);
+
+// EST-445: the automatic advert interval, in SECONDS (0 = Off), stored in NVS mcid/advint. The schedule in
+// serviceRequests() reads it every loop; the manual paths ('a', "Advert now") never do. set... accepts only
+// the five choices (0/1/3/6/12 h) and returns false otherwise.
+uint32_t advertIntervalSeconds();
+bool setAdvertIntervalSeconds(uint32_t seconds);
 
 // Called by the radio task every loop: performs any queued request (build, sign, transmit).
 void serviceRequests();
@@ -103,6 +138,19 @@ size_t restoreContacts();
 // dirty: an add/rename/route change on the next pass, last-heard/SNR at most once per 10 minutes. Never writes NVS
 // from the radio task; does nothing when there is nothing to write.
 void contactsPersistTick();
+
+// ------------------------------------------------- S514/EST-447: the NODES section's two destructive actions
+// The MAIN task calls both. They take the store lock, change the RAM table through core/contact_admin.h and
+// raise the SAME structural dirty flag contactsPersistTick() already owns, so the `mcct` blob is rewritten on
+// this loop's pass without a second NVS writer. A contact's DM threads and dm-*.log are never touched: its
+// history stays on the card, as the confirm sheet says.
+bool   contactsRemove(size_t index);   // false for an out-of-range index (a stale row must remove nobody)
+size_t contactsClear();                // returns how many rows were removed; 0 changes nothing
+
+// The "New node: ..." notice (NVS "mcset"/"newnode", default On). The radio task reads the cached value when it
+// raises the notice; the MAIN task flips it. A corrupt stored byte reads as On.
+bool newNodeNoticeEnabled();
+bool setNewNodeNoticeEnabled(bool on);
 
 // S513/EST-441: is this peer sendable, and what is it called? False when it is not a contact with a FULL key — a
 // DM thread restored from the card knows only four bytes of its peer's key, and a shared secret over those bytes

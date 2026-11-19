@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 
+#include "map_settings.h"   // S514/EST-447: the MAP rows' choices and the last-position write rule
 #include "map_view.h"
 
 namespace om {
@@ -51,6 +52,32 @@ void probe(double lat, double lon);
 // Read one tile and decode it with BOTH decoders, then compare the pixels. The hardware codec is what makes the
 // map fast, so this is how the boot log proves it agrees with the software one, colour order included.
 void verifyDecoders(double lat, double lon);
+
+// ------------------------------------------------------------------- S514/EST-447: the MAP settings
+// The two rows above the map, and the last place it was left. The DECISIONS (which byte is which choice,
+// the zoom range, and WHEN a write is allowed) are core/map_settings.h and host-tested; these functions
+// only read and write NVS "mcset" after the card/NVS are up. All values are cached, so a Settings row's
+// getter called on every draw does no flash read.
+uint8_t  mapStartPosition();                 // 0 = Ljubljana (default), 1 = Last position
+bool     setMapStartPosition(uint8_t value); // only 0 or 1; anything else is refused
+uint8_t  mapStartZoom();                     // 12..17, default 16
+bool     setMapStartZoom(uint8_t zoom);
+
+// The Map page's last view. `loadLastView` is false when nothing valid is stored; the caller then starts at
+// Ljubljana. `saveLastView` is a no-op for an invalid view, and updates the cache only after NVS accepted it.
+bool loadLastView(om::map::SavedView* out);
+bool saveLastView(const om::map::SavedView& view);
+
+// One pack's presence and size, for the read-only rows in the MAP section. `dir` is the pack directory name
+// ("slo", "slo16", "slo17"). The tile count comes from the index file's size / one record, so it needs no
+// scan and no open pack (the map's own pack handles are untouched). Answers are cached per pack: the first
+// call opens the index, later calls are free.
+struct PackStatus {
+    bool     present = false;
+    uint32_t tiles   = 0;
+    uint64_t bytes   = 0;
+};
+bool packStatus(const char* dir, PackStatus* out);
 
 }  // namespace maplink
 }  // namespace om

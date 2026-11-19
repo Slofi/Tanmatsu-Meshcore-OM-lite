@@ -24,6 +24,8 @@ idf_component_register(
         # S503 step 6 slice 1: the map pack on the card (index search + tile read + JPEG decode).
         "map_link.cpp"
         "map_page.cpp"
+        # EST-445: Settings, part 1 (frame + General). The rules are core/settings.h (host-tested).
+        "settings_page.cpp"
     INCLUDE_DIRS
         "."
     # The six Tanmatsu faces (tools/mkfonts.py -> main/fonts/*.bin, decoded by font.cpp).

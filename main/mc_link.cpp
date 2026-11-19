@@ -16,6 +16,7 @@
 
 #include "advert_rule.h"   // S513/EST-435: one advert per 5 s, host-tested
 #include "contact_blob.h"  // S513/EST-437: the contact table as one versioned NVS blob
+#include "contact_admin.h"  // S514/EST-447: remove/clear a contact, and the new-node notice's default
 #include "chrome.h"        // S513/EST-435/437: the app's one notice slot, safe from any task
 #include "mc_channels.h"
 #include "tx_queue.h"   // S513: the send queue's rules, host-tested
@@ -23,9 +24,11 @@
 #include "mc_crypto.h"
 #include "mc_wire.h"
 #include "channel_scope.h"   // S513/EST-440: per-channel flood scope, ported from the L2's S509
+#include "channel_admin.h"    // S514/EST-446: add/rename/remove a channel, and the safe NVS rewrite
 #include "mc_dm.h"      // S513/EST-433/434: TXT_MSG open + the two reply frames
 #include "dm_send.h"    // S513/EST-436/439: compose, the PATH parser, the pending/ACK table and the retry rule
 #include "radio_link.h"
+#include "settings.h"     // EST-445: the name rule and the advert-interval mapping (pure, host-tested)
 #include "sd_history.h"   // step 5: the chat history on the card
 #include "chat_layout.h"  // step 5 / S503: historyReadCount, the read-prefix rule for the seen point
 #include "time_source.h"
@@ -37,26 +40,30 @@ namespace {
 
 const char* TAG = "tm/mc";
 
-// ONE home for the node's name (Filip, S501: renamed from the placeholder "EDCT" to "TNMT (SI)"). MeshCore
-// forbids [ ] \ : , ? * inside an advert name; a space and parentheses are fine (AdvertDataHelpers.cpp:31-34).
-const char kNodeName[] = "TNMT (SI)";
+// ONE home for the node's name (Filip, S501: renamed from the placeholder "EDCT" to "TNMT (SI)"; EST-445:
+// made editable and stored in NVS mcid/name). MeshCore forbids [ ] \ : , ? * inside an advert name; a space
+// and parentheses are fine (AdvertDataHelpers.cpp:31-34). `g_node_name` is what an advert announces AND
+// what a channel text / DM signs, so the two can never announce different identities. The default is
+// tm::kDefaultNodeName ("TNMT (SI)") when nothing is stored.
+char g_node_name[32] = "TNMT (SI)";
+
+// EST-445: the automatic advert interval, stored in NVS mcid/advint as SECONDS (0 = Off). The default is
+// today's behaviour, 3 hours. The schedule in serviceRequests() reads this; the manual advert paths do not.
+uint32_t g_advint_s = 3u * 60u * 60u;
 
 // The L2's words for an advert type (firmware/src/ui/node_menu.h:27-35, advTypeName) — the new-node notice and the
-// Nodes sheet in the L2 name a type the same way, so the two cannot disagree. S513/EST-437.
-const char* advertTypeName(uint8_t t) {
-    switch (t) {
-        case 1: return "client";
-        case 2: return "repeater";
-        case 3: return "room";
-        case 4: return "sensor";
-        default: return "node";
-    }
-}
+// Nodes sheet in the L2 name a type the same way, so the two cannot disagree. S513/EST-437. S514/EST-447: the ONE
+// definition is now core/contact_admin.h::contactTypeLabel, because the NODES list sub-page names a type too.
+const char* advertTypeName(uint8_t t) { return contactTypeLabel(t); }
 
-// MeshCore announces a node on a schedule; a flood advert is expensive on a shared mesh, so it is rare.
-// Ours: one as soon as the radio is up (so the node is discoverable without anyone pressing a key), then
-// every 3 hours. The test hook ('a') stays for a deliberate re-announce.
-constexpr int64_t kAdvertIntervalUs = 3 * 60 * 60 * 1000000LL;
+// S514/EST-447: the new-node notice, cached from NVS "mcset"/"newnode" by begin() and rewritten by the Settings
+// row. The radio task (which raises "New node: ...") must not open NVS; it reads this bool.
+bool g_new_node_notice = true;
+
+
+// EST-445: the schedule interval is NOT a constant any more. It is the value stored in NVS mcid/advint
+// (g_advint_s, seconds; 0 = Off) and is read on every loop, so the Settings row changes it live. The manual
+// test hook ('a' / "Advert now") is unaffected and still obeys the 5 s gate.
 
 // MeshCore drops an advert whose timestamp is not NEWER than the last one it stored for that node (replay
 // protection, BaseChatMesh.cpp:133-137). The P4's RTC restarts at 0 after a power loss — measured S501, "ts 6"
@@ -81,6 +88,11 @@ uint32_t nextAdvertTimestamp() {
 
 meshcore::ChannelSet g_set;
 bool                 g_loaded = false;
+
+// S514/EST-446: a Settings add/remove wrote NVS on the MAIN task; the radio task (the one owner of the
+// table) reloads it on its next loop. `rev` lets a page notice that the table it drew has changed.
+volatile bool g_channels_reload = false;
+uint32_t     g_channels_rev    = 0;
 
 // S513/EST-440: the channel scopes as last read from NVS "mcch" ("s<hh>" by the LIVE hash). The cache
 // only saves a flash read per redraw; the key is still the loaded table's hash, never a legacy copy.
@@ -339,6 +351,70 @@ void loadChannels() {
     nvs_close(h);
 }
 
+// S514/EST-446: perform a channel rewrite plan against NVS "mcch". EVERY step is committed on its own, so
+// a power cut between any two steps is exactly the cut the host test simulates (core/channel_admin.cpp's
+// order is what makes every such cut loadable). The radio task's table is NOT touched here: the caller
+// raises g_channels_reload and the radio task (the one owner of g_set) reloads on its next loop.
+bool channelApplyPlan(const meshcore::ChannelSet& after, const meshcore::ChannelNvsStep* plan, int steps) {
+    if (plan == nullptr || steps <= 0) return false;
+    nvs_handle_t h;
+    if (nvs_open("mcch", NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t r = ESP_OK;
+    for (int i = 0; i < steps && r == ESP_OK; ++i) {
+        const meshcore::ChannelNvsStep& st = plan[i];
+        char key[8];
+        switch (st.op) {
+            case meshcore::ChannelNvsOp::SetKey:
+                snprintf(key, sizeof(key), "k%u", (unsigned)st.index);
+                r = nvs_set_blob(h, key, after.ch[st.index].secret, meshcore::kKeyBytes);
+                break;
+            case meshcore::ChannelNvsOp::SetName:
+                snprintf(key, sizeof(key), "n%u", (unsigned)st.index);
+                r = nvs_set_str(h, key, after.ch[st.index].name);
+                break;
+            case meshcore::ChannelNvsOp::SetCount:
+                r = nvs_set_u8(h, "cnt", after.count);
+                break;
+            case meshcore::ChannelNvsOp::EraseKey:
+                snprintf(key, sizeof(key), "k%u", (unsigned)st.index);
+                r = nvs_erase_key(h, key);
+                if (r == ESP_ERR_NVS_NOT_FOUND) r = ESP_OK;
+                break;
+            case meshcore::ChannelNvsOp::EraseName:
+                snprintf(key, sizeof(key), "n%u", (unsigned)st.index);
+                r = nvs_erase_key(h, key);
+                if (r == ESP_ERR_NVS_NOT_FOUND) r = ESP_OK;
+                break;
+            case meshcore::ChannelNvsOp::EraseScope:
+                snprintf(key, sizeof(key), "s%02x", (unsigned)st.hash);
+                r = nvs_erase_key(h, key);
+                if (r == ESP_ERR_NVS_NOT_FOUND) r = ESP_OK;   // nothing stored IS Default
+                break;
+            case meshcore::ChannelNvsOp::None:
+                break;
+        }
+        if (r == ESP_OK) r = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "channels: NVS rewrite failed (%s); the table will be re-read", esp_err_to_name(r));
+        g_channels_reload = true;   // whatever did reach flash is now the truth; reload rather than guess
+        return false;
+    }
+    g_channels_reload = true;
+    return true;
+}
+
+// The table as it is now, minus slot `drop`, in the same order (the compaction the L2 does).
+meshcore::ChannelSet setWithout(const meshcore::ChannelSet& in, int drop) {
+    meshcore::ChannelSet out{};
+    for (size_t i = 0; i < in.count; ++i) {
+        if ((int)i == drop) continue;
+        meshcore::channelsAdd(out, in.ch[i].secret, in.ch[i].name);
+    }
+    return out;
+}
+
 }  // namespace
 
 // S513/EST-437: the contact table's one NVS blob. Read at boot before the radio task exists; a wrong blob is
@@ -454,6 +530,97 @@ void contactsPersistTick() {
     }
 }
 
+// S514/EST-447: the NODES section's remove/clear. The table change is under the store lock; the NVS rewrite is
+// NOT done here — raising the structural flag makes the main loop's contactsPersistTick() write the SAME blob
+// without a second writer, and a power cut between the RAM change and that write simply leaves the old table
+// until the next advert, which is what the confirm text promises.
+bool contactsRemove(size_t index) {
+    if (g_store_mutex == nullptr) return false;
+    StoreLock l;
+    if (!contactRemoveAt(g_contacts, index)) return false;
+    markContactsDirty(true);
+    ESP_LOGI(TAG, "contacts: removed row %u (%u left); its DM history stays on the card", (unsigned)index,
+             (unsigned)g_contacts.count);
+    return true;
+}
+
+size_t contactsClear() {
+    if (g_store_mutex == nullptr) return 0;
+    StoreLock l;
+    const size_t n = g_contacts.count;
+    if (n == 0) return 0;
+    contactsClearAll(g_contacts);
+    markContactsDirty(true);
+    ESP_LOGI(TAG, "contacts: cleared all %u; their DM history stays on the card", (unsigned)n);
+    return n;
+}
+
+bool newNodeNoticeEnabled() { return g_new_node_notice; }
+
+bool setNewNodeNoticeEnabled(bool on) {
+    nvs_handle_t h;
+    if (nvs_open("mcset", NVS_READWRITE, &h) != ESP_OK) return false;
+    const esp_err_t r = nvs_set_u8(h, "newnode", on ? 1 : 0);
+    if (r == ESP_OK) nvs_commit(h);
+    nvs_close(h);
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "new-node notice: NVS write failed (%s); the old value stays", esp_err_to_name(r));
+        return false;
+    }
+    g_new_node_notice = on;
+    ESP_LOGI(TAG, "new-node notice: -> %s (NVS mcset/newnode)", on ? "on" : "off");
+    return true;
+}
+
+// EST-445: the node's name from NVS mcid/name. A missing or invalid value keeps the app's default; a
+// rejected value is never silently truncated into a different name.
+void loadNodeName() {
+    snprintf(g_node_name, sizeof(g_node_name), "%s", tm::kDefaultNodeName);
+    nvs_handle_t h;
+    if (nvs_open("mcid", NVS_READONLY, &h) != ESP_OK) return;
+    char   tmp[32] = {0};
+    size_t len     = sizeof(tmp);
+    const esp_err_t r = nvs_get_str(h, "name", tmp, &len);
+    nvs_close(h);
+    if (r != ESP_OK) return;
+    if (!tm::nodeNameValid(tmp)) {
+        ESP_LOGW(TAG, "node name: stored value is not a valid MeshCore name; using \"%s\"", g_node_name);
+        return;
+    }
+    snprintf(g_node_name, sizeof(g_node_name), "%s", tmp);
+    ESP_LOGI(TAG, "node name: \"%s\" (NVS mcid/name)", g_node_name);
+}
+
+// EST-445: the automatic advert interval from NVS mcid/advint (seconds, 0 = Off). Any value that is not
+// one of the five choices falls back to 3 h; a corrupt NVS must not silence the node.
+void loadAdvertInterval() {
+    g_advint_s = (uint32_t)tm::advertIntervalSeconds(tm::advertIntervalDefault());
+    nvs_handle_t h;
+    if (nvs_open("mcid", NVS_READONLY, &h) != ESP_OK) {
+        ESP_LOGI(TAG, "adverts: interval default %u s", (unsigned)g_advint_s);
+        return;
+    }
+    uint32_t v = 0;
+    const esp_err_t r = nvs_get_u32(h, "advint", &v);
+    nvs_close(h);
+    if (r == ESP_OK && tm::advertIntervalStoredValid(v)) g_advint_s = v;
+    ESP_LOGI(TAG, "adverts: automatic %u s (%s)", (unsigned)g_advint_s,
+             g_advint_s == 0 ? "off" : "scheduled");
+}
+
+// S514/EST-447: the new-node notice from NVS "mcset"/"newnode" (1 = On, 0 = Off). Absent or corrupt reads as
+// On: core/contact_admin.h owns that rule, so a damaged byte cannot silently hide new nodes.
+void loadNewNodeNotice() {
+    g_new_node_notice = true;
+    nvs_handle_t h;
+    if (nvs_open("mcset", NVS_READONLY, &h) != ESP_OK) return;
+    uint8_t v = 1;
+    const esp_err_t r = nvs_get_u8(h, "newnode", &v);
+    nvs_close(h);
+    g_new_node_notice = newNodeNoticeFromStored(r == ESP_OK, v);
+    ESP_LOGI(TAG, "new-node notice: %s (NVS mcset/newnode)", g_new_node_notice ? "on" : "off");
+}
+
 void begin() {
     if (g_store_mutex == nullptr) g_store_mutex = xSemaphoreCreateRecursiveMutex();
     if (g_tx_lock == nullptr) g_tx_lock = xSemaphoreCreateMutex();   // S513: the send queue, created once
@@ -462,6 +629,9 @@ void begin() {
     // 10 minutes like every other one. Add/rename/route changes are not affected: those write on the next pass.
     g_contacts_last_write_ms = monotonicMs();
     loadOrCreateIdentity();
+    loadNodeName();          // EST-445: mcid/name, default "TNMT (SI)"
+    loadAdvertInterval();    // EST-445: mcid/advint, default 3 h
+    loadNewNodeNotice();     // S514/EST-447: mcset/newnode, default On
     loadChannels();
     g_loaded = true;
     ESP_LOGI(TAG, "channels: %u loaded", (unsigned)g_set.count);
@@ -892,7 +1062,7 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
                                         old_path != g_contacts.c[idx].path_len ||
                                         old_type != g_contacts.c[idx].type;
                 markContactsDirty(structural);
-                if (before < 0) {
+                if (before < 0 && g_new_node_notice) {
                     char text[64];
                     snprintf(text, sizeof(text), "New node: %s (%s)", name[0] != '\0' ? name : "?",
                              advertTypeName(type));
@@ -972,7 +1142,7 @@ static int doText(size_t i, const char* sender, const char* text) {
     const meshcore::ScopePlan plan = meshcore::scopePlanFor(scopeStored, nullptr);
 
     uint8_t      frame[256];
-    const size_t n = meshcore::buildScopedChannelText(g_set.ch[i], ts, sender, text, 2, plan, nullptr, frame,
+    const size_t n = meshcore::buildScopedChannelText(g_set.ch[i], ts, sender, text, meshcore::kFloodPathHashSize, plan, nullptr, frame,
                                                       sizeof(frame));
     if (n == 0) {
         ESP_LOGE(TAG, "tx: build failed (text too long? %u chars)", (unsigned)strlen(text));
@@ -1037,7 +1207,7 @@ static int doAdvert(const char* name) {
     }
     const uint32_t ts = nextAdvertTimestamp();
     uint8_t        frame[256];
-    const size_t   n = meshcore::advertBuild(g_id, ts, name, 2, frame, sizeof(frame));
+    const size_t   n = meshcore::advertBuild(g_id, ts, name, meshcore::kFloodPathHashSize, frame, sizeof(frame));
     if (n == 0) {
         ESP_LOGE(TAG, "advert: build failed (name too long?)");
         resolve(false);
@@ -1058,7 +1228,7 @@ bool queueText(size_t i, const char* text) {
     if (i >= g_set.count || text == nullptr || g_tx_lock == nullptr) return false;
     if (i > 0xFF) return false;   // the request carries a uint8 channel; a longer table is not a message
     xSemaphoreTake(g_tx_lock, portMAX_DELAY);
-    const bool   ok    = g_txq.pushText((uint8_t)i, kNodeName, text);
+    const bool   ok    = g_txq.pushText((uint8_t)i, g_node_name, text);
     const size_t depth = g_txq.size();
     xSemaphoreGive(g_tx_lock);
     if (!ok) ESP_LOGW(TAG, "tx: the send queue is full (%d waiting); the text was NOT queued", (int)depth);
@@ -1322,7 +1492,7 @@ AdvertDecision queueAdvert() {
     xSemaphoreTake(g_tx_lock, portMAX_DELAY);
     d = advertRequest(g_advert_gate, monotonicMs());
     if (d.verdict == AdvertVerdict::Send) {
-        if (g_txq.pushAdvert(kNodeName)) {
+        if (g_txq.pushAdvert(g_node_name)) {
             advertQueued(g_advert_gate);
         } else {
             // The queue is full. The advert was NOT queued, so the gate must not say one is in flight.
@@ -1344,20 +1514,34 @@ AdvertDecision queueAdvert() {
 void serviceRequests() {
     if (g_tx_lock == nullptr) return;
 
-    // The schedule first: an advert at start and every kAdvertIntervalUs. This is what makes the node
+    // S514/EST-446: the main task committed a new channel table; this is the one owner that reloads the
+    // live table (and therefore the radio's view of which hashes it can open and which keys it sends with).
+    if (g_channels_reload) {
+        g_channels_reload = false;
+        loadChannels();
+        ++g_channels_rev;
+        ESP_LOGI(TAG, "channels: reloaded from NVS, %u channel(s)", (unsigned)g_set.count);
+    }
+
+    // The schedule first: an advert at start and every g_advint_s (NVS mcid/advint). This is what makes the node
     // discoverable on its own; the 'a' key only forces one early. It goes to the BACK of the queue and only when
     // nothing the user typed is waiting — a scheduled advert must never displace, or delay, a message.
     // S513/EST-435: it asks the SAME 5 s rule as the key, so a manual advert two seconds ago also defers the
     // schedule. A refusal here is silent on purpose: nothing was pressed, so there is nothing to tell.
     static int64_t s_last_advert_us = 0;
-    if (g_has_id && (s_last_advert_us == 0 || esp_timer_get_time() - s_last_advert_us >= kAdvertIntervalUs)) {
-        xSemaphoreTake(g_tx_lock, portMAX_DELAY);
-        if (advertRequest(g_advert_gate, monotonicMs()).verdict == AdvertVerdict::Send && !g_txq.hasText() &&
-            g_txq.pushAdvert(kNodeName)) {
-            advertQueued(g_advert_gate);
-            s_last_advert_us = esp_timer_get_time();
+    // Off (0) means NO scheduled advert at all; the manual paths still work. `s_last_advert_us == 0` is the
+    // first pass after a boot, so a non-Off interval announces immediately, as before.
+    if (g_has_id && g_advint_s > 0) {
+        const int64_t interval_us = (int64_t)g_advint_s * 1000000LL;
+        if (s_last_advert_us == 0 || esp_timer_get_time() - s_last_advert_us >= interval_us) {
+            xSemaphoreTake(g_tx_lock, portMAX_DELAY);
+            if (advertRequest(g_advert_gate, monotonicMs()).verdict == AdvertVerdict::Send && !g_txq.hasText() &&
+                g_txq.pushAdvert(g_node_name)) {
+                advertQueued(g_advert_gate);
+                s_last_advert_us = esp_timer_get_time();
+            }
+            xSemaphoreGive(g_tx_lock);
         }
-        xSemaphoreGive(g_tx_lock);
     }
 
     // One request per loop, so a burst cannot hold the radio task away from receiving.
@@ -1383,9 +1567,152 @@ void serviceRequests() {
              (unsigned)(uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)));
 }
 
+// --------------------------------------------------------------------------- S514/EST-446 channel admin
+// The main task writes NVS; the radio task reloads. Every function logs the channel NAME and never a key.
+bool channelsAddHashtag(const char* typed, char* out_name, size_t cap) {
+    char tag[meshcore::kChannelTagMax + 1];
+    const int n = meshcore::channelTagCanonical(typed, tag, sizeof(tag));
+    if (n < 0) {
+        ESP_LOGW(TAG, "channels: \"%s\" is not a hashtag", typed != nullptr ? typed : "");
+        return false;
+    }
+    uint8_t key[meshcore::kKeyBytes];
+    if (!meshcore::channelTagKey(tag, key)) return false;
+    if (g_set.count >= meshcore::kMaxChannels) {
+        ESP_LOGW(TAG, "channels: table full (%u), %s not added", (unsigned)meshcore::kMaxChannels, tag);
+        return false;
+    }
+    if (meshcore::channelKeyKnown(g_set, key)) {
+        ESP_LOGW(TAG, "channels: %s is already in the table", tag);
+        return false;
+    }
+    meshcore::ChannelSet after = g_set;
+    if (!meshcore::channelsAdd(after, key, tag)) return false;
+    meshcore::ChannelNvsStep plan[meshcore::kChannelNvsMaxSteps];
+    const int steps = meshcore::channelRewritePlan(g_set, after, plan, meshcore::kChannelNvsMaxSteps);
+    if (!channelApplyPlan(after, plan, steps)) return false;
+    if (out_name != nullptr && cap > 0) snprintf(out_name, cap, "%s", tag);
+    ESP_LOGI(TAG, "channels: added %s (hash %02x), %u step(s); the radio task will reload", tag,
+             (unsigned)after.ch[after.count - 1].hash, (unsigned)steps);
+    return true;
+}
+
+bool channelsAddByKey(const char* name, const char* key_b64) {
+    char label[meshcore::kChannelLabelMax + 1];
+    if (name != nullptr) snprintf(label, sizeof(label), "%s", name);
+    else label[0] = 0;
+    if (!meshcore::channelLabelValid(label)) {
+        ESP_LOGW(TAG, "channels: \"%s\" is not a usable channel name", label);
+        return false;
+    }
+    uint8_t key[meshcore::kKeyBytes];
+    if (!meshcore::channelKeyFromBase64(key_b64, key)) {
+        ESP_LOGW(TAG, "channels: %s: the pasted key is not a 16-byte base64 channel key", label);
+        return false;
+    }
+    if (g_set.count >= meshcore::kMaxChannels) {
+        ESP_LOGW(TAG, "channels: table full (%u), %s not added", (unsigned)meshcore::kMaxChannels, label);
+        return false;
+    }
+    if (meshcore::channelKeyKnown(g_set, key)) {
+        ESP_LOGW(TAG, "channels: %s: that key is already in the table", label);
+        return false;
+    }
+    meshcore::ChannelSet after = g_set;
+    if (!meshcore::channelsAdd(after, key, label)) return false;
+    meshcore::ChannelNvsStep plan[meshcore::kChannelNvsMaxSteps];
+    const int steps = meshcore::channelRewritePlan(g_set, after, plan, meshcore::kChannelNvsMaxSteps);
+    if (!channelApplyPlan(after, plan, steps)) return false;
+    ESP_LOGI(TAG, "channels: added %s by key (hash %02x), %u step(s)", label,
+             (unsigned)after.ch[after.count - 1].hash, (unsigned)steps);
+    return true;
+}
+
+bool channelsRename(size_t i, const char* name) {
+    if (i >= g_set.count) return false;
+    if (!meshcore::channelLabelValid(name)) return false;
+    meshcore::ChannelSet after = g_set;
+    snprintf(after.ch[i].name, sizeof(after.ch[i].name), "%s", name);
+    meshcore::ChannelNvsStep plan[meshcore::kChannelNvsMaxSteps];
+    const int steps = meshcore::channelRewritePlan(g_set, after, plan, meshcore::kChannelNvsMaxSteps);
+    if (!channelApplyPlan(after, plan, steps)) return false;
+    ESP_LOGI(TAG, "channels: slot %u renamed to \"%s\"", (unsigned)i, name);
+    return true;
+}
+
+// Index 0 is removable like any other (the ticket says so): the table compacts, and the removed channel's
+// scope record is erased only when no surviving channel carries the same 1-byte hash.
+bool channelsRemove(size_t i) {
+    if (i >= g_set.count) return false;
+    char name[32];
+    snprintf(name, sizeof(name), "%s", g_set.ch[i].name);
+    const meshcore::ChannelSet after = setWithout(g_set, (int)i);
+    meshcore::ChannelNvsStep plan[meshcore::kChannelNvsMaxSteps];
+    const int steps = meshcore::channelRewritePlan(g_set, after, plan, meshcore::kChannelNvsMaxSteps);
+    if (!channelApplyPlan(after, plan, steps)) return false;
+    ESP_LOGI(TAG, "channels: removed \"%s\" (slot %u), %u step(s); its history stays on the card", name,
+             (unsigned)i, (unsigned)steps);
+    return true;
+}
+
+// The 16 bytes a "share" shows on screen (base64). Never logged, never stored anywhere else.
+bool channelsKeyCopy(size_t i, uint8_t out[meshcore::kKeyBytes]) {
+    if (out == nullptr || i >= g_set.count) return false;
+    memcpy(out, g_set.ch[i].secret, meshcore::kKeyBytes);
+    return true;
+}
+
+void channelsRequestReload() { g_channels_reload = true; }
+
+uint32_t channelsRevision() { return g_channels_rev; }
+
 const char* publicKeyHex() { return g_pub_hex; }
 
-const char* nodeName() { return kNodeName; }
+const char* nodeName() { return g_node_name; }
+
+// EST-445: store a name the UI has already accepted (core/settings.h::nodeNameApply). This re-checks it too:
+// a caller bug must not put a forbidden name on the air, and the live name only moves when NVS accepted it.
+bool setNodeName(const char* name) {
+    char checked[tm::kNodeNameMaxBytes + 1];
+    if (!tm::nodeNameApply(name, checked, sizeof(checked))) return false;
+    nvs_handle_t h;
+    if (nvs_open("mcid", NVS_READWRITE, &h) != ESP_OK) return false;
+    const esp_err_t r = nvs_set_str(h, "name", checked);
+    if (r == ESP_OK) nvs_commit(h);
+    nvs_close(h);
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "node name: NVS write failed (%s); the old name stays", esp_err_to_name(r));
+        return false;
+    }
+    // The radio task copies the name into each queued request under g_tx_lock; take the same lock for the
+    // live copy, so a rename can never be read half-written. (The panel reads it on this same task.)
+    if (g_tx_lock != nullptr) xSemaphoreTake(g_tx_lock, portMAX_DELAY);
+    snprintf(g_node_name, sizeof(g_node_name), "%s", checked);
+    if (g_tx_lock != nullptr) xSemaphoreGive(g_tx_lock);
+    ESP_LOGI(TAG, "node name: -> \"%s\" (mcid/name)", g_node_name);
+    return true;
+}
+
+// EST-445: the automatic advert interval (seconds; 0 = Off), as the General tab shows/cycles it. The schedule
+// reads g_advint_s every loop, so this takes effect without a restart.
+uint32_t advertIntervalSeconds() { return g_advint_s; }
+
+bool setAdvertIntervalSeconds(uint32_t seconds) {
+    if (!tm::advertIntervalStoredValid(seconds)) return false;
+    nvs_handle_t h;
+    if (nvs_open("mcid", NVS_READWRITE, &h) != ESP_OK) return false;
+    const esp_err_t r = nvs_set_u32(h, "advint", seconds);
+    if (r == ESP_OK) nvs_commit(h);
+    nvs_close(h);
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "adverts: interval write failed (%s); the old interval stays", esp_err_to_name(r));
+        return false;
+    }
+    g_advint_s = seconds;
+    ESP_LOGI(TAG, "adverts: automatic interval -> %u s (%s)", (unsigned)seconds,
+             seconds == 0 ? "off" : "scheduled");
+    return true;
+}
 
 ContactStore& contacts() { return g_contacts; }
 MessageRing&  messages() { return g_messages; }
