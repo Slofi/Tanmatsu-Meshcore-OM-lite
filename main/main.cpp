@@ -2,8 +2,8 @@
 // The Tanmatsu app: ONE AppFS app under the stock badge.team launcher, with our own Launcher inside.
 //
 // Step 2 (BRIEF § 9 / NEXT-FOR-DS.md): the shell only. It brings badge-bsp up, draws the approved status
-// bar + Launcher home at 800x480, logs EVERY key it sees (including the five symbol keys — their codes are
-// unknown by design, so this is the logger that fills core/keys.h), mounts the SD card, shows the battery,
+// bar + Launcher home at 800x480, logs EVERY key it sees (including the six page keys and the volume keys —
+// their codes are the BSP enum's, S516/EST-478), mounts the SD card, shows the battery,
 // and wires the host-tested core (tanmatsu/core/) so Start/Stop is the real registry.
 //
 // It does NOT install anything and does NOT flash: the AppFS sideload (docs/RECOVERY.md) is a separate,
@@ -72,6 +72,7 @@ extern "C" {
 #include "contact_admin.h"   // S514/EST-447: remove/clear a contact, type words, the notice default
 #include "map_settings.h"    // S514/EST-447: the MAP rows' choices and the last-position write rule
 #include "sound_events.h"    // S514/EST-450: the events, their L2 defaults and every sound rule
+#include "volume_popup.h"    // S516/EST-478: the volume keys' step, pop-up text and coalesced NVS write
 #include "sound_store.h"     // S514/EST-450: the sound settings' NVS blob (mcsnd)
 #include "audio_out.h"       // S514/EST-450: the one owner of I2S (queue-only, never blocks the UI)
 #include "message_led.h"     // S516/EST-477: the LED task + the two switches and the message colour (NVS)
@@ -196,6 +197,15 @@ static bool hostedConnectC6() {
 om::ui::ScreenPower g_screen_power;
 uint8_t             g_disp_bright = 100;   // what the display was before OFF
 uint8_t             g_kbd_bright  = 100;   // …and the keyboard backlight
+
+// S516/EST-478: the volume keys' ~6/s ceiling. One press is one step; the BSP currently sends one edge per
+// press (its key-repeat thread is commented out), so this only guards a future repeat.
+tm::volume::StepGate g_vol_gate;
+
+// S516/EST-478: the Settings frame lives in app_main, but the module's own-key hook is a captureless
+// function pointer (Module::onTop). This pointer is set once, right after the frame is constructed, so the
+// diamond can return to the Settings root through the core's route as well as through the shell's branch.
+tm::SettingsFrame* g_settings_frame = nullptr;
 
 void screenLightsOff() {
     uint8_t d = 100, k = 100;
@@ -1182,8 +1192,8 @@ void logInputEvent(const bsp_input_event_t& ev) {
 }
 
 // Map the keys we KNOW (names taken from the launcher's own use of the BSP enum) into the core's Keys.
-// The five symbol keys are deliberately not mapped yet: their codes are logged above and fill keys.h
-// later — guessing them is exactly what BRIEF § 5 forbids.
+// The page keys and the two volume keys come from the ONE table in core/keys.h, whose codes are the BSP
+// enum values (S516/EST-478: X/F1 = 20, triangle..diamond = 21..25, VOLUME_UP/DOWN = 37/38).
 tm::Key mapKey(const bsp_input_event_t& ev) {
     // S499 on glass: Esc never reached the app because it arrives as a KEYBOARD event (ASCII 0x1B), not as
     // a navigation key — the first mapping only looked at navigation and swallowed everything else.
@@ -1617,6 +1627,7 @@ extern "C" void app_main(void) {
     //   DEVICE .. time_source::hhmm/bootSource, g_sd_mounted + sdhistory::ready, mc_store's contact count,
     //             tm::kAppVersion, heap_caps_get_free_size (internal / PSRAM)
     tm::SettingsFrame settings_frame;
+    g_settings_frame = &settings_frame;   // S516/EST-478: the own-key hook's handle (see its comment)
     tm::Page           settings_return_page = tm::Page::Launcher;   // Esc returns HERE, not always the menu
     // S514/EST-446: one shared field, so it must hold a pasted base64 key (24 chars) as well as a name.
     char               settings_draft[64] = {0};
@@ -2911,7 +2922,21 @@ extern "C" void app_main(void) {
             }
             return closed;
         }
-        return false;   // Map has no list; Settings is not reached by a symbol key, so neither has a row 0
+        if (page == tm::Page::Settings) {
+            // S516/EST-478: the diamond is Settings' own key now. From a sub-page (a list, the sound
+            // picker, a chat field) it goes back to the Settings ROOT, exactly the SetKey::Settings rule the
+            // comma fed until S516 (core/settings.h:296/411/499). At the root there is nothing to close.
+            // The shell's Settings branch performs this too; this is the same decision for the core's route.
+            if (g_settings_frame == nullptr || !g_settings_frame->subPage()) return false;
+            g_settings_frame->closeSubPage();
+            g_sound_sub        = false;
+            g_nodes_list       = false;
+            g_chat_sub         = ChatSub::None;
+            g_chat_field       = ChatField::None;
+            g_chat_channel     = -1;
+            return true;
+        }
+        return false;   // Map has no list; the Launcher has no module
     };
 
     // S513/EST-435: an advert press either queues one or says why not, and the sentence comes from the rule itself
@@ -2928,7 +2953,8 @@ extern "C" void app_main(void) {
         dirty = true;
     };
 
-    // EST-445/EST-448: the one way into Settings. The tab and SECTION come from the registry
+    // EST-445/EST-448: the one way into Settings, reached by the DIAMOND from any page (S516/EST-478; the
+    // old comma is gone). The tab and SECTION come from the registry
     // (core/settings.h::settingsTargetForPage): an OM Lite page lands on the OM Lite tab at that page's
     // section (Nodes->NODES, Chat->CHAT, Map->MAP, RPTR->RPTR), the menu and the Settings bar land on
     // General. `from` is remembered because Esc at the root returns THERE, not always to the Launcher.
@@ -3149,6 +3175,30 @@ extern "C" void app_main(void) {
                 ESP_LOGI(TAG, "[popup] dismissed by a key (swallowed)");
                 dirty = true;
                 k     = tm::Key::None;
+            }
+            // S516/EST-478: the volume keys are GLOBAL — they never reach a page (or the Launcher's own
+            // branch), and they do not take a key from anything. One press = one 10 % step on the SAME
+            // stored volume the Settings row shows, clamped; the pop-up re-arms even at a clamp; the tick
+            // only plays when the level really changed (and is silent when Muted or Sound off). NVS is
+            // written later, once, by the loop's soundstore::volumeTick(). A locked screen never gets here
+            // (the key-lock above swallows every key).
+            if (tm::is_volume_key(k)) {
+                const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+                if (tm::volume::volumeKeyActs(g_screen_power.off) && g_vol_gate.due(now_ms)) {
+                    const uint8_t cur  = om::soundstore::settings().volume;
+                    const uint8_t next = tm::volume::step(cur, k == tm::Key::VolUp ? tm::volume::kStep
+                                                                                  : -tm::volume::kStep);
+                    om::soundstore::volumeTouch(now_ms);   // any press moves the coalesced write later
+                    if (next != cur) {
+                        om::soundstore::setVolumeLive(next, now_ms);
+                        om::audioout::volumeTick(next);
+                        ESP_LOGI(TAG, "volume key -> %u %%%s", (unsigned)next,
+                                 om::soundstore::settings().master ? "" : " (Sound off)");
+                    }
+                    om::ui::volumePopupPress(now_ms, next, om::soundstore::settings().master);
+                    dirty = true;
+                }
+                k = tm::Key::None;   // consumed here; no page branch below may see it
             }
             if (k != tm::Key::None) {
                 bool handled = false;
@@ -3652,8 +3702,13 @@ extern "C" void app_main(void) {
                 } else if (page_now == tm::Page::Settings) {
                     // EST-445: the frame + General. core/settings.h decides; this branch only feeds it the
                     // keys and performs the row actions against the real stores.
-                    if (tm::is_symbol(k)) {
-                        handled = false;   // the core's page route still wins on a symbol key
+                    // S516/EST-478: the diamond is Settings' OWN key (page_for_symbol maps it here), so it
+                    // is handled as SetKey::Settings below instead of being passed back to the router: inside
+                    // a sub-page it returns to the root, at the root it changes nothing. Every OTHER page key
+                    // still routes away.
+                    const bool own_settings_key = tm::is_settings_key(k);
+                    if (tm::is_symbol(k) && !own_settings_key) {
+                        handled = false;   // the core's page route still wins on another page key
                     } else {
                         handled = true;
                         const bool is_char = (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD);
@@ -3766,7 +3821,12 @@ extern "C" void app_main(void) {
                         } else if (settings_frame.subPage() && g_chat_field != ChatField::None) {
                             // A chat TEXT page: the shared field, with THAT page's character rules. Esc goes
                             // back to the list it was opened from, or closes the page when there is none.
-                            if (k == tm::Key::Esc) {
+                            // S516/EST-478: the diamond is the page's own key, so it goes all the way back to
+                            // the Settings root (a typed comma is TEXT here and never a key).
+                            if (own_settings_key) {
+                                closeChatPage();
+                                dirty = true;
+                            } else if (k == tm::Key::Esc) {
                                 if (g_chat_sub != ChatSub::None)
                                     g_chat_field = ChatField::None;
                                 else
@@ -3801,7 +3861,7 @@ extern "C" void app_main(void) {
                             else if (k == tm::Key::Down) sk = tm::SetKey::Down;
                             else if (k == tm::Key::Enter) sk = tm::SetKey::Enter;
                             else if (k == tm::Key::Esc) sk = tm::SetKey::Esc;
-                            else if (is_char && ch == ',') sk = tm::SetKey::Settings;
+                            else if (own_settings_key) sk = tm::SetKey::Settings;
 
                             int sn = 0;
                             const tm::SettingsSection* ss = soundSubSections(&sn);
@@ -3870,7 +3930,7 @@ extern "C" void app_main(void) {
                             else if (k == tm::Key::Down) sk = tm::SetKey::Down;
                             else if (k == tm::Key::Enter) sk = tm::SetKey::Enter;
                             else if (k == tm::Key::Esc) sk = tm::SetKey::Esc;
-                            else if (is_char && ch == ',') sk = tm::SetKey::Settings;
+                            else if (own_settings_key) sk = tm::SetKey::Settings;
 
                             int sn = 0;
                             const tm::SettingsSection* ss = nodesSubSections(&sn);
@@ -3893,7 +3953,7 @@ extern "C" void app_main(void) {
                             else if (k == tm::Key::Down) sk = tm::SetKey::Down;
                             else if (k == tm::Key::Enter) sk = tm::SetKey::Enter;
                             else if (k == tm::Key::Esc) sk = tm::SetKey::Esc;
-                            else if (is_char && ch == ',') sk = tm::SetKey::Settings;
+                            else if (own_settings_key) sk = tm::SetKey::Settings;
 
                             int sn = 0;
                             const tm::SettingsSection* ss = chatSubSections(&sn);
@@ -3909,7 +3969,21 @@ extern "C" void app_main(void) {
                                 if (row != nullptr) chatSubAction(row->id);
                             }
                             dirty = true;
-                        } else if (settings_frame.subPage()) {                        } else {
+                        } else if (settings_frame.subPage()) {
+                            // Defensive: a sub-page whose own state is not one of the known ones. The own
+                            // key still returns to the Settings root; any other key is swallowed there.
+                            if (own_settings_key) {
+                                settings_frame.closeSubPage();
+                                g_sound_sub        = false;
+                                g_nodes_list       = false;
+                                g_chat_sub         = ChatSub::None;
+                                g_chat_field       = ChatField::None;
+                                g_chat_channel     = -1;
+                                settings_draft[0]  = '\0';
+                                settings_draft_len = 0;
+                                dirty              = true;
+                            }
+                        } else {
                             tm::SetKey sk = tm::SetKey::None;
                             if (k == tm::Key::Up) sk = tm::SetKey::Up;
                             else if (k == tm::Key::Down) sk = tm::SetKey::Down;
@@ -3917,7 +3991,7 @@ extern "C" void app_main(void) {
                             else if (k == tm::Key::Right) sk = tm::SetKey::Right;
                             else if (k == tm::Key::Enter) sk = tm::SetKey::Enter;
                             else if (k == tm::Key::Esc) sk = tm::SetKey::Esc;
-                            else if (is_char && ch == ',') sk = tm::SetKey::Settings;
+                            else if (own_settings_key) sk = tm::SetKey::Settings;
 
                             int ns = 0;
                             const tm::SettingsSection* secs = settingsSectionsForTab(settings_frame.tab, &ns);
@@ -4383,19 +4457,20 @@ extern "C" void app_main(void) {
                 }
 
                 if (!handled) {
-                    if (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD &&
-                        ev.args_keyboard.ascii == ',') {
-                        // EST-445: `,` opens Settings from any OM Lite page, on the tab matching that page.
-                        // (An open Chat composer consumed the comma above, so this cannot steal a typed ','.)
+                    // S516/EST-478: the DIAMOND opens Settings from any page, on the tab/section that page
+                    // owns (the old comma's job). On Settings itself the branch above already treated it as
+                    // the own key. A typed comma never reaches this line: text fields consume it above, and
+                    // outside a field it now does nothing at all (Filip: "remove the ',' for settings").
+                    if (tm::is_settings_key(k)) {
                         openSettings(page_now);
                     } else if (tm::is_symbol(k)) {
-                        // S514/EST-455: a symbol key navigates away, so a node menu left open on this page
+                        // S514/EST-455: a page key navigates away, so a node menu left open on this page
                         // closes with it instead of reappearing on the next visit.
                         if (page_now == tm::Page::Nodes) {
                             node_menu_open  = false;
                             node_menu_index = -1;
                         }
-                        core.handleKey(k);   // the core's route: a module never sees a symbol key
+                        core.handleKey(k);   // the core's route: a module never sees a page key
                         dirty = true;
                     } else if (page_now == tm::Page::Launcher) {
                         // S513/EST-432: the menu is three app cards. The S499 two-area rule (Enter -> the
@@ -4496,6 +4571,15 @@ extern "C" void app_main(void) {
         // A tile the worker finished: repaint, so the map fills in from the centre out while the keys stay live.
         if (om::maplink::takeLanded() && core.router().current() == tm::Page::Map) dirty = true;
         if (om::ui::noticeNeedsRepaint()) dirty = true;   // S513 (Claude): a notice set by the radio task, or one that ran out
+
+        // ---- S516/EST-478: the volume keys' two clocks, once per pass.
+        //  * the coalesced NVS write fires ~2 s after the last press (never per press);
+        //  * the 1.5 s pop-up going away is one repaint of the page underneath.
+        {
+            const uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+            om::soundstore::volumeTick(now_ms);
+            if (om::ui::volumePopupTick(now_ms)) dirty = true;
+        }
 
         // ---- S515/EST-467: the new-message pop-up's rules, on the MAIN task (core/msg_popup.h decides).
         // The open chat's identity is passed in so "not while that same chat is on screen" is a comparison,

@@ -143,13 +143,12 @@ void drawLauncher(Screen& s, const LauncherView& v) {
                  v.cards[focused].owns, kDim);
     }
 
-    // ---- hint bar: this page's actions left, the five symbol keys right (the triangle stays LAUNCHER).
+    // ---- hint bar: this page's actions left, the six page keys right (X is Launcher, S516/EST-478).
     // The panel's generated faces are the L2 subset (ASCII + Latin-1/Extended-A, tools/mkfonts.py), so the
     // key chips say "l/r" and "Enter" exactly like every other page's hint bar; the preview draws ←→ / Enter in
-    // desktop DejaVu. The Settings key is first here so it can never be the chip pushed off the edge.
-    static const HintItem hints[] = {{",", "settings"}, {"l/r", "select"}, {"Enter", "open"},
-                                     {"esc", "quit"}};
-    drawHintBar(s, tm::Page::Launcher, hints, 4);
+    // desktop DejaVu. Settings is now the diamond in the page-key cluster, not a left-hand chip.
+    static const HintItem hints[] = {{"l/r", "select"}, {"Enter", "open"}, {"esc", "quit"}};
+    drawHintBar(s, tm::Page::Launcher, hints, 3);
 }
 
 }  // namespace ui

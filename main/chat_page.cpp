@@ -339,8 +339,9 @@ void drawChat(Screen& s, const ChatView& v) {
         }
     }
 
-    static const HintItem hints_list[] = {{"Enter", "open"}, {"esc", "back"}, {"up/dn", "move"}, {"l/r", "column"}, {",", "settings"}};
-    static const HintItem hints_open[] = {{"Enter", "send"}, {"esc", "back"}, {"type", "write"}, {",", "settings"}};
+    // S516/EST-478: Settings is the diamond in the page-key cluster; the old `, settings` chip is gone.
+    static const HintItem hints_list[] = {{"Enter", "open"}, {"esc", "back"}, {"up/dn", "move"}, {"l/r", "column"}};
+    static const HintItem hints_open[] = {{"Enter", "send"}, {"esc", "back"}, {"type", "write"}};
     // S515/EST-469: three states of the open chat, each with the keys that actually work there. Up/Down no
     // longer SCROLL — that was S503's "up/dn scroll". Up enters the selection box, and the box is what moves.
     static const HintItem hints_sel[]  = {{"up/dn", "move"}, {"Enter", "menu"}, {"esc", "type"}};
@@ -348,7 +349,7 @@ void drawChat(Screen& s, const ChatView& v) {
     static const HintItem hints_info[] = {{"esc", "close"}};
     // A DM thread types and sends exactly like a channel (EST-439), so the two open states share one hint bar.
     if (!v.open)
-        drawHintBar(s, tm::Page::Chat, hints_list, 5);
+        drawHintBar(s, tm::Page::Chat, hints_list, 4);
     else if (v.info_open)
         drawHintBar(s, tm::Page::Chat, hints_info, 1);
     else if (v.menu_open)
@@ -356,7 +357,7 @@ void drawChat(Screen& s, const ChatView& v) {
     else if (v.sel >= 0)
         drawHintBar(s, tm::Page::Chat, hints_sel, 3);
     else
-        drawHintBar(s, tm::Page::Chat, hints_open, 4);
+        drawHintBar(s, tm::Page::Chat, hints_open, 3);
 }
 
 }  // namespace ui

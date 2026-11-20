@@ -66,6 +66,11 @@ Take the style from what exists, in this order of authority:
   | cloud | Map |
   | diamond | RPTR (Settings via a key hint / gear) |
 
+  **made by DeepSeek — start (S516/EST-478, 2026-11-20, Filip's decision):** the map moved one up. **X (F1) =
+  Launcher, triangle = Nodes, square = Chat, circle = Map, cloud = RPTR, diamond = Settings.** `,` is no longer
+  a Settings key (outside a text field it does nothing, inside one it types a comma). The live map and codes
+  are `tanmatsu/core/keys.h`; `docs/PLAN.md` § 5 carries the current table. **made by DeepSeek — end**
+
   Find the real key codes for these five keys from the Tanmatsu BSP / WadaMesh `variants/tanmatsu` (do not guess codes; log them once like we did for the CardKB).
 - A **key-hint bar** at the bottom showing what the keys do on the current page (as in the mockup), same style as the L2 tab bar.
 - Everything reachable without touch; no hidden "long press" UX that only works on a touch screen.

@@ -14,7 +14,8 @@
 // The rules worth pinning on their own (a wrong one fails silently):
 //   * the tab order comes from the registry, never from a second hard-coded table;
 //   * a module with no settings data is one honest dim line, not an empty page;
-//   * the `,` key from an OM Lite page lands on that page's SECTION in the OM Lite tab;
+//   * the Settings key (the diamond, S516/EST-478) from an OM Lite page lands on that page's SECTION in the
+//     OM Lite tab;
 //   * the frame's key arithmetic: tabs clamped, focus clamped and never on a section header, the scroll
 //     keeping the focused row fully visible, and Esc's two levels (sub-page -> root -> the page Settings
 //     was opened from);
@@ -94,8 +95,8 @@ inline const SettingsSection* settingsTabContent(const SettingsTabDef& tab, Core
   return tab.settings(core, count);
 }
 
-// Which SECTION of the OM Lite tab a page's `,` key lands on. The order is the tab's own (NODES, CHAT,
-// MAP, RPTR); EST-446/447 add rows INSIDE these sections, never new tabs.
+// Which SECTION of the OM Lite tab a page's Settings key (the diamond) lands on. The order is the tab's own
+// (NODES, CHAT, MAP, RPTR); EST-446/447 add rows INSIDE these sections, never new tabs.
 constexpr int settingsSectionForPage(Page p) {
   switch (p) {
     case Page::Nodes: return 0;
@@ -111,7 +112,7 @@ struct SettingsTarget {
   int section = -1;   // -1 = just the tab (focus its first row)
 };
 
-// The `,` key's destination. An OM Lite page maps to the tab owned by the module that draws it and to
+// The Settings key's destination. An OM Lite page maps to the tab owned by the module that draws it and to
 // that page's section; the menu and anything else map to General. The tab index follows the registry,
 // so reordering the start menu reorders these tabs without a second edit.
 inline SettingsTarget settingsTargetForPage(const Registry& reg, Page p) {
@@ -279,8 +280,8 @@ constexpr int settingsFirstFocusableInSection(const SettingsSection* secs, int c
   return rows > 0 ? header + 1 : -1;
 }
 
-// `,` from an OM Lite page: put the SECTION's header at the top of the body where possible, and focus its
-// first row. Clamped like every other scroll, so a short tab simply shows everything from the top.
+// The Settings key from an OM Lite page: put the SECTION's header at the top of the body where possible, and
+// focus its first row. Clamped like every other scroll, so a short tab simply shows everything from the top.
 constexpr int settingsScrollToSection(const SettingsSection* secs, int count, int section,
                                       int body_h) {
   const int header = settingsSectionElement(secs, count, section);
@@ -292,9 +293,10 @@ constexpr int settingsScrollToSection(const SettingsSection* secs, int count, in
 }
 
 // --------------------------------------------------------------------------------------------- keys
-// The frame's own key set. `Settings` is the comma: it OPENS Settings from a page, and inside a sub-page
-// it goes back to the Settings root (the router's "own key = page top" rule applied to the one key that
-// reaches this page). The shell maps tm::Key + the keyboard's ASCII to this enum.
+// The frame's own key set. `Settings` is the DIAMOND (S516/EST-478): it OPENS Settings from a page, and
+// inside a sub-page it goes back to the Settings root (the router's "own key = page top" rule applied to
+// the one key that reaches this page). A typed comma is never this key. The shell maps tm::Key to this
+// enum.
 enum class SetKey : uint8_t { None = 0, Up, Down, Left, Right, Enter, Esc, Settings };
 
 enum class SettingsEvent : uint8_t {
@@ -349,7 +351,7 @@ struct SettingsFrame {
     scroll = settingsScrollFor(secs, count, focus, scroll, body_h_);
   }
 
-  // The `,`-from-a-page destination: the section's first row and the section header at the top.
+  // The Settings-key destination: the section's first row and the section header at the top.
   void focusSection(const SettingsSection* secs, int count, int section) {
     const int first = settingsFirstFocusableInSection(secs, count, section);
     focus = first >= 0 ? first : settingsFirstFocusable(secs, count);
@@ -709,6 +711,6 @@ constexpr bool advertScheduleDue(uint32_t interval_s, uint32_t elapsed_s, bool e
 }
 
 // The image's version, shown in General > DEVICE. One constant: the next ticket bumps this line.
-constexpr const char* kAppVersion = "72";   // S516/EST-477: LEDs keep their system meanings, off switches, message colour
+constexpr const char* kAppVersion = "73";   // S516/EST-478: volume keys + pop-up; page keys one up (X..diamond = Settings)
 
 }  // namespace tm

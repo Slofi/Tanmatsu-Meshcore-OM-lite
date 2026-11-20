@@ -26,6 +26,14 @@ bool setMaster(bool on);
 bool setVolume(uint8_t volume);
 bool setChoice(tm::soundcfg::Event ev, uint8_t id);
 
+// S516/EST-478: the volume keys change the LIVE value on every press but write NVS at most once, after
+// ~2 s with no presses (core/volume_popup.h::VolumeSave owns the arithmetic). volumeTick() is called once
+// per main-loop pass with esp_timer milliseconds; it writes the whole blob when the window has passed and
+// logs ONE line per actual write.
+bool setVolumeLive(uint8_t volume, uint32_t now_ms);
+void volumeTouch(uint32_t now_ms);
+void volumeTick(uint32_t now_ms);
+
 // True when the namespace opened and the last read/write succeeded at least once.
 bool available();
 

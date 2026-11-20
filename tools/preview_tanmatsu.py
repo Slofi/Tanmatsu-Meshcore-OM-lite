@@ -88,7 +88,7 @@ TM = dict(
     menu_gap=16, menu_card_h=232, menu_top=22, menu_radius=6,
 )
 
-SIGILS = ('triangle', 'square', 'circle', 'cloud', 'diamond')   # BRIEF § 5, Filip's names
+SIGILS = ('x', 'triangle', 'square', 'circle', 'cloud', 'diamond')   # S516/EST-478: X/F1 first
 
 
 @functools.lru_cache(maxsize=64)
@@ -102,8 +102,12 @@ def tw(f, s):
 
 # --------------------------------------------------------------------------------------------- drawing
 def sigil(d, kind, cx, cy, r, colour, width=2):
-    """The five physical key symbols, drawn as vectors: no font may be missing a glyph on the glass."""
-    if kind == 'triangle':
+    """The six page-key symbols, drawn as vectors: no font may be missing a glyph on the glass."""
+    if kind == 'x':
+        # S516/EST-478: F1 is the "X" key. Two diagonals, the same stroke as the others.
+        d.line([(cx - r + 1, cy - r + 1), (cx + r - 1, cy + r - 1)], fill=colour, width=width)
+        d.line([(cx + r - 1, cy - r + 1), (cx - r + 1, cy + r - 1)], fill=colour, width=width)
+    elif kind == 'triangle':
         d.polygon([(cx, cy - r), (cx + r, cy + r), (cx - r, cy + r)], outline=colour, width=width)
     elif kind == 'square':
         d.rectangle([cx - r, cy - r, cx + r, cy + r], outline=colour, width=width)
@@ -402,13 +406,13 @@ def status_bar(d, clock='--:--', batt=0.97, gps=False, radio=True):
 def hint_bar(d, page, actions, dots=()):
     """The key-hint bar (BRIEF § 5): what the keys do HERE, same style as the L2's tab bar.
 
-    Left: this page's actions. Right: the five symbol keys, the page switch; the current page's key is
+    Left: this page's actions. Right: the six page keys, the page switch; the current page's key is
     gold, the rest dim. Drawn as chips so it reads as keys, not as prose.
 
-    S515/EST-467: this now mirrors main/chrome.cpp::drawHintBar's arithmetic EXACTLY — one hint face
-    (sans 11) for key caps, labels and page names, a cap of max(30, key width + 10), the 4/8/10 spacing,
-    and the same 22/18 right-cluster gaps. A cap that would run under the symbol cluster (or off the left
-    margin) is not drawn, so a preview can never claim more room than the glass has.
+    S515/EST-467 + S516/EST-478: this mirrors main/chrome.cpp::drawHintBar's arithmetic EXACTLY — one hint
+    face (sans 11) for key caps, labels and page names, a cap of max(30, key width + 10), the 4/8/10
+    spacing, and the six-key 18/14 right-cluster gaps. A cap that would run under the page keys (or off the
+    left margin) is not drawn, so a preview can never claim more room than the glass has.
     """
     top = TM['H'] - TM['hint_h']
     d.rectangle([0, top, TM['W'], TM['H']], fill=P['Bar'])
@@ -416,20 +420,20 @@ def hint_bar(d, page, actions, dots=()):
     f = font(FONT_SANS, TM['f_hint'])
     cy = top + TM['hint_h'] // 2
 
-    # right cluster: the five symbol keys, from the right edge inward (the device's own loop)
-    pages = ['home', 'nodes', 'chat', 'map', 'rptr']
-    labels = ['LAUNCHER', 'NODES', 'CHAT', 'MAP', 'RPTR']
+    # right cluster: the six page keys, from the right edge inward (the device's own loop)
+    pages = ['home', 'nodes', 'chat', 'map', 'rptr', 'settings']
+    labels = ['LAUNCHER', 'NODES', 'CHAT', 'MAP', 'RPTR', 'SETTINGS']
     sx = TM['W'] - TM['pad']
     for kind, lab, pname in reversed(list(zip(SIGILS, labels, pages))):
         on = (pname == page)
         col = P['Acc'] if on else P['Dimmer']
         sx -= tw(f, lab)
         text(d, (sx, cy), lab, f, col, anchor='lm')
-        sx -= 22
+        sx -= 18
         sigil(d, kind, sx, cy, 7, col, width=2)
         if pname in dots:
             d.ellipse([sx + 9 - 3, cy - 8 - 3, sx + 9 + 3, cy - 8 + 3], fill=P['Bad'])
-        sx -= 18
+        sx -= 14
     right_start = sx
 
     # left cluster: the same fit rule and spacing as the device
@@ -444,6 +448,35 @@ def hint_bar(d, page, actions, dots=()):
         hx += kw + 4
         text(d, (hx, cy), what, f, P['Dimmer'], anchor='lm')
         hx += 8 + lw + 10
+
+
+def volume_popup_plate(d, level, master_on=True, text_override=None):
+    """S516/EST-478: the volume plate exactly as main/chrome.cpp::drawVolumePopup draws it.
+
+    420x54, centred, 12 px above the 24 px hint bar (x 190, y 390 on the 800x480 glass). The message
+    pop-up's lowest edge is ~315, so the two fit and neither hides the other. The bar shows the LEVEL the
+    keys set even while Sound is off; "Sound off" is the text then, "Muted" at 0.
+    """
+    W, H = TM['W'], TM['H']
+    pw, ph = 420, 54
+    px, py = (W - pw) // 2, H - TM['hint_h'] - 12 - ph
+    plate(d, [px, py, px + pw, py + ph], P['Panel2'], P['Acc'] if master_on else P['Line'], r=8, w=2)
+    if text_override is not None:
+        label = text_override
+    elif not master_on:
+        label = 'Sound off'
+    elif level == 0:
+        label = 'Muted'
+    else:
+        label = 'Volume %d %%' % level
+    text(d, (px + 18, py + 6), label, font(FONT_SANS, 26),
+         P['Ink'] if master_on else P['Dim'])
+    bx, by, bw, bh = px + 18, py + ph - 18, pw - 36, 8
+    d.rectangle([bx, by, bx + bw - 1, by + bh - 1], fill=P['Line'])
+    fill = bw * max(0, min(100, level)) // 100
+    if fill > 0:
+        d.rectangle([bx, by, bx + fill - 1, by + bh - 1], fill=P['Acc'] if master_on else P['Dim'])
+    d.rectangle([bx, by, bx + bw - 1, by + bh - 1], outline=P['Line'])
 
 
 def key_cap(d, box, label, ink, f=None):
@@ -494,7 +527,7 @@ MODULES = [
 ]
 
 
-def launcher(dots=(), name='2026-11-13-launcher-home.png'):
+def launcher(dots=(), name='2026-11-13-launcher-home.png', volume=None):
     """The Launcher home: this app's own menu (BRIEF § 3), CD clarity in the L2's clothes.
 
     Left: the module list, one row per module, each with a state chip (CD's status dot made explicit).
@@ -607,7 +640,10 @@ def launcher(dots=(), name='2026-11-13-launcher-home.png'):
         text(d, (x, yy), line, fnote2, P['Dimmer'])
         yy += 16
 
-    hint_bar(d, 'home', [(',', 'settings'), ('l/r', 'select'), ('Enter', 'open'), ('esc', 'quit')], dots)
+    hint_bar(d, 'home', [('l/r', 'select'), ('Enter', 'open'), ('esc', 'quit')], dots)
+    # S516/EST-478: the volume plate over the page, exactly where drawHintBar() puts it.
+    if volume is not None:
+        volume_popup_plate(d, volume)
     # S515/EST-461: the same page drawn with BOTH notification dots for the hint-dots preview. The launcher is
     # deliberately not the page the dots live on, which is the point: every page shows them.
     return save(img, name)
@@ -1293,7 +1329,7 @@ def chat_cards():
     text(d, (g['col_x'][1] + 12, g['cards_y'] + 12), 'No direct messages yet',
          font(FONT_SANS, TM['f_body']), P['Dim'])
 
-    hint_bar(d, 'chat', [('Enter', 'open'), ('esc', 'back'), ('↑↓', 'move'), ('←→', 'column'), (',', 'settings')])
+    hint_bar(d, 'chat', [('Enter', 'open'), ('esc', 'back'), ('↑↓', 'move'), ('←→', 'column')])
     return save(img, '2026-11-18-chat-two-columns.png')
 
 
@@ -1336,7 +1372,7 @@ def chat_dm_column():
     for i, (name, preview, stamp, unread) in enumerate(DM_CARDS):
         draw_channel_card(d, g, 1, i, 0, name, preview, stamp, unread, focused=(i == 1))
 
-    hint_bar(d, 'chat', [('Enter', 'open'), ('esc', 'back'), ('↑↓', 'move'), ('←→', 'column'), (',', 'settings')])
+    hint_bar(d, 'chat', [('Enter', 'open'), ('esc', 'back'), ('↑↓', 'move'), ('←→', 'column')])
     return save(img, '2026-11-18-chat-dm-column.png')
 
 
@@ -1784,7 +1820,7 @@ def menu():
     text(d, (pad, top + ch + 28), MENU_OWNS[MENU_CARDS[0]['name']],
          font(FONT_MONO, TM['f_meta']), P['Dim'])
 
-    hint_bar(d, 'home', [(',', 'settings'), ('←→', 'select'), ('Enter', 'open'), ('esc', 'quit')])
+    hint_bar(d, 'home', [('←→', 'select'), ('Enter', 'open'), ('esc', 'quit')])
     return save(img, '2026-11-18-menu-cards.png')
 
 
@@ -1885,8 +1921,7 @@ def settings_general():
 
     # the ticket's five keys, plus the global Settings key. The bar fits them by shortening the labels
     # (the device's chrome drops a chip that would run under the symbol keys).
-    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),
-                             (',', 'settings')])
+    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),])
     return save(img, '2026-11-19-settings-general.png')
 
 
@@ -1973,8 +2008,7 @@ def settings_sound():
         yy += row_h + 2
 
     scroll_indicator(d, (lx0, body_top, W - 8, body_bot), total_h, body_bot - body_top, scroll)
-    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),
-                             (',', 'settings')])
+    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),])
     return save(img, '2026-11-19-settings-sound.png')
 
 
@@ -2012,8 +2046,7 @@ def settings_led():
         setrow(d, lx0, lx1, yy, label, value, focused=(label == 'Message LED colour'), chevron=chevron,
                hint=hint)
         yy += row_h + 2
-    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),
-                             (',', 'settings')])
+    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),])
     return save(img, '2026-11-20-settings-led.png')
 
 
@@ -2091,7 +2124,7 @@ def settings_sound_picker():
         yy += row_step
 
     scroll_indicator(d, (lx0, body_top, W - 8, body_bot), total_h, body_bot - body_top, scroll)
-    hint_bar(d, 'settings', [('↑↓', 'row'), ('Enter', 'play/choose'), ('esc', 'back'), (',', 'settings')])
+    hint_bar(d, 'settings', [('↑↓', 'row'), ('Enter', 'play/choose'), ('esc', 'back')])
     return save(img, '2026-11-19-sound-picker-scrolled.png')
 
 
@@ -2170,8 +2203,7 @@ def settings_omlite():
     img, d, W, H, pad, body_top = _settings_owner_frame(1, 'OM Lite · tab 2 of 4')
     body_bot = H - TM['hint_h']
     _draw_omlite_rows(d, W, pad, body_top, body_bot, "Don't Panic", 0)
-    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),
-                             (',', 'settings')])
+    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),])
     return save(img, '2026-11-19-settings-omlite.png')
 
 
@@ -2185,8 +2217,7 @@ def settings_opstoc():
     img, d, W, H, pad, body_top = _settings_owner_frame(2, 'OPS-TOC · tab 3 of 4')
     text(d, (pad + 6, body_top + 16), 'Settings come with the app',
          font(FONT_SANS, TM['f_body']), P['Dim'])
-    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),
-                             (',', 'settings')])
+    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),])
     return save(img, '2026-11-19-settings-opstoc.png')
 
 
@@ -2201,8 +2232,7 @@ def settings_chat():
     img, d, W, H, pad, body_top = _settings_owner_frame(1, 'OM Lite · tab 2 of 4')
     body_bot = H - TM['hint_h']
     _draw_omlite_rows(d, W, pad, body_top, body_bot, "Don't Panic", 0)
-    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),
-                             (',', 'settings')])
+    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),])
     return save(img, '2026-11-19-settings-chat.png')
 
 
@@ -2216,8 +2246,7 @@ def settings_nodes():
     img, d, W, H, pad, body_top = _settings_owner_frame(1, 'OM Lite · tab 2 of 4')
     body_bot = H - TM['hint_h']
     _draw_omlite_rows(d, W, pad, body_top, body_bot, 'Add heard nodes to the radio', 0)
-    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),
-                             (',', 'settings')])
+    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),])
     return save(img, '2026-11-19-settings-nodes.png')
 
 
@@ -2231,8 +2260,7 @@ def settings_nodes_save():
     img, d, W, H, pad, body_top = _settings_owner_frame(1, 'OM Lite · tab 2 of 4')
     body_bot = H - TM['hint_h']
     _draw_omlite_rows(d, W, pad, body_top, body_bot, 'Save heard nodes to SD', 0, save_off=True)
-    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),
-                             (',', 'settings')])
+    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),])
     return save(img, '2026-11-20-nodes-settings-save.png')
 
 
@@ -2248,8 +2276,7 @@ def settings_map():
     # Height of everything above the MAP header in _omlite_rows(): NODES (22 + 6*34) + CHAT (22 + 6*34).
     above_map = (22 + 6 * 34) + (22 + 6 * 34)
     _draw_omlite_rows(d, W, pad, body_top, body_bot, 'Start position', above_map)
-    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),
-                             (',', 'settings')])
+    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),])
     return save(img, '2026-11-19-settings-map.png')
 
 
@@ -2319,7 +2346,7 @@ def dm_enter():
     key_cap(d, [W - pad - 84, ch + 8, W - pad - 8, ch + 36], '↵ Enter', P['Dimmer'],
             font(FONT_SANS, TM['f_hint']))
 
-    hint_bar(d, 'chat', [('Enter', 'send'), ('esc', 'back'), ('type', 'write'), ('↑↓', 'scroll'), (',', 'settings')])
+    hint_bar(d, 'chat', [('Enter', 'send'), ('esc', 'back'), ('type', 'write'), ('↑↓', 'scroll')])
     return save(img, '2026-11-19-dm-enter.png')
 
 
@@ -2402,7 +2429,7 @@ def chat_meta():
     key_cap(d, [W - pad - 84, ch + 8, W - pad - 8, ch + 36], '↵ Enter', P['Dimmer'],
             font(FONT_SANS, TM['f_hint']))
 
-    hint_bar(d, 'chat', [('Enter', 'send'), ('esc', 'back'), ('type', 'write'), ('↑↓', 'scroll'), (',', 'settings')])
+    hint_bar(d, 'chat', [('Enter', 'send'), ('esc', 'back'), ('type', 'write'), ('↑↓', 'scroll')])
     return save(img, '2026-11-19-chat-meta.png')
 
 
@@ -2739,6 +2766,20 @@ def hint_dots():
     """The hint bar with BOTH notification dots: Chat (a channel or a DM is unread) and Nodes (a contact is
     still new). Drawn on the Launcher on purpose — the dots belong to the chrome, not to a page."""
     return launcher(dots=('chat', 'nodes'), name='2026-11-19-hint-dots.png')
+
+
+# ------------------------------------------------- S516/EST-478: the six page keys + the volume pop-up
+def hintbar_keys():
+    """The SIX page keys, X first (S516/EST-478): X/F1 Launcher, triangle Nodes, square Chat, circle Map,
+    cloud RPTR, diamond Settings. The two red dots sit on NODES (triangle) and CHAT (square), their NEW
+    keys. Drawn on the Launcher, where the dots do not belong to the page."""
+    return launcher(dots=('chat', 'nodes'), name='2026-11-20-hintbar-keys.png')
+
+
+def volume_popup():
+    """The volume keys' plate: "Volume 70 %" with a bar, 1.5 s after the last press, on the Launcher page
+    (it is chrome, so it appears on every page). Geometry and text are main/chrome.cpp's own numbers."""
+    return launcher(volume=70, name='2026-11-20-volume-popup.png')
 
 
 # ------------------------------------------- S515/EST-465: the store view, the row tag and the node menu
@@ -3164,7 +3205,7 @@ def map_nodes_z12():
     _map_markers(d, area, MAP_NODES_Z12)
     text(d, (area[0] + 12, area[3] - 26), 'Esri, HERE, Garmin, OSM', font(FONT_MONO, TM['f_label']),
          P['Dim'])
-    hint_bar(d, 'map', [(',', 'settings'), ('dpad', 'pan'), ('+/-', 'zoom'), ('esc', 'back')])
+    hint_bar(d, 'map', [('dpad', 'pan'), ('+/-', 'zoom'), ('esc', 'back')])
     return save(img, '2026-11-19-map-nodes.png')
 
 
@@ -3176,7 +3217,7 @@ def map_nodes_z14():
     _map_markers(d, area, MAP_NODES_Z14, labels=True, highlight='TEST-A1')
     text(d, (area[0] + 12, area[3] - 26), 'Esri, HERE, Garmin, OSM', font(FONT_MONO, TM['f_label']),
          P['Dim'])
-    hint_bar(d, 'map', [(',', 'settings'), ('dpad', 'pan'), ('+/-', 'zoom'), ('esc', 'back')])
+    hint_bar(d, 'map', [('dpad', 'pan'), ('+/-', 'zoom'), ('esc', 'back')])
     return save(img, '2026-11-19-map-nodes-z14.png')
 
 
@@ -3401,7 +3442,8 @@ RENDERERS = dict(chat_select=chat_select, chat_msg_menu=chat_msg_menu, chat_msg_
                  settings_nodes=settings_nodes, settings_nodes_save=settings_nodes_save,
                  nodes_head_unsaved=nodes_head_unsaved, settings_map=settings_map,
                  settings_sound=settings_sound, settings_led=settings_led,
-                 settings_sound_picker=settings_sound_picker, popup_msg=popup_msg)
+                 settings_sound_picker=settings_sound_picker, popup_msg=popup_msg,
+                 hintbar_keys=hintbar_keys, volume_popup=volume_popup)
 
 
 def main(argv):

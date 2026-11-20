@@ -9,6 +9,8 @@
 #include "esp_log.h"
 #include "nvs.h"
 
+#include "volume_popup.h"
+
 namespace om {
 namespace soundstore {
 namespace {
@@ -20,6 +22,7 @@ const char* kKey = "cfg";
 nvs_handle_t                         s_nvs = 0;
 bool                                 s_opened = false;
 tm::soundcfg::SoundSettings          s_settings;
+tm::volume::VolumeSave               s_volume_save;
 
 bool writeAll(const tm::soundcfg::SoundSettings& s) {
     if (!s_opened) return false;
@@ -91,6 +94,7 @@ bool setMaster(bool on) {
     next.master                      = on;
     if (!writeAll(next)) return false;
     s_settings = next;
+    s_volume_save.clear();   // the blob just written holds any live volume change too
     return true;
 }
 
@@ -100,7 +104,33 @@ bool setVolume(uint8_t volume) {
     next.volume                      = volume;
     if (!writeAll(next)) return false;
     s_settings = next;
+    s_volume_save.clear();   // an immediate write already carries the value
     return true;
+}
+
+// S516/EST-478: a volume KEY press. The live value moves at once (the Settings row and the tick read it),
+// but NVS is only written by volumeTick() after ~2 s with no presses. That is why this is not
+// setVolume(): the row's own +/- and Enter keep writing immediately, as before.
+bool setVolumeLive(uint8_t volume, uint32_t now_ms) {
+    if (volume > 100) return false;
+    s_settings.volume = volume;
+    s_volume_save.changed(volume, now_ms);
+    return true;
+}
+
+// Any volume-key press (a clamp included) pushes the coalesced write later.
+void volumeTouch(uint32_t now_ms) { s_volume_save.touch(now_ms); }
+
+void volumeTick(uint32_t now_ms) {
+    uint8_t pending = 0;
+    if (!s_volume_save.take(now_ms, &pending)) return;
+    if (!s_opened) return;
+    if (!writeAll(s_settings)) {
+        // Keep trying, but never in a tight loop: another full window.
+        s_volume_save.changed(pending, now_ms);
+        return;
+    }
+    ESP_LOGI(TAG, "volume %u saved (coalesced after the key burst)", (unsigned)pending);
 }
 
 bool setChoice(tm::soundcfg::Event ev, uint8_t id) {
@@ -108,6 +138,7 @@ bool setChoice(tm::soundcfg::Event ev, uint8_t id) {
     tm::soundcfg::setChoice(next, ev, id);
     if (!writeAll(next)) return false;
     s_settings = next;
+    s_volume_save.clear();   // the blob just written holds any live volume change too
     return true;
 }
 

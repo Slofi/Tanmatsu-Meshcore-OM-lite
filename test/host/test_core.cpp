@@ -136,6 +136,7 @@ bool     g_om_nodes_bar = false;   // Nodes: the search bar has the focus
 int      g_om_nodes_row = 0;
 int      g_om_rptr_mode = 0;       // RPTR: 0 list, 1 login, 2 status
 int      g_om_rptr_row  = 0;
+bool     g_om_settings_sub = false;   // Settings: a sub-page is open (S516/EST-478)
 tm::Page g_om_top_page  = tm::Page::Count;
 
 void om_top_reset_focus() {
@@ -148,6 +149,7 @@ void om_top_reset_focus() {
   g_om_nodes_row = 0;
   g_om_rptr_mode = 0;
   g_om_rptr_row  = 0;
+  g_om_settings_sub = false;
   g_om_top_page  = tm::Page::Count;
 }
 
@@ -185,7 +187,13 @@ bool om_top(tm::Core&, tm::Page page) {
     if (closed) g_om_rptr_mode = 0;
     return closed;
   }
-  return false;   // Map has no list; Settings has no own symbol key
+  if (page == tm::Page::Settings) {
+    // S516/EST-478: the diamond closes a Settings sub-page; at the root there is nothing to close.
+    if (!g_om_settings_sub) return false;
+    g_om_settings_sub = false;
+    return true;
+  }
+  return false;   // Map has no list; the Launcher has no module
 }
 
 bool probe_start(tm::Core&) {
@@ -338,25 +346,35 @@ void test_symbol_keys_route_and_are_not_swallowed() {
   tm::Core core;
   CHECK(core.registry().add(om));
 
-  // the key table: NAMES + the codes the on-glass logger read (S499). Before S499 every code was
-  // kUnlogged and this test asserted exactly that; the shell then logged them on the device
-  // ([key] nav key=N), so the assertion is now the stronger one: the REAL codes, and the invariant that
-  // an unlogged code still cannot act as a key.
+  // the key table: NAMES + codes. S516/EST-478 moved the function keys one up: F1/X = 20, then the five
+  // symbol keys 21..25, and the volume keys 37/38 (the BSP enum, counted in order).
   struct Want { tm::Key key; const char* name; tm::Page page; uint16_t code; };
   static const Want wants[] = {
-      {tm::Key::SymTriangle, "triangle", tm::Page::Launcher, 21},
-      {tm::Key::SymSquare, "square", tm::Page::Nodes, 22},
-      {tm::Key::SymCircle, "circle", tm::Page::Chat, 23},
-      {tm::Key::SymCloud, "cloud", tm::Page::Map, 24},
-      {tm::Key::SymDiamond, "diamond", tm::Page::Rptr, 25},
+      {tm::Key::SymX, "x", tm::Page::Launcher, 20},
+      {tm::Key::SymTriangle, "triangle", tm::Page::Nodes, 21},
+      {tm::Key::SymSquare, "square", tm::Page::Chat, 22},
+      {tm::Key::SymCircle, "circle", tm::Page::Map, 23},
+      {tm::Key::SymCloud, "cloud", tm::Page::Rptr, 24},
+      {tm::Key::SymDiamond, "diamond", tm::Page::Settings, 25},
   };
   for (const Want& w : wants) {
     CHECK(strcmp(tm::key_name(w.key), w.name) == 0);
-    CHECK_EQ(tm::key_code(w.key), w.code);              // logged on glass, never guessed
+    CHECK_EQ(tm::key_code(w.key), w.code);              // from the BSP enum / the glass log
     CHECK(tm::key_from_code(w.code) == w.key);          // and the reverse mapping agrees
     CHECK_EQ(tm::page_for_symbol(w.key) == w.page, true);
     CHECK_EQ(tm::is_symbol(w.key), true);
   }
+  // the volume keys: table codes 37/38, NOT page keys, and never routed to a page.
+  CHECK(strcmp(tm::key_name(tm::Key::VolUp), "volumeup") == 0);
+  CHECK(strcmp(tm::key_name(tm::Key::VolDown), "volumedown") == 0);
+  CHECK_EQ(tm::key_code(tm::Key::VolUp), 37);
+  CHECK_EQ(tm::key_code(tm::Key::VolDown), 38);
+  CHECK(tm::key_from_code(37) == tm::Key::VolUp);
+  CHECK(tm::key_from_code(38) == tm::Key::VolDown);
+  CHECK_EQ(tm::is_volume_key(tm::Key::VolUp), true);
+  CHECK_EQ(tm::is_volume_key(tm::Key::VolDown), true);
+  CHECK_EQ(tm::is_symbol(tm::Key::VolUp), false);
+  CHECK_EQ(tm::page_for_symbol(tm::Key::VolUp) == tm::Page::Count, true);
   // the arrows/enter the same logger saw
   CHECK_EQ(tm::key_code(tm::Key::Up), 4);
   CHECK_EQ(tm::key_code(tm::Key::Down), 5);
@@ -418,7 +436,7 @@ void test_symbol_keys_route_and_are_not_swallowed() {
 
 // ------------------------------------------- 4b. own symbol key -> the page's own top (S514/EST-444)
 void test_own_symbol_key_returns_to_the_page_top() {
-  printf("test  own symbol key goes to the page's top; at the top it is a no-op\n");
+  printf("test  own page key goes to the page's top; at the top it is a no-op\n");
   g_om_starts = g_om_draws = g_om_keys = 0;
   g_om_tops = 0;
   g_om_inner = false;
@@ -432,19 +450,31 @@ void test_own_symbol_key_returns_to_the_page_top() {
   CHECK(core.start("om-lite"));
   CHECK_EQ(core.goPage(tm::Page::Chat).action == tm::RouteAction::Switched, true);
 
-  // the table itself: only the circle is the Chat page's own key
-  CHECK_EQ(tm::is_own_symbol(tm::Key::SymCircle, tm::Page::Chat), true);
-  CHECK_EQ(tm::is_own_symbol(tm::Key::SymSquare, tm::Page::Chat), false);
-  CHECK_EQ(tm::is_own_symbol(tm::Key::SymTriangle, tm::Page::Launcher), true);
+  // the table itself: only the SQUARE is the Chat page's own key now (S516/EST-478).
+  CHECK_EQ(tm::is_own_symbol(tm::Key::SymSquare, tm::Page::Chat), true);
+  CHECK_EQ(tm::is_own_symbol(tm::Key::SymCircle, tm::Page::Chat), false);
+  CHECK_EQ(tm::is_own_symbol(tm::Key::SymX, tm::Page::Launcher), true);
+  CHECK_EQ(tm::is_own_symbol(tm::Key::SymDiamond, tm::Page::Settings), true);
+  CHECK_EQ(tm::is_own_symbol(tm::Key::SymDiamond, tm::Page::Rptr), false);
+  // …and the whole new map, page by page.
+  CHECK_EQ(tm::page_for_symbol(tm::Key::SymX) == tm::Page::Launcher, true);
+  CHECK_EQ(tm::page_for_symbol(tm::Key::SymTriangle) == tm::Page::Nodes, true);
+  CHECK_EQ(tm::page_for_symbol(tm::Key::SymSquare) == tm::Page::Chat, true);
+  CHECK_EQ(tm::page_for_symbol(tm::Key::SymCircle) == tm::Page::Map, true);
+  CHECK_EQ(tm::page_for_symbol(tm::Key::SymCloud) == tm::Page::Rptr, true);
+  CHECK_EQ(tm::page_for_symbol(tm::Key::SymDiamond) == tm::Page::Settings, true);
+  // A typed comma is not a page/Settings key: core/keys.h says so, and main.cpp never maps it.
+  CHECK_EQ(tm::is_settings_key(tm::Key::SymDiamond), true);
+  CHECK_EQ(tm::is_settings_key(tm::Key::Char), false);
 
   // INSIDE a level: the router says Top and the core hands it to the page's owner, which closes it.
-  // The page does NOT move, and the module's ordinary onKey never sees a symbol key.
+  // The page does NOT move, and the module's ordinary onKey never sees a page key.
   g_om_inner = true;
-  const tm::RouteResult own = core.router().symbol(tm::Key::SymCircle, core.registry());
+  const tm::RouteResult own = core.router().symbol(tm::Key::SymSquare, core.registry());
   CHECK(own.action == tm::RouteAction::Top);
   CHECK_EQ(own.page == tm::Page::Chat, true);
   CHECK(own.module != nullptr && strcmp(own.module, "om-lite") == 0);
-  CHECK_EQ(core.handleKey(tm::Key::SymCircle), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
   CHECK_EQ(g_om_tops, 1);
   CHECK_EQ(g_om_top_page == tm::Page::Chat, true);   // the module was told WHICH page
   CHECK_EQ(g_om_inner, false);                     // the inner level is closed
@@ -452,38 +482,50 @@ void test_own_symbol_key_returns_to_the_page_top() {
   CHECK_EQ(g_om_keys, 0);
 
   // AT THE TOP: consumed, the owner is asked, and it answers "nothing to close" — a no-op.
-  CHECK_EQ(core.handleKey(tm::Key::SymCircle), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
   CHECK_EQ(g_om_tops, 2);
   CHECK_EQ(g_om_inner, false);
   CHECK_EQ(core.page() == tm::Page::Chat, true);
 
-  // A DIFFERENT page's own key must NOT close the Chat level: OM Lite owns five pages. Put the fake
-  // level back, go to Nodes and press square (Nodes' own key); the hook is told Nodes and leaves it.
+  // A DIFFERENT page's own key must NOT close the Chat level: OM Lite owns six pages. Put the fake
+  // level back, go to Nodes and press triangle (Nodes' own key); the hook is told Nodes and leaves it.
   g_om_inner = true;
   CHECK_EQ(core.goPage(tm::Page::Nodes).action == tm::RouteAction::Switched, true);
-  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymTriangle), true);
   CHECK_EQ(core.page() == tm::Page::Nodes, true);
   CHECK_EQ(g_om_tops, 3);
   CHECK_EQ(g_om_top_page == tm::Page::Nodes, true);
   CHECK_EQ(g_om_inner, true);                        // the Chat level is untouched
-  // … and back on Chat, the circle does close it.
+  // … and back on Chat, the square does close it.
   CHECK_EQ(core.goPage(tm::Page::Chat).action == tm::RouteAction::Switched, true);
-  CHECK_EQ(core.handleKey(tm::Key::SymCircle), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
   CHECK_EQ(g_om_tops, 4);
   CHECK_EQ(g_om_top_page == tm::Page::Chat, true);
   CHECK_EQ(g_om_inner, false);
 
   // ANOTHER page's key routes as before and does not touch this page's level hook.
-  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymTriangle), true);
   CHECK_EQ(core.page() == tm::Page::Nodes, true);
   CHECK_EQ(g_om_tops, 4);
 
-  // The Launcher's own key (triangle) has no module: it is consumed and changes nothing.
+  // Settings' own key is the DIAMOND: on Settings the router answers Top and the owner is told Settings.
+  g_om_settings_sub = true;
+  CHECK_EQ(core.goPage(tm::Page::Settings).action == tm::RouteAction::Switched, true);
+  CHECK_EQ(core.handleKey(tm::Key::SymDiamond), true);
+  CHECK_EQ(core.page() == tm::Page::Settings, true);
+  CHECK_EQ(g_om_tops, 5);
+  CHECK_EQ(g_om_top_page == tm::Page::Settings, true);
+  CHECK_EQ(g_om_settings_sub, false);   // its sub-page closed
+  CHECK_EQ(core.handleKey(tm::Key::SymDiamond), true);
+  CHECK_EQ(g_om_tops, 6);               // asked again at the root …
+  CHECK_EQ(g_om_settings_sub, false);   // … and nothing to close
+
+  // The Launcher's own key (X) has no module: it is consumed and changes nothing.
   core.router().home();
-  CHECK(core.router().symbol(tm::Key::SymTriangle, core.registry()).action == tm::RouteAction::Noop);
-  CHECK_EQ(core.handleKey(tm::Key::SymTriangle), true);
+  CHECK(core.router().symbol(tm::Key::SymX, core.registry()).action == tm::RouteAction::Noop);
+  CHECK_EQ(core.handleKey(tm::Key::SymX), true);
   CHECK_EQ(core.page() == tm::Page::Launcher, true);
-  CHECK_EQ(g_om_tops, 4);
+  CHECK_EQ(g_om_tops, 6);
 }
 
 // ------------------------------------------- 4c. own key AT the top -> the first row (S514/EST-454)
@@ -507,7 +549,7 @@ void test_own_key_at_the_top_selects_the_first_row() {
   g_om_row       = 5;
   g_om_scroll[0] = 3;
   g_om_scroll[1] = 4;
-  CHECK_EQ(core.handleKey(tm::Key::SymCircle), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
   CHECK_EQ(g_om_tops, 1);
   CHECK_EQ(g_om_col, om::mc::kColChannels);
   CHECK_EQ(g_om_row, 0);
@@ -522,7 +564,7 @@ void test_own_key_at_the_top_selects_the_first_row() {
   g_om_row       = 5;
   g_om_scroll[0] = 3;
   g_om_scroll[1] = 4;
-  CHECK_EQ(core.handleKey(tm::Key::SymCircle), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
   CHECK_EQ(g_om_tops, 2);
   CHECK_EQ(g_om_inner, false);
   CHECK_EQ(g_om_col, om::mc::kColChannels);
@@ -531,7 +573,7 @@ void test_own_key_at_the_top_selects_the_first_row() {
   CHECK_EQ(g_om_scroll[1], 4);
 
   // The second press is now at the top: first row again.
-  CHECK_EQ(core.handleKey(tm::Key::SymCircle), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
   CHECK_EQ(g_om_tops, 3);
   CHECK_EQ(g_om_col, om::mc::kColChannels);
   CHECK_EQ(g_om_row, 0);
@@ -542,37 +584,37 @@ void test_own_key_at_the_top_selects_the_first_row() {
   CHECK_EQ(core.goPage(tm::Page::Nodes).action == tm::RouteAction::Switched, true);
   g_om_nodes_bar = false;
   g_om_nodes_row = 4;
-  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymTriangle), true);
   CHECK_EQ(g_om_tops, 4);
   CHECK_EQ(g_om_nodes_row, 0);
   CHECK_EQ(g_om_nodes_bar, false);
   g_om_nodes_bar = true;
   g_om_nodes_row = 4;
-  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymTriangle), true);
   CHECK_EQ(g_om_tops, 5);
   CHECK_EQ(g_om_nodes_bar, false);
   CHECK_EQ(g_om_nodes_row, 4);   // one step, no jump
-  CHECK_EQ(core.handleKey(tm::Key::SymSquare), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymTriangle), true);
   CHECK_EQ(g_om_nodes_row, 0);   // the next press is at the top
 
   // RPTR: the same rule because it has a list; login/status is its inner level.
   CHECK_EQ(core.goPage(tm::Page::Rptr).action == tm::RouteAction::Switched, true);
   g_om_rptr_mode = 0;
   g_om_rptr_row  = 3;
-  CHECK_EQ(core.handleKey(tm::Key::SymDiamond), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymCloud), true);
   CHECK_EQ(g_om_rptr_row, 0);
   g_om_rptr_mode = 1;
   g_om_rptr_row  = 3;
-  CHECK_EQ(core.handleKey(tm::Key::SymDiamond), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymCloud), true);
   CHECK_EQ(g_om_rptr_mode, 0);
   CHECK_EQ(g_om_rptr_row, 3);    // one step
-  CHECK_EQ(core.handleKey(tm::Key::SymDiamond), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymCloud), true);
   CHECK_EQ(g_om_rptr_row, 0);
 
   // Map has no list: the hook is asked and answers false, and there is no row to move.
   CHECK_EQ(core.goPage(tm::Page::Map).action == tm::RouteAction::Switched, true);
   const int tops_before_map = g_om_tops;
-  CHECK_EQ(core.handleKey(tm::Key::SymCloud), true);
+  CHECK_EQ(core.handleKey(tm::Key::SymCircle), true);
   CHECK_EQ(g_om_tops, tops_before_map + 1);
 }
 
@@ -606,8 +648,8 @@ void test_states_and_one_drawing_owner() {
   CHECK_EQ(g_om_draws, 1);                                   // the module drew …
   const int after_module_draw = g_om_draws;
 
-  // the Launcher page draws INSTEAD of the module, never beside it
-  CHECK_EQ(core.handleKey(tm::Key::SymTriangle), true);
+  // the Launcher page draws INSTEAD of the module, never beside it (its own key is X now)
+  CHECK_EQ(core.handleKey(tm::Key::SymX), true);
   CHECK_EQ(core.page() == tm::Page::Launcher, true);
   who = core.draw(canvas);
   CHECK(who != nullptr && strcmp(who, "launcher") == 0);

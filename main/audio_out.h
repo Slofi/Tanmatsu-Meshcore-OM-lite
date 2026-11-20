@@ -39,6 +39,13 @@ bool preview(uint8_t soundId);
 // 0..100, the BSP's codec volume.
 void setVolume(uint8_t percent);
 
+// S516/EST-478: a volume key changed the level. Apply the new codec volume and play ONE short tick at it
+// through the existing queue/synth path ("Soft Tick", the L2's Sent default). Nothing is played when the
+// level is 0 (Muted) or the Sound master switch is Off — the volume still moves; the caller's pop-up says
+// so. Its own ~10/s ceiling is only a guard against a repeating key; it does not touch the notification
+// events' 400 ms gate.
+bool volumeTick(uint8_t percent);
+
 uint32_t playedCount();
 uint32_t droppedCount();
 

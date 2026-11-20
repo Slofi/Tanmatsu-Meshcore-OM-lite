@@ -195,21 +195,21 @@ void drawSettings(Screen& s, const SettingsView& v) {
         drawSettingsRows(s, v.sections, v.section_count, v.focus, v.scroll, body_top, kSetBodyH, v.core);
     }
 
-    // ---- the hint bar: the ticket's five keys plus the global Settings key.
+    // ---- the hint bar: this page's own keys; the six page keys live in the cluster on the right.
+    // S516/EST-478: the diamond is SETTINGS in that cluster (the old `, settings` chip is gone), and inside
+    // a sub-page it returns to the Settings root.
     if (v.sub_page) {
-        static const HintItem hints[] = {{",", "settings"}, {"type", "write"}, {"Enter", "apply"}, {"esc", "back"}};
-        drawHintBar(s, tm::Page::Settings, hints, 4);
+        static const HintItem hints[] = {{"type", "write"}, {"Enter", "apply"}, {"esc", "back"}};
+        drawHintBar(s, tm::Page::Settings, hints, 3);
     } else if (v.volume_row) {
-        // S514/EST-451: the Volume row adds '+' / '-'. Six chips do not fit before the symbol cluster
-        // (measured: the five standard chips already end at 460 px, the cluster starts at 397), so on this
-        // row the bar carries the four keys that matter here — including the ticket's "+/- volume".
-        static const HintItem hints[] = {{",", "settings"}, {"+/-", "volume"},
-                                         {"Enter", "change"}, {"esc", "back"}};
-        drawHintBar(s, tm::Page::Settings, hints, 4);
+        // S514/EST-451: the Volume row adds '+' / '-'. The six-key page cluster leaves even less room than
+        // the old five, so on this row the bar carries only the three keys that matter here.
+        static const HintItem hints[] = {{"+/-", "volume"}, {"Enter", "change"}, {"esc", "back"}};
+        drawHintBar(s, tm::Page::Settings, hints, 3);
     } else {
         static const HintItem hints[] = {{"Enter", "open/change"}, {"esc", "back"}, {"l/r", "tab"},
-                                         {"up/dn", "row"}, {",", "settings"}};
-        drawHintBar(s, tm::Page::Settings, hints, 5);
+                                         {"up/dn", "row"}};
+        drawHintBar(s, tm::Page::Settings, hints, 4);
     }
 }
 

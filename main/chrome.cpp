@@ -9,6 +9,7 @@
 
 #include "launcher_page.h"   // textBaseline / drawText* — the one place the baseline math lives
 #include "chat_layout.h"     // S516: the UTF-8-safe wrapper the pop-up reuses (host-tested)
+#include "volume_popup.h"    // S516/EST-478: the volume pop-up's text and placement (pure, host-tested)
 #include "tm_theme.h"
 #include "../../firmware/src/ui/theme.h"   // the L2 palette: one source of truth, never copied
 
@@ -121,6 +122,34 @@ void drawMessagePopup(Screen& s, const MsgPopupView& v) {
         snprintf(more, sizeof(more), "+%u more", (unsigned)v.extra);
         drawText(s, Face::Body, px + 24, textBaseline(s, Face::Body, ly, 22), more, kDim);
     }
+}
+
+// ---- the volume pop-up (S516/EST-478) -------------------------------------------------------------
+// main.cpp owns the key decision and calls volumePopupPress() on every press; this slot is the display.
+// The plate sits just above the hint bar. The message pop-up is centred and at most 150 px tall, so its
+// lowest edge is ~315 px while this plate starts at 390 px: both fit, neither hides the other.
+tm::volume::VolumePopup g_volume;
+bool                    g_volume_master_on = true;
+
+void drawVolumePopup(Screen& s) {
+    int x = 0, y = 0;
+    tm::volume::popupRect(kTmW, kTmH, kTmHintH, &x, &y);
+    drawRoundedRect(s, x, y, tm::volume::kPopupW, tm::volume::kPopupH, 8, kPanel2);
+    s.frame(x, y, tm::volume::kPopupW, tm::volume::kPopupH, 2, g_volume_master_on ? kAcc : kLine);
+
+    char text[32];
+    tm::volume::popupText(text, sizeof(text), g_volume.level, g_volume_master_on);
+    drawText(s, Face::Title, x + 18, textBaseline(s, Face::Title, y + 4, 26), text,
+             g_volume_master_on ? kInk : kDim);
+
+    const int bx = x + 18;
+    const int by = y + tm::volume::kPopupH - 18;
+    const int bw = tm::volume::kPopupW - 36;
+    const int bh = 8;
+    s.fillRect(bx, by, bw, bh, kLine);
+    const int fill = bw * (int)tm::volume::barPercent(g_volume.level) / 100;
+    if (fill > 0) s.fillRect(bx, by, fill, bh, g_volume_master_on ? kAcc : kDim);
+    s.frame(bx, by, bw, bh, 1, kLine);
 }
 
 }  // namespace
@@ -274,24 +303,50 @@ bool hintDotsNeedsRepaint() {
     return true;   // one repaint per CHANGE, so a dot cannot cost a frame per loop pass
 }
 
+// ---- the volume pop-up (S516/EST-478): the display slot above -----------------------------------------
+void volumePopupPress(uint32_t now_ms, uint8_t level, bool master_on) {
+    g_volume.press(now_ms, level);
+    g_volume_master_on = master_on;
+}
 
-// The five physical symbol keys, drawn as vectors (BRIEF § 5; the preview tool's recipes, ported).
-// Cloud is an OUTLINE like the other four (Filip, S499 "fix the cloud symbol").
+bool volumePopupTick(uint32_t now_ms) {
+    const bool was = g_volume.visible;
+    g_volume.tick(now_ms);
+    return was && !g_volume.visible;
+}
+
+
+// The six page keys, drawn as vectors (BRIEF § 5; the preview tool's recipes, ported).
+// Cloud is an OUTLINE like the others (Filip, S499 "fix the cloud symbol").
 void drawSymbolSigil(Screen& s, int kind, int cx, int cy, int r, uint16_t c, bool active) {
     switch (kind) {
-        case 0: {  // triangle
+        case 0: {  // X = the F1 key (S516/EST-478)
+            const int a = r - 1;
+            s.px(cx - a, cy - a, c);
+            s.px(cx + a, cy - a, c);
+            s.px(cx - a, cy + a, c);
+            s.px(cx + a, cy + a, c);
+            for (int i = 1; i < a; ++i) {
+                s.px(cx - i, cy - i, c);
+                s.px(cx + i, cy - i, c);
+                s.px(cx - i, cy + i, c);
+                s.px(cx + i, cy + i, c);
+            }
+            break;
+        }
+        case 1: {  // triangle
             const int xs[3] = {cx, cx + r, cx - r};
             const int ys[3] = {cy - r, cy + r, cy + r};
             s.polyline(xs, ys, 3, 2, c);
             break;
         }
-        case 1:  // square
+        case 2:  // square
             s.frame(cx - r, cy - r, 2 * r, 2 * r, 2, c);
             break;
-        case 2:  // circle
+        case 3:  // circle
             s.ring(cx, cy, r, 2, c);
             break;
-        case 3: {  // cloud = the tri-circle key
+        case 4: {  // cloud = the tri-circle key
             // Outer union minus the same union shrunk by the stroke: an outline with no internal arcs.
             const int w = 2 * r + 8;
             static uint8_t cov[64 * 64];
@@ -325,7 +380,7 @@ void drawSymbolSigil(Screen& s, int kind, int cx, int cy, int r, uint16_t c, boo
             s.maskBlend(cx - w / 2, cy - w / 2, w, w, cov, c);
             break;
         }
-        case 4: {  // diamond
+        case 5: {  // diamond
             const int xs[4] = {cx, cx + r, cx, cx - r};
             const int ys[4] = {cy - r, cy, cy + r, cy};
             s.polyline(xs, ys, 4, 2, c);
@@ -463,24 +518,29 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
         drawText(s, Face::Title, tx, textBaseline(s, Face::Title, py, ph), notice, kAccInk);
     }
 
+    // S516/EST-478: the volume plate is chrome, so every page shows it. It sits just above the hint bar and
+    // below the message pop-up's lowest edge, so a message arriving during its 1.5 s never has its text hidden.
+    if (g_volume.visible) drawVolumePopup(s);
+
     s.fillRect(0, H - kTmHintH, W, kTmHintH, kBar);
     s.hline(0, W, H - kTmHintH, kLine);
     const int hy = H - kTmHintH;
     const int cy = hy + kTmHintH / 2;
     const int bl = textBaseline(s, Face::Hint, hy, kTmHintH);
 
-    static const char* page_names[5] = {"LAUNCHER", "NODES", "CHAT", "MAP", "RPTR"};
+    // S516/EST-478: SIX page keys, X first, in Page order (Launcher, Nodes, Chat, Map, Rptr, Settings).
+    static const char* page_names[6] = {"LAUNCHER", "NODES", "CHAT", "MAP", "RPTR", "SETTINGS"};
     const Font*        hf            = fontFor(Face::Hint);
 
-    // Where the right-hand symbol cluster begins. The LEFT hints are drawn only while they fit before it,
-    // so adding the Settings key (and a page's own four actions) can never push a chip under the sigils.
-    // This matters since EST-445: every page now carries `, settings` plus its own hints.
+    // Where the right-hand page-key cluster begins. The LEFT hints are drawn only while they fit before it,
+    // so a page's own actions can never push a chip under the sigils. Six keys need tighter gaps than the
+    // old five (18 after the name, 14 after the sigil) or the cluster would eat half the bar.
     int sx = W - kTmPad;
-    for (int i = 4; i >= 0; i--) {
+    for (int i = 5; i >= 0; i--) {
         const int tw = (hf && hf->ready()) ? hf->textWidth(page_names[i]) : 40;
         sx -= tw;
-        sx -= 22;
         sx -= 18;
+        sx -= 14;
     }
     const int right_start = sx;
 
@@ -494,9 +554,8 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
                                                   : 30)
                                           : 30;
         const int lw = (hf && hf->ready()) ? hf->textWidth(hints[i].label) : 30;
-        // Tighter than the old 6/14/16 spacing: EST-445 puts FIVE hints on a page (`, settings` plus
-        // four actions), and the ticket's Settings bar must show all of them without running under the
-        // symbol cluster.
+        // Tighter than the old 6/14/16 spacing: a page can carry four or five action chips, and the six
+        // page keys must all stay readable on the right.
         const int item_w = kw + 4 + 8 + lw + 10;
         if (hx + item_w > right_start - 8) break;   // no room: stop rather than overlap the page keys
         drawKeyCap(s, hx, cy - 9, kw, 18, hints[i].key, kDim);
@@ -507,18 +566,19 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
 
     sx = W - kTmPad;
     const uint8_t dots = g_hint_dots;
-    for (int i = 4; i >= 0; i--) {
+    for (int i = 5; i >= 0; i--) {
         const bool on = (static_cast<int>(active) == i);
         const int  tw = (hf && hf->ready()) ? hf->textWidth(page_names[i]) : 40;
         sx -= tw;
         drawText(s, Face::Hint, sx, bl, page_names[i], on ? (uint16_t)kAccInk : kDimmer);
-        sx -= 22;
+        sx -= 18;
         drawSymbolSigil(s, i, sx, cy, 7, on ? (uint16_t)kAcc : (uint16_t)kDim, on);
         // S515/EST-461: the notification dot, at the sigil's TOP-RIGHT and clear of its gold ring (the ring's
         // nearest point is ~4.9 px from the centre on that diagonal, the dot's edge ~6 px). kBad is the chat
-        // list's unread-badge red, so the two reds on the glass cannot drift apart.
+        // list's unread-badge red, so the two reds on the glass cannot drift apart. S516/EST-478: the bits
+        // still mean Nodes (1, now the triangle) and Chat (2, now the square) — the NEW keys.
         if ((dots & (1u << i)) != 0) s.disc(sx + 9, cy - 8, 3, kBad);
-        sx -= 18;
+        sx -= 14;
     }
 }
 

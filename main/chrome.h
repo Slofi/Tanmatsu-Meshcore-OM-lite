@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// The parts every page draws the same way: the status bar, the key-hint bar, the five symbol sigils, and the
+// The parts every page draws the same way: the status bar, the key-hint bar, the six page-key sigils, and the
 // page-head row. They were inside launcher_page.cpp until the second and third page needed them (S502, step 4);
 // the numbers are the approved ones, moved, not changed.
 //
@@ -28,7 +28,7 @@ void drawStatusBar(Screen& s, const char* clock, int battery_pct, bool charging)
 // Page-head band: title left, right-hand text right, and the line under it. Returns the y of the line.
 int drawPageHead(Screen& s, const char* title, const char* right_text);
 
-// The bottom bar: this page's actions on the left, the five symbol keys on the right with `active` in gold.
+// The bottom bar: this page's actions on the left, the six page keys on the right with `active` in gold.
 // S513/EST-435: it also draws the app's ONE notice, just above itself, when one is live — see noticeSet().
 void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_count);
 
@@ -93,13 +93,26 @@ const char* noticeText();
 // an ADV, but still no pop-up"). Main task only; call it every loop pass.
 bool noticeNeedsRepaint();
 
-// The five symbol keys as vectors (BRIEF § 5). kind: 0 triangle, 1 square, 2 circle, 3 cloud, 4 diamond.
+// The six page keys as vectors (BRIEF § 5; S516/EST-478): kind 0 X (F1), 1 triangle, 2 square, 3 circle,
+// 4 cloud, 5 diamond.
 void drawSymbolSigil(Screen& s, int kind, int cx, int cy, int r, uint16_t c, bool active);
+
+// ------------------------------------------------------------------------ the volume pop-up (S516/EST-478)
+// The volume KEYS are global: main.cpp decides the level and calls volumePopupPress() on every press (even
+// at a clamp, so the plate re-arms), then volumePopupTick() once per loop pass. drawHintBar() draws the
+// plate, so every page — and the Launcher — shows it without a line of its own. It is NOT modal: no key is
+// taken from the page. It sits just above the hint bar, below the message pop-up's lowest edge, so the two
+// fit together and the message pop-up's content is never hidden.
+void volumePopupPress(uint32_t now_ms, uint8_t level, bool master_on);
+
+// True once when the 1.5 s ran out, so the caller repaints the page under the plate.
+bool volumePopupTick(uint32_t now_ms);
 
 // --------------------------------------------------------------------------- the hint bar's red dots (S515/EST-461)
 // Filip's ask: a notification dot on the CHAT sigil while a channel or a DM has unread, and on the NODES sigil
 // while a contact is still NEW. One bit per sigil, so a page cannot draw a dot on somebody else's key:
-//   bit 0 Launcher · bit 1 Nodes · bit 2 Chat · bit 3 Map · bit 4 RPTR.
+//   bit 0 X/Launcher · bit 1 triangle/Nodes · bit 2 square/Chat · bit 3 circle/Map · bit 4 cloud/RPTR
+//   (bit 5 diamond/Settings has no dot). S516/EST-478 moved the pages onto these keys; the BITS did not move.
 //
 // The CALLER supplies the data (main.cpp reads the store's own counters), exactly like the notice: every page
 // calls drawHintBar(), so every page shows the dots without a line of its own. The dot is the chat list's badge

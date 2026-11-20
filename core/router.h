@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // The Tanmatsu app core, part 4: the page router (PLAN.md §2 rule 3, §5).
 //
-// The five physical symbol keys and Esc are a CORE-level route: the key arrives here before any
-// module can see it, so a module cannot swallow the page switch. The router only DECIDES; it never
+// The six page keys (X/F1 and the five symbol keys) and Esc are a CORE-level route: the key arrives here
+// before any module can see it, so a module cannot swallow the page switch. The router only DECIDES; it never
 // starts anything — when the target page's module is stopped it answers OfferStart and the caller (the
 // Launcher's own row or action) asks the user first.
 //

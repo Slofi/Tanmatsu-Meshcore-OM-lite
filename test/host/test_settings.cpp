@@ -355,7 +355,7 @@ void test_module_content_and_placeholder() {
 }
 
 void test_target_for_page() {
-  printf("test  ',' from an OM Lite page -> its tab and SECTION; menu -> General\n");
+  printf("test  the Settings key from an OM Lite page -> its tab and SECTION; menu -> General\n");
   tm::Registry reg;
   addApps(reg);
 
@@ -388,7 +388,7 @@ void test_target_for_page() {
 }
 
 void test_section_jump() {
-  printf("test  ',' lands on the section's first row with the section at the top\n");
+  printf("test  the Settings key lands on the section's first row with the section at the top\n");
   tm::SettingsFrame f;
   f.setBodyHeight(100);
   f.reset(1, 4);

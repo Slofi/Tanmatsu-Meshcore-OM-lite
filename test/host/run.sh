@@ -35,6 +35,7 @@ NODESMAP="$(mktemp /tmp/tm-nodes-map.XXXXXX)"
 NODESSEARCH="$(mktemp /tmp/tm-nodes-search.XXXXXX)"
 NODEMENU="$(mktemp /tmp/tm-node-menu.XXXXXX)"
 SOUND="$(mktemp /tmp/tm-sound-events.XXXXXX)"
+VOLUME="$(mktemp /tmp/tm-volume-popup.XXXXXX)"
 RPTR="$(mktemp /tmp/tm-rptr.XXXXXX)"
 RPTRASAN="$(mktemp /tmp/tm-rptr-asan.XXXXXX)"
 NODEOPS="$(mktemp /tmp/tm-node-ops.XXXXXX)"
@@ -53,7 +54,7 @@ RPTRED="$(mktemp -d /tmp/tm-rptr-ed.XXXXXX)"
 CHANORACLE="$(mktemp -d /tmp/tm-chan-oracle.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN" "$NODEVIEW" "$NODESMAPN" "$MSGPOPUP" "$MSGLED" "$SELECT"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$VOLUME" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN" "$NODEVIEW" "$NODESMAPN" "$MSGPOPUP" "$MSGLED" "$SELECT"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -224,8 +225,8 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
 # Settings (EST-445, per-app tabs S514/EST-448): the node-name rule (1..31 bytes, MeshCore's allowed characters,
 # trimming), the automatic-advert mapping (Off/1/3/6/12 h; Off means NO scheduled advert while the manual 'a' path
 # still works), the tab order DERIVED from the registry (General first, then the menu's order; a LATER module's tab
-# present), the module hook (a stopped module still answers; nullptr = the one honest line), the `,` target (right
-# tab + section), the frame's key arithmetic (tabs clamped, focus skipping section headers, the scroll keeping focus
+# present), the module hook (a stopped module still answers; nullptr = the one honest line), the Settings-key
+# target (right tab + section), the frame's key arithmetic (tabs clamped, focus skipping section headers, the scroll keeping focus
 # visible, Esc's two levels), NeedsRunning, and the shared confirm sheet's Cancel/Apply rule. registry.cpp is linked
 # for the tab list; alloc.cpp is what registry.cpp counts through.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -400,6 +401,14 @@ ASAN_OPTIONS=detect_leaks=1 "$NODEOPSASAN"
     ../../../firmware/src/sound_synth.cpp \
     -o "$SOUND"
 "$SOUND"
+
+# VOLUME KEYS (S516/EST-478): the step/clamp on the Settings row's own volume, the pop-up text for
+# 0/50/100 % and Sound off, the coalesced NVS write (N presses -> one write 2 s after the last), the 1.5 s
+# pop-up clock across the 32-bit wrap, the ~6/s gate, and the screen key-lock that ignores the keys.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_volume_popup.cpp \
+    -o "$VOLUME"
+"$VOLUME"
 
 # EMOJI (S514/EST-457): the SUBSET blob read by the L2's OWN parser (firmware/src/ui/emoji_table.h) and the L2's
 # OWN UTF-8/emoji walker (firmware/src/ui/text_wrap.cpp, compiled here and into the core component). Pins: the blob

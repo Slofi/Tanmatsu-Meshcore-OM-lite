@@ -283,8 +283,9 @@ void drawMap(Screen& s, const MapView& v) {
     // Attribution, bottom right of the map area: the source's terms require it to be visible.
     drawTextRight(s, Face::Hint, kMapAreaX + kMapAreaW - 6, kMapAreaY + kMapAreaH - 6, attribution(), kWhite);
 
-    static const HintItem hints[] = {{",", "settings"}, {"dpad", "pan"}, {"+/-", "zoom"}, {"esc", "back"}};
-    drawHintBar(s, tm::Page::Map, hints, 4);
+    // S516/EST-478: Settings is the diamond in the page-key cluster; no `, settings` chip here.
+    static const HintItem hints[] = {{"dpad", "pan"}, {"+/-", "zoom"}, {"esc", "back"}};
+    drawHintBar(s, tm::Page::Map, hints, 3);
 }
 
 }  // namespace ui

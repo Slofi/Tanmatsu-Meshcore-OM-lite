@@ -46,6 +46,9 @@ constexpr int kStageFrames = 256;
 // the anti-click story. No sound ever starts or ends on a non-zero sample.
 constexpr int kAmpSettleMs = 30;
 constexpr int kTailSilenceMs = 30;
+// S516/EST-478: the volume tick's own floor. The key repeat is capped at ~6/s, so this is only a guard
+// against a repeat arriving twice; it is separate from the 400 ms notification gate.
+constexpr uint32_t kVolumeTickGapMs = 100;
 
 struct PlayRequest {
   uint8_t sound;
@@ -59,6 +62,8 @@ int               s_bufSamples = 0;
 bool              s_bufPsram = false;
 bool              s_ready = false;
 uint32_t          s_lastPlayMs = 0;
+uint32_t          s_lastVolumeTickMs = 0;   // S516/EST-478
+bool              s_volumeTickEver = false;
 uint32_t          s_played = 0;
 uint32_t          s_dropped = 0;
 
@@ -259,6 +264,24 @@ bool preview(uint8_t soundId) {
 void setVolume(uint8_t percent) {
   if (!s_ready) return;
   bsp_audio_set_volume(tm::soundcfg::bspVolumeForRegister(tm::soundcfg::volumeRegister(percent)));   // the L2 curve
+}
+
+// S516/EST-478: apply the new level FIRST (so the tick is heard at it), then one Soft Tick. Muted and
+// Sound Off are silent, but the level has still moved; the pop-up says which case it is.
+bool volumeTick(uint8_t percent) {
+  setVolume(percent);
+  if (!s_ready) return false;
+  const tm::soundcfg::SoundSettings& st = om::soundstore::settings();
+  if (!st.master || percent == 0) return false;
+  const uint32_t now = nowMs();
+  if (s_volumeTickEver && (uint32_t)(now - s_lastVolumeTickMs) < kVolumeTickGapMs) return false;
+  // The fixed Soft Tick, not the user's Sent choice: a volume tick must stay short whatever a long phrase
+  // was picked for a notification. It is the L2's own Sent default (sound_synth.cpp:240).
+  const uint8_t id = tm::soundcfg::defaultSoundFor(tm::soundcfg::Event::Sent);
+  if (!enqueue(id, (uint8_t)tm::soundcfg::Event::Sent)) return false;
+  s_lastVolumeTickMs = now;
+  s_volumeTickEver   = true;
+  return true;
 }
 
 uint32_t playedCount() { return s_played; }

@@ -94,7 +94,8 @@ Rules the code must enforce (they are the difference between "several apps" and 
 2. **`stop()` returns the exact set `start()` took.** No lazy singletons, no static buffers in a module.
    Big buffers come from the core's PSRAM arena, so "freed" is observable.
 3. **The Launcher never runs while a module owns the screen.** Only the Launcher page, or one module page.
-   Page switching (five symbol keys) is a core-level route, so a module cannot swallow a key.
+   Page switching (six page keys: X/F1 and the five symbol keys) is a core-level route, so a module cannot
+   swallow a key.
 4. **Start/stop is testable on the host**: a fake `Core` counts allocations, so
    `start -> stop -> start` must leave the same count and the same free-heap number (a few hundred bytes
    of slack, as the brief says). One test per module, in `test/host/`, run by the same `run.sh` spirit.
@@ -153,46 +154,60 @@ rules the previews encode, so step 2 can be checked against them:
 - **Type:** the same DejaVu family, larger: title 22-26, row name 16-17, body 13, meta 12 mono,
   section labels 11 mono caps with tracking. Never a pixel font (BRIEF § 4).
 - **Rows** keep the L2's anatomy: type dot, name, right-aligned meta, 1 px bottom line, 64 px tall at 800.
-- **No icons-as-buttons.** The five page switches are physical keys; the UI shows them as sigils in the
-  hint bar (`triangle square circle cloud diamond`), drawn as vectors, never as a font glyph.
+- **No icons-as-buttons.** The six page switches are physical keys; the UI shows them as sigils in the
+  hint bar (`X triangle square circle cloud diamond`), drawn as vectors, never as a font glyph.
 
-## 5. Input: the arrows and the five symbol keys
+## 5. Input: the arrows, the six page keys and the volume keys
 
 **The model.** Focus-based, no touch: a focus ring on the selected thing; arrows move; `Enter` selects /
 opens / confirms; `Esc` (or `Backspace` when no field is focused) goes back; typing goes straight into a
-focused text field. The five symbol keys are a global page route. Nothing needs a long press.
+focused text field. The six page keys are a global page route; the two volume keys are global too (they
+never reach a page). Nothing needs a long press.
 
-**One table, one header.** `src/ui/keys.h` holds the ONLY key table:
+**One table, one header.** `core/keys.h` holds the ONLY key table:
 
 ```cpp
-// Key ids are whatever the BSP reports. They are FILLED IN on the glass by work-order step 2's key
-// logger (we log every key once, like the CardKB), never typed from memory.
 enum class Key : uint16_t { None, Up, Down, Left, Right, Enter, Esc, Backspace,
-                            SymTriangle, SymSquare, SymCircle, SymCloud, SymDiamond, Char };
-Page page_for_symbol(Key k);     // the five-key route, one switch, nothing else reads a Symbol key
+                            SymX, SymTriangle, SymSquare, SymCircle, SymCloud, SymDiamond,
+                            VolUp, VolDown, Char };
+Page page_for_symbol(Key k);     // the six-key route, one switch, nothing else reads a page key
 ```
 
-The proposed route (BRIEF § 5, **Filip may change it; if he does, only this table changes**):
+The settled route (S516/EST-478, Filip 2026-11-20: "One-up for them, X (F1) for our launcher"):
 
 | Key (Filip's name) | Page |
 |---|---|
-| triangle | Launcher home |
-| square | Nodes |
-| circle | Chat |
-| cloud | Map |
-| diamond | RPTR (Settings via the hint bar's gear key) |
+| X (F1) | Launcher home |
+| triangle | Nodes |
+| square | Chat |
+| circle | Map |
+| cloud | RPTR |
+| diamond | Settings (the own key there returns to the Settings root) |
 
-**Two things must not be guessed, and both are step-2 work:**
-1. **The codes.** Nothing in our notes records what the BSP reports for the top-row symbol keys or the
-   arrows (grepped: no keycode table exists). WadaMesh's `variants/tanmatsu` would have them and the BSP
-   is the authority — **neither is readable from this machine** (§ 6). So: no codes in this plan at all.
-   Step 2's key logger prints `scancode / ascii / pressed` for every key and that log becomes the table.
-2. **Scan-code stability across a launcher/BSP update.** If the BSP renumbers keys, `keys.h` is the one
-   file that changes; a host test pins the route table so a rename cannot silently move a page.
+`,` is **no longer a Settings key**: outside a text field it does nothing; inside one it is the character
+it is (the chat composer, the Nodes search, the RPTR password/position fields, and any channel/name field
+whose own rules allow it). The hint-bar chip `, settings` is gone; the diamond sigil means Settings.
 
-Also worth logging in step 2 and not obvious from any doc: **key repeat** (do the arrows auto-repeat?),
-**chords** (does the CH32 coprocessor already use Fn/symbol combos?), and whether `Esc`/`Backspace`
-arrive as distinct codes.
+The **volume keys** (BSP enum 37/38) change `sound_store`'s stored `volume` — the SAME value the Settings ›
+General › Volume row shows — by 10, clamped 0..100, through `core/volume_popup.h`. A 1.5 s plate shows
+"Volume 70 %" / "Muted" / "Sound off"; NVS is written once, after 2 s with no presses. The plate is chrome
+(any page, Launcher included) and never takes a key; the message pop-up keeps its own modal rule.
+
+**Codes are read from the BSP, never typed from memory:**
+1. **The codes.** `managed_components/badgeteam__badge-bsp/bsp/input.h:154-200` is the enum the device
+   reports: F1..F12 = 20..31, JOYSTICK_PRESS = 36, VOLUME_UP/DOWN = 37/38. The S499 logger confirmed the
+   symbol keys (21..25) on the glass; S516/EST-478 added X/F1 = 20 (seen once in a log, not yet pinned by a
+   labelled press) and VOLUME_UP 37 (41 times tonight) / VOLUME_DOWN 38 (never yet). A test pins the table so
+   a rename cannot silently move a page.
+2. **Scan-code stability across a launcher/BSP update.** If the BSP renumbers keys, `core/keys.h` is the one
+   file that changes; the route test then shows exactly which page moved.
+
+**Key repeat** is not delivered for these keys by this BSP: its repeat thread is commented out
+(`badge_bsp_input.c:447-477`), and the volume keys are edge events on the coprocessor/GPIO. One press is
+therefore one step; `core/volume_popup.h::StepGate` still refuses repeats faster than ~6/s if a future BSP
+sends them. **Chords**: the CH32 coprocessor uses Fn/symbol combos for its own menus; our app reads the
+resulting navigation keys only. `Esc` arrives as ASCII 0x1B, `Backspace` as 0x08/0x7F (both distinct from the
+navigation codes).
 
 ## 6. Build and install (re-read from WadaMesh, EST-425)
 
@@ -435,9 +450,9 @@ section is its draft, and steps 1-3 are the ones a first install actually needs.
 ## 8. Open questions
 
 **For Filip (decides):**
-1. **The five-key map**: is triangle/square/circle/cloud/diamond → Launcher/Nodes/Chat/Map/RPTR right, and
-   should Settings live behind a gear key in the hint bar (current plan) or on the diamond key with RPTR
-   one step further in?
+1. ~~**The five-key map**~~ **DECIDED (S516/EST-478, 2026-11-20): X/F1 = Launcher, triangle = Nodes, square =
+   Chat, circle = Map, cloud = RPTR, diamond = Settings; `,` is retired as the Settings key.** The map lives
+   in `core/keys.h` and the router test pins it.
 2. **"Later" tiles**: show Mesh-Torry and OPS-TOC Lite on the Launcher now as dim `LATER` rows (the
    preview does), or hide them until they exist? (BRIEF § 10.)
 3. **Status bar without GPS**: the Tanmatsu has none. The preview shows radio + battery + gear and no

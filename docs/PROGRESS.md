@@ -15,6 +15,135 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-20 · S516 (EST-478) volume keys
+
+> Written by **DeepSeek** for ticket **EST-478**: fenced Paperclip run, no session start or end, nothing installed,
+> flashed, pushed or committed (`.git` read only; Claude reviews and commits). Starting point **v72 `927bef4`**,
+> tree clean, v72 **not installed** (v71 is what the device runs). **RESULT: version 73; nothing installed, flashed,
+> pushed or committed.** Part 1 is the volume keys + on-screen volume pop-up; part 2 moves the function keys one
+> up (X = Launcher … diamond = Settings, `,` retired as the Settings key).
+>
+> **Numbers:** `sh test/host/run.sh` **exit 0** (the new `volume-popup` suite is **67 checks, 0 failures**;
+> `test_core` is **312 checks, 0 failures**). `make build` **exit 0**, `application.bin`
+> **1,748,960 B (0x1AB3E0)**, **+656 B** over v72's 1,748,304 B; total image **1,749,586 B**; DIRAM
+> **303,268 B used / 269,100 B free (52.98 %)**. Two host tests armed, exact FAIL lines below. `.git` untouched,
+> no commit; no SSH needed (the device is on Filip's USB).
+
+### What was read
+`core/keys.h`, `core/sound_events.h`, `core/settings.h` (the SetKey rules at 296/411/499), `core/msg_popup.h`,
+`core/screen_power.h`; `main/main.cpp` (mapKey, the input loop, `onTop`, `openSettings`, the Settings branch and
+every text field), `main/chrome.h/.cpp`, `main/sound_store.h/.cpp`, `main/audio_out.h/.cpp`, and the hint arrays
+in `main/launcher_page.cpp`, `main/nodes_page.cpp`, `main/chat_page.cpp`, `main/map_page.cpp`,
+`main/settings_page.cpp`, `main/rptr_page.cpp`. BSP: `badge-bsp/bsp/input.h:154-200` (the enum counted in order:
+NONE 0 … SPACE_R 19, F1 20 … F12 31, GAMEPAD_A 32 … JOYSTICK_PRESS 36, VOLUME_UP 37, VOLUME_DOWN 38) and
+`targets/tanmatsu/badge_bsp_input.c` (the volume handlers at 57-71/263-265, the repeat thread commented out at
+447-477). Tests: `test/host/run.sh`, `test_core.cpp`; preview `tools/preview_tanmatsu.py`; docs `PLAN.md`,
+`BRIEF.md`, `DEVICE.md`; the S516 entries at the top of this file.
+
+### The implementation, rule by rule
+**Part 1 — volume keys.**
+1. **The keys.** `Key::VolUp`/`Key::VolDown` were added to `core/keys.h` with codes **37/38** (the BSP enum's
+   values, counted in order — not guesses; the ticket's "nav key=37" log is VOLUME_UP, VOLUME_DOWN 38 has not
+   been seen on the glass yet). They are NOT page keys. `main.cpp` handles them immediately after the screen
+   lock and before any page branch, so they work on every page and on the Launcher and no page can swallow
+   them. One press = `soundcfg::stepVolume(current, ±10)`, clamped 0..100 — the Settings › General › Volume
+   row's own function and the same `soundstore` value it shows. `StepGate` refuses repeats faster than
+   ~6/s. **The BSP currently sends one edge per press** (its key-repeat thread is commented out), so a held key
+   gives one step; no repeat was invented. Reported as a fact, not hidden.
+2. **The pop-up.** `core/volume_popup.h` owns the text and the 1.5 s clock; `main/chrome.cpp::drawHintBar`
+   draws it, so every page and the Launcher get it. Text: `Volume 70 %` (with a bar), `Muted` at 0, `Sound off`
+   while the master switch is Off; the bar still shows the level while Sound is off. Every press re-arms the
+   1.5 s and redraws, even at a clamp. The plate is 420×54 at x=190, y=390 on the 800×480 glass; the message
+   pop-up is centred with its lowest edge at ~315, so **both fit and neither hides the other** (no need to
+   suppress one). The plate is NOT modal: it takes no key; the message pop-up keeps its own existing rule
+   (any key dismisses it and is swallowed).
+3. **The tick.** `audioout::volumeTick(new_level)` applies the L2's codec curve first, then enqueues ONE fixed
+   **Soft Tick** (the L2's Sent default) through the existing audio task/queue. Nothing is enqueued at 0 %
+   (Muted) or while Sound is Off; the level still changes. Its own 100 ms floor is separate from the
+   notification events' 400 ms gate.
+4. **NVS.** `sound_store` now exposes `setVolumeLive(level, now)` (RAM only) and `volumeTick(now)` (one write
+   when due). `core/volume_popup.h::VolumeSave` measures **2 s from the LAST press** (a clamp press calls
+   `volumeTouch`, which moves the window without scheduling a redundant write); the main loop calls
+   `volumeTick` once per pass. Immediate Settings writes (+/-, Enter) still write at once and clear the pending
+   flag, because their blob already carries the live value.
+5. **Locked.** The existing `ScreenPower` key-lock runs before `mapKey`/the volume handler, so a locked screen
+   ignores the volume keys; only the power button acts.
+
+**Part 2 — the function keys one up.**
+- **The map** is `core/keys.h::page_for_symbol`: X/F1 (20) → Launcher, triangle (21) → Nodes, square (22) →
+  Chat, circle (23) → Map, cloud (24) → RPTR, diamond (25) → Settings. `is_symbol` now includes `SymX`, so the
+  router treats X as a page key; `is_own_symbol` follows the map (X on the Launcher, diamond on Settings).
+- **Settings' own key.** The shell's Settings branch maps the diamond to `SetKey::Settings` (the exact code the
+  comma fed until now) in every sub-page/list/root handler; text fields close to the root; the module's
+  `onTop(Settings)` does the same for the core route through a pointer to the frame. At the root it changes
+  nothing. `,` no longer opens Settings anywhere: the old `if (!handled)` comma branch is gone. In text fields
+  it is ordinary text wherever that field's own rules allow it (chat composer and Nodes search: any byte;
+  RPTR password and RPTR settings/position: 0x20..0x7E incl. comma; channel Tag: yes, then normalised;
+  KeyB64: no (base64 alphabet); ScopeRegion and the node name: no (their own character rules)).
+- **The hint bar** is six sigils, X first, in Page order, labels LAUNCHER/NODES/CHAT/MAP/RPTR/SETTINGS, with
+  tighter 18/14 gaps. The two red dots stay bits 1/2, which are now the triangle (Nodes) and the square
+  (Chat) — their NEW keys. The `, settings` chip was removed from the Launcher, Settings (root/sub/volume),
+  Chat (list/open) and Map; Nodes and RPTR never had one. Page-key symbols are drawn as vectors, including
+  the new X.
+- **Docs.** `docs/PLAN.md` § 5, § 2 rule 3 and the open question now carry the new map/codes and the volume
+  keys; `BRIEF.md` § 5 has a dated `made by DeepSeek` note (Filip's text left intact). `DEVICE.md` lists no
+  key map (grep: no change needed). All comments in `core/keys.h`, `core/router.h`, `core/settings.h`,
+  `main/chrome.*`, `main/settings_page.cpp` and the shell were updated.
+
+### Host tests
+`test/host/test_volume_popup.cpp` (new, **67 checks**): the 10 % step at 0/10/90/95/100 and both clamps
+(no wrap), the Settings-row equivalence, `Volume 0/50/100 %` / `Muted` / `Sound off` (Sound off wins), the bar
+percent and the 420×54 plate at (190,390) with its lowest edge below the message pop-up's 315, **10 presses
+coalesced into ONE write exactly 2000 ms after the last** (and not before), a clamp press moving the window
+without a redundant write, the 1.5 s plate across the 32-bit wrap and a press re-arming it, the ~6/s gate, and
+`ScreenPower` swallowing keys while locked (only the power button wakes).
+`test_core.cpp` (updated, **312 checks**): the six-key table/codes/names (X 20, 21..25, volume 37/38), the full
+map, the own-symbol rule for every page **including Settings via the diamond**, a typed comma not being a
+Settings key, and the existing route/own-top tests moved onto the new keys.
+
+### Arm evidence
+The step/clamp rule (clamp removed, `return (uint8_t)(current + delta)`):
+```
+FAIL test_volume_popup.cpp:61  tm::volume::step(100, tm::volume::kStep) == 100 (got 110, want 100)
+volume-popup: 1/59 checks FAILED
+```
+The coalescing rule (`VolumeSave::due` made true while pending, i.e. a write per press):
+```
+FAIL test_volume_popup.cpp:115  !s.due(2001)
+FAIL test_volume_popup.cpp:132  !s.due(3999)
+volume-popup: 2/56 checks FAILED
+```
+Both were restored; no `ARM` marker remains (grep clean) and the final suite is 0 failures.
+
+### Files
+Core: `core/keys.h` (six-key map, X/volume keys, `is_settings_key`), `core/volume_popup.h` (**new**: step,
+text, plate geometry, 1.5 s clock, 2 s coalescing, 6/s gate), `core/settings.h` (v73 + comments),
+`core/router.h` (comments). Main: `main/main.cpp` (volume handler, diamond/Settings branch and `onTop`, comma
+removal, loop ticks), `main/chrome.h/.cpp` (six sigils X-first, volume plate, dots comment),
+`main/sound_store.h/.cpp` (live volume + coalesced write), `main/audio_out.h/.cpp` (volume tick),
+`main/launcher_page.cpp`, `main/settings_page.cpp`, `main/chat_page.cpp`, `main/map_page.cpp` (hint chips).
+Tests: `test/host/test_volume_popup.cpp` (**new**), `test/host/test_core.cpp`, `test/host/run.sh`.
+Tool/docs: `tools/preview_tanmatsu.py` (six sigils, volume plate, two renderers), `docs/PLAN.md`,
+`docs/PROGRESS.md`, `BRIEF.md`. Shots: `shots/2026-11-20-volume-popup.png`,
+`shots/2026-11-20-hintbar-keys.png` (both 800×480 host renders; older shots were not regenerated).
+
+### Could NOT be checked
+Not on the glass: host renders only, nothing installed or flashed. **VOLUME_DOWN (38) has never appeared in a
+log**, and **X/F1 (20) was seen once but not yet tied to a labelled press by Filip** — both are the BSP enum's
+values, not guesses, but neither is a confirmed physical press yet. The tick's exact loudness/feel at the new
+level, the plate's look on the MIPI panel, and the keys' real repeat (the BSP sends none; no repeat could be
+observed) need Filip's eyes/ears. `DEVICE.md` was checked and lists no key map; `PROGRESS.md`'s older entries
+are history and still describe the `,` of their day (not rewritten).
+
+### Next step
+Claude reviews this diff; if accepted, Filip installs v73 and checks: volume up/down steps the Settings Volume
+row by 10 and the plate appears on any page; a tick at the new level (none at Muted/Sound off); one save after
+~2 s (no per-press NVS churn); the keys do nothing while locked; X opens the Launcher, diamond opens Settings
+and returns to its root from a sub-page; `,` does nothing outside a field and types inside it; the hint bar
+shows six keys with the dots on triangle/square. Then the usual commit/push decision.
+
+
+**Claude's review of EST-478 (S516, 2026-11-20 22:0x):** key map (`core/keys.h` page_for_symbol: X Launcher … diamond Settings), `is_own_symbol` follows it; the volume keys are handled before any page and after the key-lock; `,` is no longer turned into SetKey::Settings at any of the four sites; previews checked (six sigils fit with the dots on Nodes/Chat; the volume plate sits above the hint bar). Accepted. DeepSeek's finding stands: the BSP's key-repeat thread is commented out, so a held volume key gives one step. On the glass still to pin: X = 20 and VOLUME_DOWN = 38.
 ## 2026-11-20 · S516 (EST-477) LEDs: system defaults, off switches, message colour
 
 > Written by **DeepSeek** for ticket **EST-477**: fenced Paperclip run, no session start or end, nothing installed,
