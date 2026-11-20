@@ -74,8 +74,8 @@ extern "C" {
 #include "sound_events.h"    // S514/EST-450: the events, their L2 defaults and every sound rule
 #include "sound_store.h"     // S514/EST-450: the sound settings' NVS blob (mcsnd)
 #include "audio_out.h"       // S514/EST-450: the one owner of I2S (queue-only, never blocks the UI)
-#include "message_led.h"     // S515/EST-468: the message LED's task + NVS choice (rule in core/message_led_rule.h)
-#include "message_led_rule.h"   // S515/EST-468: the pure blink rules + the Off/1..6 labels
+#include "message_led.h"     // S516/EST-477: the LED task + the two switches and the message colour (NVS)
+#include "message_led_rule.h"   // S516/EST-477: the pure LED rules (modes, colours, register 146, blink)
 #include "tm_theme.h"
 #include "../../firmware/src/ui/theme.h"   // the L2 palette (kBg/kInk/kDim): one source of truth, never copied
 
@@ -330,8 +330,11 @@ enum : uint16_t {
     kSetRowSoundMaster = 10,
     kSetRowSoundVolume,
     kSetRowSoundEventBase = 20,
-    // S515/EST-468: the LED section's one row.
-    kSetRowMessageLed = 30,
+    // S516/EST-477: the LED section. Power/Radio are switches; the message LED is the system's LED 3, so
+    // its row is the COLOUR (the old "Message LED 1-6" picker is gone).
+    kSetRowPowerLed = 30,
+    kSetRowRadioLed,
+    kSetRowMessageColour,
 };
 
 static char gset_name[32], gset_pub[32], gset_adv[8], gset_freq[24], gset_bw[16];
@@ -503,22 +506,45 @@ bool adjustSoundVolume(int delta) {
     return true;
 }
 
-// ---- S515/EST-468: the MESSAGE LED row (General › LED) ------------------------------------------------
-// Off / 1..6, default Off, NVS "omled"/"msgled". While the row is being changed, the chosen LED blinks
-// three times AT ONCE (the task's preview), so the user can see which one "3" means; the task then hands the
-// LEDs back. The blink rule itself is core/message_led_rule.h.
-const char* gsetMessageLed(tm::Core&) {
-    return om::ui::messageLedLabel(om::led::choice());
-}
+// ---- S516/EST-477: the LED section (General › LED) -------------------------------------------------------
+// Power LED and Radio LED keep the coprocessor's own meanings (LED 1 = power/PMIC, LED 2 = the C6 radio); the
+// switches only say whether OM Lite may turn them dark while it runs. The message LED is the SYSTEM's LED 3,
+// so its row is a COLOUR, not an index. NVS "omled"/"pwled", "rdled", "msgcol" (the old "msgled" index is
+// migrated away in main/message_led.cpp). The decision itself is core/message_led_rule.h.
+const char* gsetPowerLed(tm::Core&) { return om::led::powerOn() ? "On" : "Off"; }
 
-void generalCycleMessageLed(tm::Core&, const tm::SettingRow&) {
-    const uint8_t next = om::ui::messageLedCycle(om::led::choice());
-    if (!om::led::setChoice(next)) {
-        om::ui::noticeSet("Message LED not saved", 3000);
+void generalTogglePowerLed(tm::Core&, const tm::SettingRow&) {
+    const bool on = !om::led::powerOn();
+    if (!om::led::setPowerOn(on)) {
+        om::ui::noticeSet("Power LED not saved", 3000);
         return;
     }
-    if (next != om::ui::kMessageLedOff) om::led::requestPreview(next);
-    ESP_LOGI(TAG, "settings: message LED -> %s", om::ui::messageLedLabel(next));
+    ESP_LOGI(TAG, "settings: power LED -> %s", on ? "on" : "off");
+}
+
+const char* gsetRadioLed(tm::Core&) { return om::led::radioOn() ? "On" : "Off"; }
+
+// The hint says WHICH radio the LED is, so "Radio LED" cannot be read as the LoRa link's traffic light.
+const char* gsetRadioLedHint(tm::Core&) { return "Wi-Fi + LoRa chip"; }
+
+void generalToggleRadioLed(tm::Core&, const tm::SettingRow&) {
+    const bool on = !om::led::radioOn();
+    if (!om::led::setRadioOn(on)) {
+        om::ui::noticeSet("Radio LED not saved", 3000);
+        return;
+    }
+    ESP_LOGI(TAG, "settings: radio LED -> %s", on ? "on" : "off");
+}
+
+const char* gsetMessageColour(tm::Core&) { return om::ui::ledColourLabel(om::led::colour()); }
+
+void generalCycleMessageColour(tm::Core&, const tm::SettingRow&) {
+    const om::ui::LedColour next = om::ui::ledColourCycle(om::led::colour());
+    if (!om::led::setColour(next)) {
+        om::ui::noticeSet("Message LED colour not saved", 3000);
+        return;
+    }
+    ESP_LOGI(TAG, "settings: message LED colour -> %s", om::ui::ledColourLabel(next));
 }
 
 static const tm::SettingRow kGeneralNodeRows[] = {
@@ -546,7 +572,12 @@ static const tm::SettingRow kGeneralSoundRows[] = {
      "Boot", "", tm::RowValueFn(gsetSoundChoiceValue), nullptr},
 };
 static const tm::SettingRow kGeneralLedRows[] = {
-    {tm::SettingKind::Cycle, kSetRowMessageLed, "Message LED", "", gsetMessageLed, generalCycleMessageLed},
+    {tm::SettingKind::Toggle, kSetRowPowerLed, "Power LED", "", gsetPowerLed, generalTogglePowerLed},
+    // The hint names the chip the LED belongs to; it is the C6's state, not Wi-Fi association.
+    {tm::SettingKind::Toggle, kSetRowRadioLed, "Radio LED", "", gsetRadioLed, generalToggleRadioLed, false,
+     gsetRadioLedHint},
+    {tm::SettingKind::Cycle, kSetRowMessageColour, "Message LED colour", "", gsetMessageColour,
+     generalCycleMessageColour},
 };
 static const tm::SettingRow kGeneralRadioRows[] = {
     {tm::SettingKind::Info, 0, "Frequency", "", gsetFrequency, nullptr},
@@ -569,7 +600,7 @@ static const tm::SettingsSection kGeneralSections[] = {
     {"ADVERT", kGeneralAdvertRows, 1},
     {"SOUND", kGeneralSoundRows,
      (int)(sizeof(kGeneralSoundRows) / sizeof(kGeneralSoundRows[0]))},
-    {"LED", kGeneralLedRows, 1},
+    {"LED", kGeneralLedRows, (int)(sizeof(kGeneralLedRows) / sizeof(kGeneralLedRows[0]))},
     {"RADIO (READ ONLY)", kGeneralRadioRows, 6},
     {"DEVICE (READ ONLY)", kGeneralDeviceRows, 6},
 };
@@ -4622,9 +4653,11 @@ extern "C" void app_main(void) {
                 mask = om::ui::hintDotMask(unread_ch, unread_dm, om::mc::contactsFreshCount(om::mc::contacts()));
             }
             om::ui::hintDotsSet(mask);
-            // S515/EST-468: the message LED's rule reads the SAME unread total as the Chat dot; the task polls
-            // these published values every 25 ms, so the main loop never does an LED write itself.
-            om::led::publish(g_screen_power.off, unread_all);
+            // S515/EST-468 / S516/EST-477: the LED rule reads the SAME unread total as the Chat dot, plus the
+            // battery facts the power LED emulates and whether our C6 link is up. The task polls these every
+            // 25 ms, so the main loop never does an LED write itself.
+            om::led::publish(g_screen_power.off, unread_all, g_batt.battery_available, g_batt.battery_charging,
+                             om::radio::started());
             // A message arriving while the Map (or any page) is on screen raises this with no key press behind
             // it, so the dot appears at the next 250 ms pass.
             if (om::ui::hintDotsNeedsRepaint()) dirty = true;

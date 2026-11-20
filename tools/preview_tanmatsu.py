@@ -1978,36 +1978,43 @@ def settings_sound():
     return save(img, '2026-11-19-settings-sound.png')
 
 
-def settings_message_led():
-    """S515/EST-468: the General tab's new LED section, with the focused "Message LED" row.
+def settings_led():
+    """S516/EST-477: the General tab's LED section: the two system switches and the message colour.
 
-    Off / 1 / 2 / 3 / 4 / 5 / 6, default Off, NVS. The value shown is "3": while the row is changed the chosen
-    LED gives three short blinks at once (the task's preview), so the number can be matched to a physical LED.
-    The body is scrolled so the section is on screen; SOUND's last rows above and RADIO below are context.
+    Power LED and Radio LED keep the coprocessor's own meanings (LED 1 = power/PMIC, LED 2 = the C6 radio, hence
+    the dim "Wi-Fi + LoRa chip" hint); the switches only say whether OM Lite may turn them dark while it runs.
+    The message LED is the SYSTEM's LED 3, so its row is a colour, not an index: the default keeps v63..v71's
+    soft Cyan. The body is scrolled so the section is on screen; SOUND's last rows above and RADIO below are
+    context. This is a host render, not a screenshot.
     """
     img, d, W, H, pad, body_top = _settings_owner_frame(0, 'general · tab 1 of 4')
     body_bot = H - TM['hint_h']
     lx0, lx1 = pad, W - pad
     row_h, sect_h = 34, 22
     rows = [
-        ('sect', 'SOUND'), ('row', 'Sent', 'Soft Tick'), ('row', 'New node', 'Soft Lo'),
-        ('row', 'Error', 'Bell Fall'),
-        ('sect', 'LED'), ('row', 'Message LED', '3'),
-        ('sect', 'RADIO (READ ONLY)'), ('row', 'Frequency', '869.618 MHz'),
-        ('row', 'Bandwidth', '62.5 kHz'),
+        ('sect', 'SOUND'), ('row', 'Sent', 'Soft Tick', None, True),
+        ('row', 'New node', 'Soft Lo', None, True), ('row', 'Error', 'Bell Fall', None, True),
+        ('sect', 'LED'),
+        ('row', 'Power LED', 'On', None, False),
+        ('row', 'Radio LED', 'On', 'Wi-Fi + LoRa chip', False),
+        ('row', 'Message LED colour', 'Cyan', None, False),
+        ('sect', 'RADIO (READ ONLY)'), ('row', 'Frequency', '869.618 MHz', None, False),
+        ('row', 'Bandwidth', '62.5 kHz', None, False),
     ]
     yy = body_top + 4
-    for kind, *rest in rows:
+    for item in rows:
+        kind = item[0]
         if kind == 'sect':
-            spaced(d, (lx0 + 4, yy + 5), rest[0], font(FONT_MONO, TM['f_label']), P['Dim'])
+            spaced(d, (lx0 + 4, yy + 5), item[1], font(FONT_MONO, TM['f_label']), P['Dim'])
             yy += sect_h
             continue
-        label, value = rest
-        setrow(d, lx0, lx1, yy, label, value, focused=(label == 'Message LED'))
+        _, label, value, hint, chevron = item
+        setrow(d, lx0, lx1, yy, label, value, focused=(label == 'Message LED colour'), chevron=chevron,
+               hint=hint)
         yy += row_h + 2
     hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),
                              (',', 'settings')])
-    return save(img, '2026-11-19-settings-message-led.png')
+    return save(img, '2026-11-20-settings-led.png')
 
 
 def settings_sound_picker():
@@ -3393,7 +3400,7 @@ RENDERERS = dict(chat_select=chat_select, chat_msg_menu=chat_msg_menu, chat_msg_
                  settings_opstoc=settings_opstoc, settings_chat=settings_chat,
                  settings_nodes=settings_nodes, settings_nodes_save=settings_nodes_save,
                  nodes_head_unsaved=nodes_head_unsaved, settings_map=settings_map,
-                 settings_sound=settings_sound, settings_message_led=settings_message_led,
+                 settings_sound=settings_sound, settings_led=settings_led,
                  settings_sound_picker=settings_sound_picker, popup_msg=popup_msg)
 
 

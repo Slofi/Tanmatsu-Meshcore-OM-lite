@@ -15,6 +15,106 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-20 · S516 (EST-477) LEDs: system defaults, off switches, message colour
+
+> Written by **DeepSeek** for ticket **EST-477**: fenced Paperclip run, no session start or end, nothing installed,
+> flashed, pushed or committed (`.git` read only; Claude reviews and commits). Starting point **v71 `15829ab`**,
+> tree clean, v71 INSTALLED and running on the device. **RESULT: version 72; nothing installed, flashed, pushed or
+> committed.**
+>
+> **Numbers:** `sh test/host/run.sh` **exit 0**; the rewritten `message-led` suite is **266 checks, 0 failures**.
+> `make build` **exit 0**, `application.bin` **1,748,304 B (0x1AAD50)**, **+2,528 B** over v71's 1,745,776 B
+> (total image **1,747,892 B**); DIRAM **303,228 B used / 269,140 B free (52.98 %)**. Two host tests armed, exact
+> FAIL lines below. `.git` untouched, no commit; no SSH needed (the device is on Filip's USB).
+
+### What was read
+`core/message_led_rule.h`, `main/message_led.*`, `main/main.cpp` (the General LED rows and the 250 ms publish
+site), `core/settings_model.h` + `main/settings_page.cpp` (the existing hint/dim hook), `core/settings.h`; our BSP
+`managed_components/nicolaielectronics__tanmatsu_coprocessor/tanmatsu_coprocessor.{h,c}` (the wrappers and the
+I2C concurrency semaphore), `badge-bsp/targets/tanmatsu/badge_bsp_led.c`, `bsp/led.h`, `bsp/power.h`,
+`bsp/tanmatsu.h`; `test/host/run.sh`, the old `test_message_led.cpp` and `tools/preview_tanmatsu.py`. The
+coprocessor firmware facts (`main.c:709-800`, `leds.c:37-44`) are cited from Claude's read in the ticket: the
+clone at `/home/slofi/dev/tanmatsu-coprocessor-firmware` is **not visible from the sandbox**, so it was not
+re-read here.
+
+### The implementation, rule by rule
+1. **Settings.** General › LED now has three rows: **Power LED** (Toggle, default **On**, `omled/pwled`),
+   **Radio LED** (Toggle, default **On**, `omled/rdled`, dim hint **"Wi-Fi + LoRa chip"**), **Message LED colour**
+   (Cycle: Red / Green / Blue / Yellow / Cyan / Magenta / White, default **Cyan** — v63..v71's soft cyan, so there
+   is no "Blue if none" fallback to use — `omled/msgcol`). The old `msgled` (Off/1..6) is read, logged, erased
+   and committed in `begin()`; its index is deliberately not carried over, because the message LED is now always
+   the system's LED 3 (index 2).
+2. **Unlocked, both switches On: AUTOMATIC, always.** Unread > 0 writes register 146 as colour A = the chosen
+   colour (`(r<<0)|(g<<1)|(b<<2)`), colour B = off, `fade` = 1 (bit 3), `fade hold` = 0; unread == 0 writes all
+   false. No pixel is written: `LedFrame.rgb` is all zero and the shell only applies the register change.
+3. **Unlocked, one or both Off (or no register 146): MANUAL while OM Lite runs.** The app writes all six pixels:
+   index 0 = the power emulation (**no battery magenta 0xFF00FF / charging yellow 0xFFFF00 / battery green
+   0x00FF00**, "no battery" checked before charging, `main.c:715-732`); index 1 = **green while our C6 link is up**
+   (`om::radio::started()`), dark otherwise; index 2 = the message LED in the chosen colour, breathing on a
+   plain **8-step 0..255 ramp, one step every 200 ms = at most 5 I2C frames/s**, and only on a step change; index
+   3-5 dark. A 25 ms poll with no frame change writes nothing, so the rate is 0 at rest.
+4. **Locked (screen off).** Unchanged from S515: MANUAL, every index dark, index 2 gives **three 120 ms/180 ms
+   blinks every 20 s** while unread > 0, in the chosen colour at 20 % (v71 used a 15 % global brightness over
+   full cyan; this keeps the same gentle look for every colour). The switches cannot light anything while locked.
+5. **Every exit path.** `restoreAutomatic()` writes the dark pixels, writes register 146 = 0 (all false), then
+   `bsp_led_set_mode(true)`, before the launcher handover — no stale message fade is left behind.
+6. **Older coprocessor firmware.** `begin()` probes `set_message(all false)` once; if it fails it logs the
+   coprocessor firmware version (`tanmatsu_coprocessor_get_firmware_version`, one line) and falls back to rule 3's
+   app-driven message LED. A runtime refusal flips the same flag and logs once.
+
+The six pixels go through `bsp_led_*`; register 146 through `tanmatsu_coprocessor_set_message`
+(`tanmatsu_coprocessor.h:262-270`). I2C is serialised by the coprocessor driver itself:
+`tanmatsu_coprocessor.c:163-197` takes `configuration.concurrency_semaphore` around every transfer; the glue's
+own mutex only keeps `restoreAutomatic()` and the task from writing at the same time.
+
+### Host tests (rewritten `test/host/test_message_led.cpp`)
+Pins: the seven colours' exact register bytes (Red 0x09, Green 0x0A, Blue 0x0C, Yellow 0x0B, Cyan 0x0E,
+Magenta 0x0D, White 0x0F — all with colour B and fade-hold clear) and "no change, no I2C"; the MODE for all
+2×2×2×2 locked/power/radio/unread combinations plus the no-register fallback; the three emulated power colours
+and the radio on/off rule; the locked blink at 0/119/120/300/420/600/720/900/19999/20000/20300 ms with indices
+0-1 and 3-5 dark; the 8-step manual fade with EXACTLY 16 changed frames over 3.2 s (5/s) and one mode-change
+frame; the 32-bit wrap; and `restore()` returning automatic + `message = 0` + dark pixels.
+
+### Arm evidence (deliberately wrong code, then reverted)
+```
+FAIL test_message_led.cpp:168  f.automatic ? 1 : 0 == want_auto ? 1 : 0 (got 1, want 0)
+FAIL test_message_led.cpp:196  !f.automatic
+FAIL test_message_led.cpp:255  !first.automatic
+message-led: 3/195 checks FAILED
+```
+(the first removed `in.power_on` from the automatic-condition; the same wrong mode then broke the fallback and
+fade tests).
+```
+FAIL test_message_led.cpp:129  f.message == row.reg (got 129, want 9)
+message-led: 1/170 checks FAILED
+```
+(the second set bit 7, fade hold, instead of bit 3, fade, in `messageRegister`). Both are restored; no `ARM`
+marker remains.
+
+### Files
+Core: `core/message_led_rule.h` (rewritten: colours, register 146, power emulation, modes, manual pixels,
+restore), `core/settings.h` (**v72**).
+Main: `main/message_led.h/.cpp` (three NVS settings + `msgled` migration, register 146 probe/fallback, manual
+frame writes, extended `publish`), `main/main.cpp` (three General › LED rows, handlers, hint, publish call).
+Tests: `test/host/test_message_led.cpp`.
+Docs/tool: `docs/PROGRESS.md`, `tools/preview_tanmatsu.py` (`settings_message_led` -> `settings_led`).
+Shots: `shots/2026-11-20-settings-led.png` (800×480; the old `2026-11-19-settings-message-led.png` is history
+and was not regenerated).
+
+### Could NOT be checked
+Not on the glass: host renders only (desktop DejaVu), no install, flash or serial. The exact panel width of the
+"Wi-Fi + LoRa chip" hint is checked in the preview at 800 px, not with the device's generated faces. The
+coprocessor firmware clone is not visible from the sandbox, so the register/firmware facts are as Claude read
+them. The device's real fade look and the C6 LED during a real LoRa session need Filip's eyes.
+
+### Next step
+Claude reviews this diff; if accepted, Filip installs v72 and checks: General › LED has three rows; both On =
+the system's power/radio LEDs as before and the message LED breathes in Cyan; either Off = manual (that LED dark,
+the other still right, no flicker between fade steps); locked = three blinks every 20 s; Esc to the launcher =
+its own LEDs back and no message fade left behind.
+
+
+**Claude's review of EST-477 (S516, 2026-11-20 21:4x):** read the rule (automatic only when unlocked AND both switches On AND register 146 works; manual otherwise) and the apply/exit code: leaving manual writes the app pixels dark, then the message register, then automatic mode; `restoreAutomatic()` does dark → message 0 → automatic under the output mutex before the handover; the coprocessor I2C is serialised by the BSP. The radio emulation uses our radio's started state, which matches the coprocessor's green (C6 application) while OM Lite runs. Accepted. Suite exit 0, build exit 0 (1,748,304 B). Not on the device yet.
 ## S516 (Claude) v71: the Chat page crashed the device (main task stack overflow), fixed
 
 **Found by Filip on the glass, 2026-11-20 20:5x (v69):** opening Chat (circle, key 23) showed a light-blue screen and the device was stuck; the console showed `Guru Meditation Error: Core 0 panic'ed (Stack protection fault)` in task `main`, twice (20:5x and after a restart at 20:55). Decoded against a v69 rebuild in a separate worktree (same size; differs only in the build timestamp): MEPC/RA in `drawTextClipped` / `drawChatCard` / `clipInto` / `Font::textWidth`, i.e. the leaves of the chat list draw. **Cause:** `app_main`'s `drawChatPage` lambda had a **5,632 B** stack frame because it built `om::ui::ChatView cv` (**4,836 B**: the v64 chat menu added `menu[5]` + `info[14]`) on the stack; with `app_main`'s own 2,192 B that is 7,824 of the **8,192 B** main task stack. Nobody opened Chat on the device between v64 and tonight (v65 and v68 logs: 0 presses of key 23), and the host suite cannot see a device stack.
