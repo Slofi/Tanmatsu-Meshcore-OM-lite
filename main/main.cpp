@@ -1478,6 +1478,11 @@ extern "C" void app_main(void) {
     const char* const kCardIds[3]  = {"om-lite", "ops-toc", "mesh-torry"};
     const tm::Page    kCardHome[3] = {tm::Page::Nodes, tm::Page::Launcher, tm::Page::Launcher};
     int               menu_focus   = 0;   // OM Lite, as Filip wants the focus to start
+    // S516 (Claude; Filip: "ESC on our launcher restarts Tanmatsu.. So pls add confirmation pop-up", and "this
+    // time 'OK' can be default"): Esc on the Launcher asks first. The sheet opens on Leave (the one sheet that
+    // does not start on Cancel); Left/Right move, Enter answers, a second Esc cancels. Closed on any page change.
+    bool              leave_confirm_open   = false;
+    bool              leave_confirm_cancel = false;   // false = "Leave" focused
 
     auto refreshOmNumbers = [&]() {
         const size_t bytes = core.alloc().stats("om-lite").bytes;
@@ -4477,12 +4482,27 @@ extern "C" void app_main(void) {
                         // actions, Esc back to the list) is deliberately RETIRED here: there is no second area
                         // any more, so Enter opens the focused app and Esc leaves the app. The exit path below
                         // is S501's, untouched.
-                        if (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD &&
+                        if (leave_confirm_open) {
+                            // S516: the sheet owns every key while it is up (nothing behind it moves).
+                            if (k == tm::Key::Left || k == tm::Key::Right) {
+                                leave_confirm_cancel = !leave_confirm_cancel;
+                                dirty                = true;
+                            } else if (k == tm::Key::Enter && !leave_confirm_cancel) {
+                                ESP_LOGI(TAG, "leaving to the stock launcher (confirmed)");
+                                leaveToLauncher();
+                            } else if (k == tm::Key::Enter || k == tm::Key::Esc) {
+                                leave_confirm_open = false;
+                                dirty              = true;
+                                ESP_LOGI(TAG, "leave: cancelled, OM Lite stays");
+                            }
+                        } else if (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD &&
                             ev.args_keyboard.ascii == 'a') {
                             pressAdvert();   // the advert key still works on the menu
                         } else if (k == tm::Key::Esc) {
-                            ESP_LOGI(TAG, "leaving to the stock launcher");
-                            leaveToLauncher();
+                            leave_confirm_open   = true;
+                            leave_confirm_cancel = false;   // Leave focused: Esc, Enter leaves (Filip's choice)
+                            dirty                = true;
+                            ESP_LOGI(TAG, "leave: asking first");
                         } else if (k == tm::Key::Left || k == tm::Key::Right || k == tm::Key::Up ||
                                    k == tm::Key::Down) {
                             // Left/Right move between the three cards (clamped, no wrap); Down lands on the
@@ -4566,6 +4586,7 @@ extern "C" void app_main(void) {
             // ticket: "written at most once a minute and on leaving"). It is still only written when the view
             // moved, so opening and closing the page without touching it writes nothing.
             if (page_now == tm::Page::Map && core.router().current() != tm::Page::Map) saveMapLastView(true);
+            if (leave_confirm_open && core.router().current() != tm::Page::Launcher) leave_confirm_open = false;
         }
 
         // A tile the worker finished: repaint, so the map fills in from the centre out while the keys stay live.
@@ -4798,6 +4819,16 @@ extern "C" void app_main(void) {
                                       ? launcher_notice
                                       : nullptr;
                     drawLauncher(g_screen, view);
+                    if (leave_confirm_open) {
+                        om::ui::SettingsView sv;   // 96 B: only the shared sheet's fields are read
+                        sv.confirm        = true;
+                        sv.confirm_title  = "Leave OM Lite?";
+                        sv.confirm_text   = "The Tanmatsu restarts into its menu; OM Lite is off the mesh until you start it again.";
+                        sv.confirm_apply  = "Leave";
+                        sv.confirm_danger = false;
+                        sv.confirm_cancel = leave_confirm_cancel;
+                        om::ui::drawConfirmSheet(g_screen, sv);
+                    }
                     break;
                 case tm::Page::Nodes:
                     drawNodesPage();

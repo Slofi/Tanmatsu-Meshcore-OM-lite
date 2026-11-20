@@ -15,6 +15,10 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## S516 (Claude) v74: Esc on our Launcher asks before leaving
+
+Filip (21:4x): *"ESC on our launcher restarts Tanmatsu.. So pls add confirmation pop-up when pressing ESC on the Launcher page.."*, then *"no, this time 'OK' can be default"*. Esc on the Launcher now opens the shared confirm sheet (`drawConfirmSheet`, a 96 B SettingsView on the stack) "Leave OM Lite?" with **Leave focused** (the one sheet that does not start on Cancel); Left/Right move, Enter answers, a second Esc cancels, every other key is swallowed while the sheet is up, and the sheet closes on any page change (a page key). `leaveToLauncher()` itself is unchanged. Suite exit 0, build exit 0.
+
 ## 2026-11-20 · S516 (EST-478) volume keys
 
 > Written by **DeepSeek** for ticket **EST-478**: fenced Paperclip run, no session start or end, nothing installed,
