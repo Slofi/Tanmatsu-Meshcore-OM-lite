@@ -91,10 +91,23 @@ void drawSettingsRows(Screen& s, const tm::SettingsSection* secs, int count, int
                 s.hline(pad, right_edge, bot - 1, kRowLine);
             }
 
-            const uint16_t label_col = focused ? (uint16_t)kAccInk : (uint16_t)kInk;
-            const uint16_t value_col = focused ? (uint16_t)kAcc : (uint16_t)kDim;
-            drawText(s, Face::Body, pad + 6, textBaseline(s, Face::Body, top, rh),
-                     row.label != nullptr ? row.label : "", label_col);
+            // S516/EST-476: a row can be dimmed by live state (the Add-heard row while saving is Off) and can
+            // carry a short dim hint after its label. Both are optional; a row with neither draws exactly as
+            // before.
+            const bool row_dim = (core != nullptr && row.read_dim != nullptr) ? row.read_dim(*core) : false;
+            const uint16_t label_col =
+                focused ? (uint16_t)(row_dim ? kDim : kAccInk) : (uint16_t)(row_dim ? kDimmer : kInk);
+            const uint16_t value_col =
+                focused ? (uint16_t)(row_dim ? kDimmer : kAcc) : (uint16_t)(row_dim ? kDimmer : kDim);
+            const char* label = row.label != nullptr ? row.label : "";
+            drawText(s, Face::Body, pad + 6, textBaseline(s, Face::Body, top, rh), label, label_col);
+            const char* hint = (core != nullptr && row.read_hint != nullptr) ? row.read_hint(*core) : nullptr;
+            if (hint != nullptr && hint[0] != '\0') {
+                const Font* lf = fontFor(Face::Body);
+                const int   label_w = (lf != nullptr && lf->ready()) ? lf->textWidth(label) : 0;
+                drawText(s, Face::Meta, pad + 6 + label_w + 12, textBaseline(s, Face::Meta, top, rh), hint,
+                         kDimmer);
+            }
 
             const char* value = (core != nullptr) ? tm::settingsRowValue(*core, row)
                                                   : (row.value != nullptr ? row.value : "");

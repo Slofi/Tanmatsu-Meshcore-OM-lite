@@ -15,6 +15,107 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-20 · S516 (EST-476) Save heard nodes to SD
+
+> Written by **DeepSeek** for ticket **EST-476**: fenced Paperclip run, no session start or end, nothing installed,
+> flashed, pushed or committed (`.git` read only; Claude reviews and commits). Starting point **v69 `e619fde`**,
+> tree clean, v69 INSTALLED on the device since 20:43. **RESULT: version 70; nothing installed, flashed, pushed or
+> committed.**
+>
+> The ask (Filip, 20:4x): a Settings › OM Lite › NODES toggle **"Save heard nodes to SD"**, On by default, so he
+> can choose that NEW heard nodes live only for this session. Off must still let a node be used (Nodes, DM, Ping,
+> Trace, Map) but never write it to `nodes.bin`, `radio.bin` or the NVS fallback, and it must also suspend
+> "Add heard nodes to the radio". The user's own Add to radio / Favourite still save the node; nodes already saved
+> keep updating; switching back On saves only nodes heard from then on.
+>
+> **Numbers:** `sh test/host/run.sh` **exit 0**. The only suites whose check count moved: `node_table` **6,832**,
+> `node_store` **256** in BOTH `-O2` and ASan (was 228 → **+28 each, +56**), `node_view` **767** (**+17**); every
+> other suite unchanged, no sanitizer noise beyond the vendored Ed25519 warning already recorded. `make build`
+> **exit 0**, `application.bin` **1,745,552 B (0x1AA290)**, **+3,424 B** over v69's 1,742,128 B (total image
+> **1,745,146 B**, +3,422); DIRAM **298,380 B used / 273,988 B free (52.13 %)**, +1,176 B over v69. Two host
+> tests armed, exact FAIL lines below. `.git` untouched, no commit; no SSH needed (the device is on Filip's USB).
+
+### What was read
+`core/mc_store.*`, `contact_blob.*`, `node_store.*`, `node_table.*`, `node_view.h`, `contact_admin.h`,
+`settings_model.h`, `settings.h`; `main/mc_link.*` (the `heardto` load/set/read path, the advert call site,
+`nodeStoreCounts`, `contactsSetFavourite`), `main/main.cpp` (the Settings row table and the Nodes view build),
+`main/nodes_page.*`, `main/settings_page.cpp`; the three host tests and `test/host/run.sh`; the one preview tool.
+
+### The implementation, rule by rule
+1. **Setting.** `Save heard nodes to SD` is a `Toggle` in NODES, **DEFAULT On**, NVS `mcset/saveheard` (only an
+   explicit 0 is Off; a missing/unreadable entry keeps On). `loadSaveHeardToSd()` sits beside `loadHeardToRadio()`
+   in `begin()`; `saveHeardToSdSetting()` / `setSaveHeardToSdSetting()` follow the same failed-write rule.
+2. **Off = session-only.** `Contact::session_only` is a new RAM field and is deliberately **not** in any file
+   format (`contact_blob.h` unchanged). `advertInArchive(..., radio_cap, save_heard)` marks a NEW row session-only
+   when `save_heard == false` and returns before the radio rule, so even `HeardToRadio::All` marks nothing. The row
+   is still inserted, usable (Nodes, DM, Ping, Trace, Map), `fresh` is set as before, and its Nodes second line
+   says `· not saved` (dim); the 800 px preview shows it fits inside the 320 px list.
+3. **Off suspends Add heard to radio.** The `heardto` row stays visible and keeps its value; the frame's row model
+   gained an optional dim hint (`read_hint`/`read_dim`), and the row draws dim with `needs Save heard nodes On`.
+   It can still be changed and stored — it simply has no effect while saving is Off.
+4. **User acts save.** `addToRadio()` clears `session_only` on `Ok` (a refused `RadioFull` leaves it session-only),
+   and `setFavourite()` / `contactSetFavourite()` clear it without implying `in_radio` (Favourite stays
+   archive-only, as EST-455 pinned). `Delete everywhere` already removes the row; no special case.
+5. **Saved rows stay saved.** A REFRESH never touches `session_only` or `in_radio`; a repeat advert from a
+   session-only node keeps it session-only, and a saved row keeps updating its last-heard/position while Off.
+6. **Back On.** No bulk rewrite: nothing ever clears session-only rows, so rows already marked stay marked until
+   the user acts as in rule 4; nodes heard after the switch are saved normally.
+7. **Counts.** `radioCount()` counts saved in-radio rows only; `sessionOnlyCount()` is new. `nodeStoreCounts()`
+   returns `sd = count - sessionOnly`, and `nodeStoreCountsText()`/`nodeStoreInfoText()` take an optional
+   `unsaved` argument: `Radio 2 / 300 · SD 17 · +3 unsaved` (also with `SD -` when there is no card). The Nodes
+   head and the Settings info row both pass it.
+8. **Fresh dot.** Unchanged: `fresh` is RAM state, drawn for session-only rows too, and never encoded.
+9. **No SD card.** Unchanged: heard nodes were already this-boot-only; the setting is still shown and stored.
+
+### Encoding skip (the "gone after a restart" promise)
+`node_store.cpp::selected()` now requires `!session_only` for BOTH `nodeFileEncode()` modes; `contactsEncodeRadio()`
+(the NVS fallback) skips it; `contactsEncode()` (the full v4 blob) skips it too, so there is no path that can write
+a session-only row. The test also encodes the contrived case `session_only && in_radio` to prove the radio file
+skips it even then.
+
+### Host tests added
+- `test_node_table.cpp::testSessionOnlyOnAdvertWithSaveOff` — Off + All: session-only, never `in_radio`, fresh;
+  repeat keeps both flags; Add to radio and Favourite clear; a previously saved row stays saved while Off; Delete
+  everywhere removes a session-only row.
+- `test_node_store.cpp::testSessionOnlyRowsAreNeverEncoded` — radio.bin count 1 (not the contrived 2), nodes.bin
+  count 2 of 3, NVS fallback count 1, full v4 blob count 2; every decode finds the session-only key absent.
+- `test_node_view.cpp` — the exact counts texts (`+3 unsaved`, `SD - · +2 unsaved`, unchanged wording at 0), the
+  On/Off value, the toggle and the hint string.
+
+### Arm evidence (deliberately wrong code, then reverted)
+```
+FAIL test_node_store.cpp:395  buf[8] | (buf[9] << 8) == 1 (got 2, want 1)
+235 checks, 1 failure(s)
+```
+```
+FAIL test_node_table.cpp:334  s.c[0].session_only
+6799 checks, 1 failure(s)
+```
+The first removed `!c.session_only` from `selected()`; the second disabled the `if (is_new && !save_heard)` branch.
+Both are restored in the tree; no `ARM` marker remains.
+
+### Files
+Core: `core/mc_store.h` (+`session_only`), `core/mc_store.cpp` (reset on insert), `core/node_table.h/.cpp` (rule,
+counts, Add/Favourite clear), `core/contact_blob.h/.cpp` (full-blob skip), `core/contact_admin.h` (Favourite clear),
+`core/node_store.h/.cpp` (`selected()` skip), `core/node_view.h` (counts + setting helpers), `core/settings_model.h`
+(hint/dim hook), `core/settings.h` (v70).
+Main: `main/mc_link.cpp/.h` (NVS setting, advert argument, counts), `main/main.cpp` (row + callbacks, view counts),
+`main/nodes_page.cpp/.h` (`+N unsaved`, `· not saved`, `unsaved_count`), `main/settings_page.cpp` (dim/hint draw).
+Tests: `test/host/test_node_table.cpp`, `test_node_store.cpp`, `test_node_view.cpp`.
+Docs/tool: `docs/PROGRESS.md`, `tools/preview_tanmatsu.py`.
+Shots: `shots/2026-11-20-nodes-settings-save.png`, `shots/2026-11-20-nodes-head-unsaved.png` (800×480; also
+regenerated `2026-11-19-settings-nodes.png` so the NODES section preview is not stale).
+
+### Could NOT be checked
+Not on glass (host renders only, desktop DejaVu); no install, flash, serial or server read was needed. The exact
+panel width of the hint and the row tag is checked in the preview at 800 px, not with the device's generated faces.
+
+### Next step
+Claude reviews this diff; if it is accepted, Filip installs v70 and checks the two NODES rows (Off state: the
+Add-heard row dim with its reason) and a heard node's `not saved` tag and `+N unsaved` head.
+
+
+**Claude's review of EST-476 (S516, 2026-11-20 21:0x):** the file format is unchanged (no version or record-size change; session-only rows are only skipped by the three encoders), the rules match the ticket (Off + HeardToRadio::All still never marks in_radio; Add to radio / Favourite clear the flag; a repeat advert keeps it). Accepted. Suite exit 0. Not on the device yet.
 ## 2026-11-20 · S516 (EST-475) sweep round 3: tonight's fixes against all their callers, and the archive write at full size
 
 > Written by **DeepSeek** for ticket **EST-475**: fenced Paperclip run, no session start or end, nothing installed,

@@ -199,13 +199,20 @@ size_t              nodeClearRadio();   // clears in_radio on every row; the arc
 size_t radioCapacity();
 
 // The live counts the Nodes head and the Settings info row show. One pass each, under the lock. `sd` is EVERY
-// node saved on the SD card (the radio's rows included: one table, one file).
-void nodeStoreCounts(size_t* radio, size_t* sd);
+// SAVED node (the radio's rows included: one table, one file). S516/EST-476: `unsaved` is the session-only row
+// count, which is NOT part of `sd`; the head reports it as "+N unsaved". Any pointer may be null.
+void nodeStoreCounts(size_t* radio, size_t* sd, size_t* unsaved = nullptr);
 
 // Settings › OM Lite › NODES: "Add heard nodes to the radio" — Off / Clients / All, NVS mcset/heardto. A failed
 // write leaves the old value in RAM and returns false (the row then raises its own notice).
 om::mc::HeardToRadio heardToRadioSetting();
 bool                setHeardToRadioSetting(om::mc::HeardToRadio v);
+
+// S516/EST-476: Settings › OM Lite › NODES, "Save heard nodes to SD" — On / Off, DEFAULT On, NVS mcset/saveheard.
+// Off makes NEW heard nodes session-only (RAM only) and suspends the automatic Add-to-radio rule. A failed write
+// leaves the old value in RAM and returns false.
+bool saveHeardToSdSetting();
+bool setSaveHeardToSdSetting(bool on);
 
 // ------------------------------------------------- S514/EST-456: the NODE MENU's Ping and Trace
 // Both are the L2's: Ping is the EST-453 status request (REQ_TYPE_GET_STATUS) and measures the reply's round trip;

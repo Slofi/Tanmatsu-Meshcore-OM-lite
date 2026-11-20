@@ -105,10 +105,12 @@ void drawNodes(Screen& s, const NodesView& v) {
     drawStatusBar(s, v.clock, v.battery_pct, v.charging);
 
     // S515/EST-465: the head's right slot is the two stores' live counts. S515/EST-468: SD is EVERY saved node
-    // (radio ones included) and "SD -" without a card. The three chips are drawn in the SAME band (where "N
-    // nodes heard" used to be), on the title's right, so the filter is never off screen.
-    char head_right[64];
-    nodeStoreCountsText(head_right, sizeof(head_right), v.radio_count, v.archive_count, v.sd_mounted, v.radio_cap);
+    // (radio ones included) and "SD -" without a card. S516/EST-476: session-only rows are counted separately
+    // ("+N unsaved") and never folded into SD. The three chips are drawn in the SAME band (where "N nodes heard"
+    // used to be), on the title's right, so the filter is never off screen.
+    char head_right[80];
+    nodeStoreCountsText(head_right, sizeof(head_right), v.radio_count, v.archive_count, v.sd_mounted, v.radio_cap,
+                        v.unsaved_count);
     const int head_bot = drawPageHead(s, "Nodes", head_right);
     {
         const Font* hf       = fontFor(Face::Hint);
@@ -213,11 +215,15 @@ void drawNodes(Screen& s, const NodesView& v) {
         // S515/EST-461: the NEW node's red dot, in the strip between the favourite mark and the age column
         // (the name is clipped well before it, and the age/SNR keep the right edge), in the badge red.
         if (c.fresh) s.disc(list_x1 - kTmRingInset - 46, y + 16, 3, kBad);
-        // second line: how it reached us
-        char sub[24];
-        if (c.path_len == 0) snprintf(sub, sizeof(sub), "direct");
-        else snprintf(sub, sizeof(sub), "path %u", (unsigned)c.path_len);
-        drawText(s, Face::Meta, list_x0 + 43, textBaseline(s, Face::Meta, y + 26, 20), sub, kDim);
+        // second line: how it reached us. S516/EST-476: a session-only row says "not saved" here — the one
+        // difference the user must see, because its data is gone after a restart. It fits the 320 px list: the
+        // line starts at +43 and "path 4 · not saved" is well inside the age/SNR column.
+        char sub[32];
+        const char* saved_tag = c.session_only ? " \xc2\xb7 not saved" : "";
+        if (c.path_len == 0) snprintf(sub, sizeof(sub), "direct%s", saved_tag);
+        else snprintf(sub, sizeof(sub), "path %u%s", (unsigned)c.path_len, saved_tag);
+        drawText(s, Face::Meta, list_x0 + 43, textBaseline(s, Face::Meta, y + 26, 20), sub,
+                 c.session_only ? (uint16_t)kDimmer : (uint16_t)kDim);
         // right edge: age, then the SNR the radio measured
         char age[8], snr[16];
         mc::formatAge(v.now, c.heard_at, age, sizeof(age));

@@ -56,8 +56,9 @@ uint32_t nodeFileCrc32(const uint8_t* data, size_t len);
 // The signature is the CRC over the file WITHOUT its trailing CRC field (0 for a buffer too short to hold one).
 uint32_t nodeFileSignature(const uint8_t* file, size_t len);
 
-// Encode `s` into `out`. `radio_only` selects the radio file (rows with in_radio) or the archive (all rows).
-// `max_rows` caps the selection (0 = kMaxNodes). Returns the byte count, or 0 when `out` is null / cap is small.
+// Encode `s` into `out`. `radio_only` selects the radio file (SAVED rows with in_radio) or the archive (every
+// SAVED row). S516/EST-476: a session-only row is in NEITHER file. `max_rows` caps the selection (0 = kMaxNodes).
+// Returns the byte count, or 0 when `out` is null / cap is small.
 size_t nodeFileEncode(const ContactStore& s, bool radio_only, size_t max_rows, uint8_t* out, size_t cap);
 
 // Decode a whole file. `out` is untouched unless the answer is Ok (or Empty, which clears it).

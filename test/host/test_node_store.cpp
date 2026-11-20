@@ -374,6 +374,61 @@ void testSignatureSeesAChange() {
   CHECK_EQ(om::mc::nodeFileSignature(a, 3), 0u);
 }
 
+// S516/EST-476: a session-only row is in NO file. The contrived case (a session-only row ALSO marked in_radio)
+// pins that the radio file skips it even then; the archive and the NVS fallback skip it too. This is the "gone
+// after a restart" promise, so it is checked on the actual encoder output, not on the flag alone.
+void testSessionOnlyRowsAreNeverEncoded() {
+  om::mc::ContactStore s;
+  addContact(s, makeNode(1, true, 100));    // saved, radio
+  om::mc::Contact n2 = makeNode(2, true, 200);
+  n2.session_only = true;                   // contrived: even a session-only row with in_radio set
+  addContact(s, n2);
+  addContact(s, makeNode(3, false, 300));   // saved, archive-only
+  CHECK_EQ(om::mc::sessionOnlyCount(s), 1);
+  CHECK_EQ(om::mc::radioCount(s), 1);       // the session-only mark excludes it from the radio count
+
+  static uint8_t buf[om::mc::kNodeFileMaxBytes];
+
+  // radio.bin: only the one saved radio row.
+  const size_t rn = om::mc::nodeFileEncode(s, true, om::mc::kMaxRadio, buf, sizeof(buf));
+  CHECK(rn > 0);
+  CHECK_EQ(buf[8] | (buf[9] << 8), 1);
+  om::mc::ContactStore rback;
+  CHECK_EQ(om::mc::nodeFileDecode(buf, rn, rback), om::mc::NodeFileResult::Ok);
+  CHECK_EQ(rback.count, 1);
+  CHECK_EQ(om::mc::contactsFind(rback, s.c[0].pub), 0);
+  CHECK_EQ(om::mc::contactsFind(rback, s.c[1].pub), -1);
+
+  // nodes.bin: the two SAVED rows, never the session-only one.
+  const size_t an = om::mc::nodeFileEncode(s, false, 0, buf, sizeof(buf));
+  CHECK(an > 0);
+  CHECK_EQ(buf[8] | (buf[9] << 8), 2);
+  om::mc::ContactStore aback;
+  CHECK_EQ(om::mc::nodeFileDecode(buf, an, aback), om::mc::NodeFileResult::Ok);
+  CHECK_EQ(aback.count, 2);
+  CHECK_EQ(om::mc::contactsFind(aback, s.c[0].pub), 0);
+  CHECK_EQ(om::mc::contactsFind(aback, s.c[1].pub), -1);
+  CHECK_EQ(om::mc::contactsFind(aback, s.c[2].pub), 1);
+
+  // The NVS fallback blob (radio rows only) skips it too, including the contrived in_radio mark.
+  const size_t nn = om::mc::contactsEncodeRadio(s, buf, sizeof(buf), om::mc::kMaxRadioNvs);
+  CHECK(nn > 0);
+  CHECK_EQ(buf[2] | (buf[3] << 8), 1);
+  om::mc::ContactStore nback;
+  CHECK_EQ(om::mc::contactsDecode(buf, nn, nback), om::mc::ContactDecode::Ok);
+  CHECK_EQ(nback.count, 1);
+  CHECK_EQ(om::mc::contactsFind(nback, s.c[1].pub), -1);
+
+  // The full version-4 blob has the same rule (no path may ever write this row).
+  const size_t fn = om::mc::contactsEncode(s, buf, sizeof(buf));
+  CHECK(fn > 0);
+  CHECK_EQ(buf[2] | (buf[3] << 8), 2);
+  om::mc::ContactStore fback;
+  CHECK_EQ(om::mc::contactsDecode(buf, fn, fback), om::mc::ContactDecode::Ok);
+  CHECK_EQ(fback.count, 2);
+  CHECK_EQ(om::mc::contactsFind(fback, s.c[1].pub), -1);
+}
+
 int main() {
   testSignatureSeesAChange();
   testRadioFileRoundTrip();
@@ -386,6 +441,7 @@ int main() {
   testMergeRules();
   testMigrationFromLegacyBlobs();
   testMarkAllInRadioCaps();
+  testSessionOnlyRowsAreNeverEncoded();
   printf("%d checks, %d failure(s)\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

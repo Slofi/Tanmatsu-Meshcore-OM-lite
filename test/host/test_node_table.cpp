@@ -320,6 +320,77 @@ void testRadioCapOfStoreInUse() {
   CHECK_EQ(om::mc::radioCount(auto32), om::mc::kMaxRadioNvs);   // archive-only, honestly
 }
 
+// ---- 4. S516/EST-476: session-only new nodes while "Save heard nodes to SD" is Off ----------------
+// The rule that matters most: Off + "Add heard nodes to the radio: All" still marks NOTHING in_radio and puts
+// the row in no store. A repeat advert must not quietly promote it, and a user act must.
+void testSessionOnlyOnAdvertWithSaveOff() {
+  using om::mc::HeardToRadio;
+  om::mc::ContactStore s;
+  uint8_t pub[32];
+  keyFor(pub, 7001);
+  const int i = om::mc::advertInArchive(s, HeardToRadio::All, pub, "chat", 1, 0, 100, 100, -60, 40, false, 0, 0,
+                                       om::mc::kMaxRadio, /*save_heard=*/false);
+  CHECK_EQ(i, 0);
+  CHECK(s.c[0].session_only);        // RAM only
+  CHECK(!s.c[0].in_radio);           // Off suspends the automatic Add-to-radio rule, even with All
+  CHECK(s.c[0].fresh);               // the new-node dot is RAM state and still works
+  CHECK_EQ(om::mc::radioCount(s), 0);
+  CHECK_EQ(om::mc::sessionOnlyCount(s), 1);
+
+  // A repeat advert (still Save Off) keeps it session-only and keeps it out of the radio; it only refreshes.
+  CHECK_EQ(om::mc::advertInArchive(s, HeardToRadio::All, pub, "chat", 1, 0, 200, 200, -58, 42, false, 0, 0,
+                                   om::mc::kMaxRadio, false),
+           0);
+  CHECK(s.c[0].session_only);
+  CHECK(!s.c[0].in_radio);
+  CHECK_EQ(s.c[0].heard_at, 200u);
+  CHECK_EQ(om::mc::radioCount(s), 0);
+  CHECK_EQ(om::mc::sessionOnlyCount(s), 1);
+
+  // Rule 4: the user's Add to radio clears the flag and saves the row normally.
+  CHECK_EQ(om::mc::addToRadio(s, pub), om::mc::RadioResult::Ok);
+  CHECK(!s.c[0].session_only);
+  CHECK(s.c[0].in_radio);
+  CHECK_EQ(om::mc::radioCount(s), 1);
+  CHECK_EQ(om::mc::sessionOnlyCount(s), 0);
+
+  // Rule 4: Favourite also clears it, but a favourite does NOT imply in_radio (unchanged EST-455 rule).
+  uint8_t fav[32];
+  keyFor(fav, 7002);
+  CHECK(om::mc::advertInArchive(s, HeardToRadio::Off, fav, "fav", 1, 0, 100, 100, 0, 0, false, 0, 0,
+                                om::mc::kMaxRadio, false) >= 0);
+  const int fi = om::mc::contactsFind(s, fav);
+  CHECK(fi >= 0);
+  CHECK(s.c[fi].session_only);
+  CHECK(om::mc::setFavourite(s, fav, true));
+  CHECK(!s.c[fi].session_only);
+  CHECK(!s.c[fi].in_radio);
+  CHECK_EQ(om::mc::radioCount(s), 1);
+
+  // Rule 5/6: a row saved BEFORE the switch stays saved and keeps updating while Off.
+  uint8_t old[32];
+  keyFor(old, 7003);
+  CHECK(om::mc::advertInArchive(s, HeardToRadio::Off, old, "old", 1, 0, 100, 100, 0, 0) >= 0);
+  const int oi = om::mc::contactsFind(s, old);
+  CHECK(oi >= 0);
+  CHECK(!s.c[oi].session_only);
+  CHECK(om::mc::advertInArchive(s, HeardToRadio::All, old, "old", 1, 0, 300, 300, 0, 0, false, 0, 0,
+                                om::mc::kMaxRadio, false) == oi);
+  CHECK(!s.c[oi].session_only);      // stays saved
+  CHECK(!s.c[oi].in_radio);          // and the refresh never promotes it
+  CHECK_EQ(s.c[oi].heard_at, 300u);
+
+  // Rule 4: Delete everywhere on a session-only row just removes the row.
+  uint8_t gone[32];
+  keyFor(gone, 7004);
+  CHECK(om::mc::advertInArchive(s, HeardToRadio::Off, gone, "gone", 1, 0, 100, 100, 0, 0, false, 0, 0,
+                                om::mc::kMaxRadio, false) >= 0);
+  const size_t before = s.count;
+  CHECK(om::mc::deleteEverywhere(s, gone));
+  CHECK_EQ(s.count, before - 1);
+  CHECK_EQ(om::mc::contactsFind(s, gone), -1);
+}
+
 }  // namespace
 
 int main() {
@@ -333,6 +404,7 @@ int main() {
   testOrderingAt2000();
   testUnreadTotalsArchiveOnlyPeer();
   testRadioCapOfStoreInUse();
+  testSessionOnlyOnAdvertWithSaveOff();
   printf("%d checks, %d failure(s)\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

@@ -600,7 +600,29 @@ enum : uint16_t {
     kNodesRowHeard = 10,
     kNodesRowStores,
     kNodesRowClearRadio,
+    // S516/EST-476: "Save heard nodes to SD" — On / Off, DEFAULT On. First in the section, because it decides
+    // whether the row under it (and everything else that saves a node automatically) may do anything at all.
+    kNodesRowSave,
 };
+
+// S516/EST-476: "Save heard nodes to SD". The value and the toggle are pure (core/node_view.h); the write is
+// mc_link's NVS setter (mcset/saveheard).
+const char* nodesSaveHeardValue(tm::Core&) {
+    return om::ui::nodeSaveHeardValue(om::mc::saveHeardToSdSetting());
+}
+
+void nodesToggleSaveHeard(tm::Core&, const tm::SettingRow&) {
+    if (!om::mc::setSaveHeardToSdSetting(om::ui::nodeSaveHeardToggle(om::mc::saveHeardToSdSetting())))
+        om::ui::noticeSet("Save-heard setting not saved", 3000);
+}
+
+// While saving is Off the heard-to-radio row stays visible and readable, but dim, with its reason. It can still
+// be changed (the choice is stored); it simply has no effect until saving is On.
+const char* nodesHeardHint(tm::Core&) {
+    return om::ui::nodeHeardToRadioHint(om::mc::saveHeardToSdSetting());
+}
+
+bool nodesHeardDim(tm::Core&) { return !om::mc::saveHeardToSdSetting(); }
 
 const char* nodesNoticeValue(tm::Core&) { return om::mc::newNodeNoticeEnabled() ? "On" : "Off"; }
 
@@ -620,20 +642,26 @@ void nodesCycleHeard(tm::Core&, const tm::SettingRow&) {
     if (!om::mc::setHeardToRadioSetting(next)) om::ui::noticeSet("Add-to-radio setting not saved", 3000);
 }
 
-// The info row: the same two live counts the Nodes head shows, plus the card's state. S515/EST-468: `sd` is
-// EVERY saved node (the radio's rows are in the same file), and a missing card reads "SD -".
+// The info row: the same live counts the Nodes head shows, plus the card's state. S515/EST-468: `sd` is EVERY
+// SAVED node (the radio's rows are in the same file), and a missing card reads "SD -". S516/EST-476: session-only
+// rows are reported separately ("+N unsaved"), never folded into SD.
 const char* nodesStoresValue(tm::Core&) {
-    static char buf[80];
-    size_t radio = 0, sd = 0;
-    om::mc::nodeStoreCounts(&radio, &sd);
+    static char buf[96];
+    size_t radio = 0, sd = 0, unsaved = 0;
+    om::mc::nodeStoreCounts(&radio, &sd, &unsaved);
     // S516/EST-472 item 6: the cap is the store in use (300 over /int, 32 on NVS).
-    om::ui::nodeStoreInfoText(buf, sizeof(buf), radio, sd, g_sd_mounted, om::mc::radioCapacity());
+    om::ui::nodeStoreInfoText(buf, sizeof(buf), radio, sd, g_sd_mounted, om::mc::radioCapacity(), unsaved);
     return buf;
 }
 
 static const tm::SettingRow kOmNodesRows[] = {
+    // S516/EST-476: first, because it decides whether anything below it saves automatically.
+    {tm::SettingKind::Toggle, kNodesRowSave, "Save heard nodes to SD", "", nodesSaveHeardValue,
+     nodesToggleSaveHeard},
+    // The two extra function arguments are the dim hint and the live dim flag (S516/EST-476); while saving is On
+    // the hint is empty and this row looks exactly as it did before.
     {tm::SettingKind::Cycle, kNodesRowHeard, "Add heard nodes to the radio", "", nodesHeardValue,
-     nodesCycleHeard},
+     nodesCycleHeard, false, nodesHeardHint, nodesHeardDim},
     {tm::SettingKind::Info, kNodesRowStores, "Stored nodes", "", nodesStoresValue, nullptr},
     {tm::SettingKind::Action, kNodesRowClearRadio, "Clear radio (SD keeps them)"},
     {tm::SettingKind::SubPage, kNodesRowRemove, "Remove from radio"},
@@ -2006,8 +2034,10 @@ extern "C" void app_main(void) {
             nv.view        = nodes_view;
             nv.radio_count = om::mc::radioCount(om::mc::contacts());
             // S515/EST-468: SD = EVERY saved node, radio rows included (the view filter still keeps only the
-            // rows NOT in the radio for the "SD only" chip).
-            nv.archive_count = om::mc::contacts().count;
+            // rows NOT in the radio for the "SD only" chip). S516/EST-476: session-only rows are in NO file, so
+            // they are subtracted from SD and reported separately as "+N unsaved".
+            nv.unsaved_count = om::mc::sessionOnlyCount(om::mc::contacts());
+            nv.archive_count = om::mc::contacts().count - nv.unsaved_count;
             nv.sd_mounted  = g_sd_mounted;
             nv.radio_cap   = om::mc::radioCapacity();   // S516: 300 over /int, 32 on the NVS fallback
             if (nodes_focus >= nv.order_count) nodes_focus = nv.order_count > 0 ? nv.order_count - 1 : 0;

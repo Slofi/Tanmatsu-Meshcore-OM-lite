@@ -61,15 +61,25 @@ constexpr size_t radioCapFor(bool int_mounted) { return int_mounted ? kMaxRadio 
 //     with the default Off that is false, which is Filip's rule 1.
 //   * a REFRESH never changes in_radio: a node the user moved to the archive stays there, and one they moved to
 //     the radio stays in the radio. It also never clears `favourite`.
+// S516/EST-476: `save_heard` is the "Save heard nodes to SD" setting (default On). When it is FALSE, an INSERT
+// is marked `session_only` and is never marked in_radio even with HeardToRadio::All: nothing about that node is
+// written anywhere. A REFRESH never changes either flag, so a repeat advert keeps a session-only node session-only
+// and a saved row stays saved while the setting is Off.
 // Returns the store index, or -1 when the table is full and the key is new (the row is dropped, as before).
 int advertInArchive(ContactStore& s, HeardToRadio setting, const uint8_t pub[32], const char* name, uint8_t type,
                     uint8_t path_len, uint32_t remote_ts, uint32_t heard_at, int rssi, int snr_x10,
                     bool has_position = false, int32_t lat_e6 = 0, int32_t lon_e6 = 0,
-                    size_t radio_cap = kMaxRadio);
+                    size_t radio_cap = kMaxRadio, bool save_heard = true);
 
-// How many rows are marked in_radio. O(n), and n is 2,000 — one pass, no counter to keep in sync (a counter
-// would be one more thing a restore could get wrong).
+// How many rows are marked in_radio AND saved. O(n), and n is 2,000 — one pass, no counter to keep in sync (a
+// counter would be one more thing a restore could get wrong). S516/EST-476: a session-only row can never be in
+// the radio (an insert with Save Off is not marked and addToRadio clears the flag), but the count excludes it
+// anyway so "Radio N / C" can never claim a row that no file holds.
 size_t radioCount(const ContactStore& s);
+
+// S516/EST-476: how many rows are session-only (heard with Save Off). The Nodes head reports these separately;
+// the SD count must not include them.
+size_t sessionOnlyCount(const ContactStore& s);
 
 // Mark a row in_radio. NEVER evicts: at `radio_cap` the answer is RadioFull and the table is untouched, including
 // `fresh` and the row's other fields. A node already in the radio answers AlreadyIn (idempotent, no write).

@@ -122,6 +122,9 @@ int contactsUpsert(ContactStore& s, const uint8_t pub[32], const char* name, uin
         // radio automatically"). node_table.h's advertInArchive() is the only code that may flip this on an
         // insert, and only when the user set "Add heard nodes to the radio" to Clients/All.
         s.c[idx].in_radio = false;
+        // S516/EST-476: a row is born SAVED; advertInArchive() marks it session-only when the Save setting is
+        // Off. A reused slot must never inherit the previous node's session-only mark.
+        s.c[idx].session_only = false;
     }
     Contact& c = s.c[idx];
     // A name that arrives empty must not erase the one we already have (an app_data without the name mask).

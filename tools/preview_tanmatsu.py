@@ -1621,20 +1621,24 @@ def sheet(img, question, body, apply_label='Apply'):
     return img
 
 
-def setrow(d, x0, x1, y, label, value, focused=False, chevron=True):
+def setrow(d, x0, x1, y, label, value, focused=False, chevron=True, hint=None, dim=False):
     """One settings row: label left, value right in mono, a chevron for a sub-page, and the L2's row
-    line. `focused` draws the gold ring on the row's own rectangle."""
+    line. `focused` draws the gold ring on the row's own rectangle. S516/EST-476: `hint` is the short dim
+    reason after the label and `dim` draws the whole row dimmer (the Add-heard row while saving is Off)."""
     h = 34
     if focused:
         focus_band(d, x0, x1, y, y + h)
     else:
         hline(d, x0, x1 - TM['ring_inset'], y + h, P['RowLine'])
     right = x1 - TM['ring_inset']
-    text(d, (x0 + 4, y + 9), label, font(FONT_SANS, TM['f_body']),
-         P['AccInk'] if focused else P['Ink'])
+    fl = font(FONT_SANS, TM['f_body'])
+    text(d, (x0 + 4, y + 9), label, fl,
+         P['AccInk'] if (focused and not dim) else (P['Dimmer'] if dim else P['Ink']))
+    if hint:
+        text(d, (x0 + 4 + tw(fl, label) + 12, y + 9), hint, font(FONT_MONO, TM['f_hint']), P['Dimmer'])
     fk = font(FONT_MONO, TM['f_kv'])
     vx = right - (18 if chevron else 4)
-    text(d, (vx, y + 9), value, fk, P['Acc'] if focused else P['Dim'], anchor='ra')
+    text(d, (vx, y + 9), value, fk, P['Dimmer'] if dim else (P['Acc'] if focused else P['Dim']), anchor='ra')
     if chevron:
         text(d, (right, y + 9), '›', fk, P['Acc'] if focused else P['Dimmer'], anchor='ra')
     return y + h + 2
@@ -2084,50 +2088,55 @@ def settings_sound_picker():
     return save(img, '2026-11-19-sound-picker-scrolled.png')
 
 
-def _omlite_rows():
-    """The OM Lite tab's sections, as the device builds them (S514/EST-446 + EST-447).
+def _omlite_rows(save_off=False):
+    """The OM Lite tab's sections, as the device builds them (S514/EST-446 + EST-447 + S516/EST-476).
 
     One scrolling list: NODES · CHAT · MAP · RPTR, no new top tabs. Every number and name here is an
     INVENTED fixture (public-repo rule 9); the channel scopes are the public, derivable ones and no private
     key is ever drawn. `settings_nodes` and `settings_map` show the same list at a different focus/scroll.
+    `save_off` draws the ticket's Off state: "Save heard nodes to SD: Off" and the Add-heard row dim with its
+    reason — exactly the two rows Filip asked about.
     """
+    heard_hint = 'needs Save heard nodes On' if save_off else None
     return [
-        ('sect', 'NODES', None, None),
-        ('row', 'Add heard nodes to the radio', 'Off', False),
-        ('row', 'Stored nodes', 'Radio 10 / 300 · SD 412 · SD ok', False),
-        ('row', 'Clear radio (SD keeps them)', '', False),
-        ('row', 'Remove from radio', '', True),
-        ('row', 'Clear all contacts', '', False),
-        ('row', 'New-node notice', 'On', False),
-        ('sect', 'CHAT', None, None),
-        ('row', "Don't Panic", 'default', True),
-        ('row', 'Public', 'no scope', True),
-        ('row', '#slovenija', 'scope #si', True),
-        ('row', '#slovenia', 'scope #europe', True),
-        ('row', 'Add hashtag channel', '', True),
-        ('row', 'Add channel by key', '', True),
-        ('sect', 'MAP', None, None),
-        ('row', 'Start position', 'Ljubljana', False),
-        ('row', 'Start zoom', 'z16', False),
-        ('row', 'slo (z9-15)', '35496 tiles', False),
-        ('row', 'slo16 (z16)', '118240 tiles', False),
-        ('row', 'slo17 (z17)', '899104 tiles · 3.4 GB', False),
-        ('sect', 'RPTR', None, None),
-        ('row', 'Repeater admin comes later', '', False),
+        ('sect', 'NODES', None, None, None),
+        ('row', 'Save heard nodes to SD', 'Off' if save_off else 'On', False, None),
+        ('row', 'Add heard nodes to the radio', 'Off', False, heard_hint),
+        ('row', 'Stored nodes', 'Radio 10 / 300 · SD 409 · +3 unsaved' if save_off
+                else 'Radio 10 / 300 · SD 412 · SD ok', False, None),
+        ('row', 'Clear radio (SD keeps them)', '', False, None),
+        ('row', 'Remove from radio', '', True, None),
+        ('row', 'Clear all contacts', '', False, None),
+        ('row', 'New-node notice', 'On', False, None),
+        ('sect', 'CHAT', None, None, None),
+        ('row', "Don't Panic", 'default', True, None),
+        ('row', 'Public', 'no scope', True, None),
+        ('row', '#slovenija', 'scope #si', True, None),
+        ('row', '#slovenia', 'scope #europe', True, None),
+        ('row', 'Add hashtag channel', '', True, None),
+        ('row', 'Add channel by key', '', True, None),
+        ('sect', 'MAP', None, None, None),
+        ('row', 'Start position', 'Ljubljana', False, None),
+        ('row', 'Start zoom', 'z16', False, None),
+        ('row', 'slo (z9-15)', '35496 tiles', False, None),
+        ('row', 'slo16 (z16)', '118240 tiles', False, None),
+        ('row', 'slo17 (z17)', '899104 tiles · 3.4 GB', False, None),
+        ('sect', 'RPTR', None, None, None),
+        ('row', 'Repeater admin comes later', '', False, None),
     ]
 
 
-def _draw_omlite_rows(d, W, pad, body_top, body_bot, focus_label, scroll):
+def _draw_omlite_rows(d, W, pad, body_top, body_bot, focus_label, scroll, save_off=False):
     """Draw the OM Lite tab with the frame's own row arithmetic: headers 22, rows 34, focus by label,
     clamped scroll, rows clipped to the body (the device draws no text on the chrome)."""
     lx0, lx1 = pad, W - pad
     row_h, sect_h = 34, 22
-    rows = _omlite_rows()
+    rows = _omlite_rows(save_off)
     total = sum(sect_h if kind == 'sect' else row_h for kind, *_ in rows)
     visible = body_bot - body_top
     scroll = max(0, min(scroll, max(0, total - visible)))
     yy = body_top - scroll
-    for kind, label, value, chevron in rows:
+    for kind, label, value, chevron, hint in rows:
         h = sect_h if kind == 'sect' else row_h
         top, bot = yy, yy + h
         yy = bot
@@ -2138,7 +2147,8 @@ def _draw_omlite_rows(d, W, pad, body_top, body_bot, focus_label, scroll):
         if kind == 'sect':
             spaced(d, (lx0 + 4, top + 5), label, font(FONT_MONO, TM['f_label']), P['Dim'])
         else:
-            setrow(d, lx0, lx1, top, label, value, focused=(label == focus_label), chevron=chevron)
+            setrow(d, lx0, lx1, top, label, value, focused=(label == focus_label), chevron=chevron,
+                   hint=hint, dim=hint is not None)
     scroll_indicator(d, (lx0, body_top, W - 8, body_bot), total, visible, scroll)
     return total
 
@@ -2202,6 +2212,21 @@ def settings_nodes():
     hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),
                              (',', 'settings')])
     return save(img, '2026-11-19-settings-nodes.png')
+
+
+def settings_nodes_save():
+    """S516/EST-476: the NODES section with the new row in its OFF state.
+
+    Focus is on "Save heard nodes to SD" (value Off). The row under it, "Add heard nodes to the radio",
+    stays visible with its value but is DIMMED and carries the short reason "needs Save heard nodes On" —
+    exactly the two rows the ticket asks Claude and Filip to check at 800 px.
+    """
+    img, d, W, H, pad, body_top = _settings_owner_frame(1, 'OM Lite · tab 2 of 4')
+    body_bot = H - TM['hint_h']
+    _draw_omlite_rows(d, W, pad, body_top, body_bot, 'Save heard nodes to SD', 0, save_off=True)
+    hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),
+                             (',', 'settings')])
+    return save(img, '2026-11-20-nodes-settings-save.png')
 
 
 def settings_map():
@@ -2724,13 +2749,16 @@ NODES_VIEWS = [
 ]
 
 
-def _nodes_head_store(d, W, pad, radio, archive, view):
-    """The head band: title, the three chips (active gold), the live counts on the right."""
+def _nodes_head_store(d, W, pad, radio, archive, view, unsaved=0):
+    """The head band: title, the three chips (active gold), the live counts on the right. S516/EST-476: an
+    optional "+N unsaved" tail for session-only rows, which are NOT part of the SD number."""
     y = TM['status_h']
     text(d, (pad, y + TM['head_h'] // 2), 'Nodes', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
     fh = font(FONT_MONO, TM['f_hint'])
     fm = font(FONT_MONO, TM['f_meta'])
     head_right = 'Radio %d / 300 · SD %d' % (radio, archive)
+    if unsaved > 0:
+        head_right += ' · +%d unsaved' % unsaved
     text(d, (W - pad, y + TM['head_h'] // 2), head_right, fm, P['Dim'], anchor='rm')
     title_w = tw(font(FONT_SANS, TM['f_title']), 'Nodes')
     cx = pad + title_w + 28
@@ -2760,7 +2788,9 @@ def _nodes_store_list(d, W, rows, focus_row, bar_count, view):
     rows_top = bar_y + bar_h + 6
     row_h = 46
     row_right = list_x1 - TM['ring_inset']
-    for i, (kind, name, hops, age, snr, store, fav, fresh) in enumerate(rows):
+    for i, row in enumerate(rows):
+        kind, name, hops, age, snr, store, fav, fresh = row[:8]
+        session_only = len(row) > 8 and row[8]
         y0 = rows_top + i * row_h
         y1 = y0 + row_h
         if i == focus_row:
@@ -2776,7 +2806,8 @@ def _nodes_store_list(d, W, rows, focus_row, bar_count, view):
         nc = P['AccInk'] if i == focus_row else P['Ink']
         text(d, (list_x0 + 43, y0 + 10), name, font(FONT_SANS, 16), nc)
         meta = font(FONT_MONO, TM['f_meta'])
-        text(d, (list_x0 + 43, y0 + 29), hops, meta, P['Dimmer'])
+        sub_line = hops + (' · not saved' if session_only else '')
+        text(d, (list_x0 + 43, y0 + 29), sub_line, meta, P['Dimmer'])
         text(d, (row_right - 74, y0 + 11), age, meta, P['Dim'], anchor='ra')
         text(d, (row_right - 6, y0 + 29), snr + ' dB', meta, P['Dim'], anchor='ra')
         if fav:
@@ -2786,6 +2817,49 @@ def _nodes_store_list(d, W, rows, focus_row, bar_count, view):
     scroll_indicator(d, (list_x0, rows_top, list_x1, rows_top + len(rows) * row_h),
                      total=len(rows), visible=len(rows))
     return rows_top, list_x0, list_x1, row_h
+
+
+def nodes_head_unsaved():
+    """S516/EST-476: the Nodes head with session-only rows, "+2 unsaved" after the SD count.
+
+    The two newest rows were heard with "Save heard nodes to SD" Off: they are fully usable (dot, name, age,
+    SNR, the fresh red dot) and their second line says "· not saved". They are NOT part of "SD 5" — that is the
+    saved count only — and the head reports them separately, which is the rule the ticket pins.
+    """
+    rows = list(NODES_VIEWS[:5]) + [
+        ('client', 'TEST-N1', 'direct', 'now', '5.0', False, False, True, True),
+        ('repeater', 'RPT-New', 'path 2', 'now', '3.0', False, False, True, True),
+    ]
+    img, d = new_screen()
+    W, H = TM['W'], TM['H']
+    status_bar(d)
+    _nodes_head_store(d, W, TM['pad'], 3, 5, 'All', unsaved=2)
+    rows_top, list_x0, list_x1, row_h = _nodes_store_list(d, W, rows, 5, '7 of 7', 'All')
+
+    work_top = TM['status_h'] + TM['head_h'] + 1
+    vline(d, list_x1 + 8, work_top, H - TM['hint_h'] - 8, P['Line'])
+    x = list_x1 + 8 + 24
+    yy = work_top + 18
+    text(d, (x, yy), 'TEST-N1', font(FONT_SANS, 26), P['Ink'])
+    yy += 34
+    text(d, (x, yy), 'client · key ' + NODE_KEY + ' · session only (not saved)',
+         font(FONT_MONO, TM['f_meta']), P['Dim'])
+    yy += 26
+    fk = font(FONT_MONO, TM['f_kv'])
+    for label, value in (('TYPE', 'client (companion)'), ('HOPS', 'direct · 0 hops'),
+                         ('SNR / RSSI', '5.0 dB / -70 dBm'), ('LAST HEARD', 'now'),
+                         ('PUBLIC KEY', NODE_KEY), ('STORE', 'session only (RAM)'), ('PATH', 'direct')):
+        text(d, (x, yy), label, fk, P['Dimmer'])
+        text(d, (x + 130, yy), value, fk, P['Ink'])
+        yy += 28
+    yy += 8
+    text(d, (x, yy), 'Gone after a restart.', font(FONT_SANS, TM['f_body']), P['Dimmer'])
+    text(d, (x, yy + 22), 'Add to radio or Favourite saves one.',
+         font(FONT_SANS, TM['f_body']), P['Dimmer'])
+
+    hint_bar(d, 'nodes', [('<>', 'view'), ('Enter', 'menu'), ('/', 'search'), ('esc', 'back'),
+                          ('f', 'fav'), ('a', 'advert')], dots=('chat', 'nodes'))
+    return save(img, '2026-11-20-nodes-head-unsaved.png')
 
 
 def nodes_views():
@@ -3317,7 +3391,8 @@ RENDERERS = dict(chat_select=chat_select, chat_msg_menu=chat_msg_menu, chat_msg_
                  rptr_confirm=rptr_confirm, settings=settings,
                  settings_general=settings_general, settings_omlite=settings_omlite,
                  settings_opstoc=settings_opstoc, settings_chat=settings_chat,
-                 settings_nodes=settings_nodes, settings_map=settings_map,
+                 settings_nodes=settings_nodes, settings_nodes_save=settings_nodes_save,
+                 nodes_head_unsaved=nodes_head_unsaved, settings_map=settings_map,
                  settings_sound=settings_sound, settings_message_led=settings_message_led,
                  settings_sound_picker=settings_sound_picker, popup_msg=popup_msg)
 

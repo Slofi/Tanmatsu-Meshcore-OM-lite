@@ -31,6 +31,9 @@ namespace mc {
 inline bool contactSetFavourite(ContactStore& s, size_t index, bool on) {
     if (index >= s.count) return false;
     s.c[index].favourite = on;
+    // S516/EST-476 rule 4: a Favourite press is a user act on the row, so a session-only row becomes saved. The
+    // row stays archive-only (a favourite never implies in_radio); it is simply written normally from now on.
+    s.c[index].session_only = false;
     return true;
 }
 

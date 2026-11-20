@@ -186,6 +186,9 @@ uint32_t      g_radio_signature = 0;      // the bytes last written, so an archi
 bool          g_radio_have_signature = false;
 uint8_t       g_nvs_blob_version = 0;     // what restoreContacts() saw (0 = no blob); the migration picks the rule
 HeardToRadio  g_heard_to_radio = kHeardToRadioDefault;
+// S516/EST-476: "Save heard nodes to SD", DEFAULT On. Off makes every NEW heard node session-only and suspends
+// the automatic Add-to-radio rule above; like g_heard_to_radio it is NVS-backed (mcset/saveheard).
+bool          g_save_heard_to_sd = true;
 uint8_t*      g_node_file_buf = nullptr;  // the /int and SD files' encode/decode buffer (PSRAM)
 
 void initNodeTable() {
@@ -1114,15 +1117,38 @@ bool setHeardToRadioSetting(om::mc::HeardToRadio v) {
     return true;
 }
 
-// S515/EST-468: `sd` is EVERY node saved on the SD card — the radio's rows are in the same file, one row per
-// node, so this is the whole table (the head shows "SD -" when there is no card; the UI owns that word).
-void nodeStoreCounts(size_t* radio, size_t* sd) {
+// S516/EST-476: "Save heard nodes to SD" — On / Off, default On, NVS mcset/saveheard. A failed write keeps the
+// old value in RAM (and the row says so), exactly like the two settings above it.
+bool saveHeardToSdSetting() { return g_save_heard_to_sd; }
+
+bool setSaveHeardToSdSetting(bool on) {
+    nvs_handle_t h;
+    if (nvs_open("mcset", NVS_READWRITE, &h) != ESP_OK) return false;
+    const esp_err_t r = nvs_set_u8(h, "saveheard", on ? 1 : 0);
+    if (r == ESP_OK) nvs_commit(h);
+    nvs_close(h);
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "save heard nodes to SD: NVS write failed (%s); the old value stays", esp_err_to_name(r));
+        return false;
+    }
+    g_save_heard_to_sd = on;
+    ESP_LOGI(TAG, "save heard nodes to SD: %s (NVS mcset/saveheard)", on ? "on" : "off");
+    return true;
+}
+
+// S515/EST-468: `sd` is EVERY node SAVED on the SD card — the radio's rows are in the same file, one row per
+// node. S516/EST-476: session-only rows are NOT in that file and are reported separately as `unsaved`, exactly
+// as the head shows them ("+N unsaved").
+void nodeStoreCounts(size_t* radio, size_t* sd, size_t* unsaved) {
     if (radio != nullptr) *radio = 0;
     if (sd != nullptr) *sd = 0;
+    if (unsaved != nullptr) *unsaved = 0;
     if (g_store_mutex == nullptr) return;
     StoreLock l;
+    const size_t unsaved_n = sessionOnlyCount(g_contacts);
     if (radio != nullptr) *radio = radioCount(g_contacts);
-    if (sd != nullptr) *sd = g_contacts.count;
+    if (sd != nullptr) *sd = g_contacts.count - unsaved_n;
+    if (unsaved != nullptr) *unsaved = unsaved_n;
 }
 
 // S516/EST-472 item 6: the cap of the store in use. /int mounted -> radio.bin -> kMaxRadio; no /int -> the old
@@ -1267,6 +1293,19 @@ void loadHeardToRadio() {
     ESP_LOGI(TAG, "add heard nodes to the radio: %s (NVS mcset/heardto)", heardToRadioText(g_heard_to_radio));
 }
 
+// S516/EST-476: "Save heard nodes to SD" — default On. Only an explicit stored 0 turns it off: a missing or
+// unreadable NVS entry must not silently start throwing heard nodes away at restart.
+void loadSaveHeardToSd() {
+    g_save_heard_to_sd = true;
+    nvs_handle_t h;
+    if (nvs_open("mcset", NVS_READONLY, &h) != ESP_OK) return;
+    uint8_t v = 1;
+    const esp_err_t r = nvs_get_u8(h, "saveheard", &v);
+    nvs_close(h);
+    if (r == ESP_OK && v == 0) g_save_heard_to_sd = false;
+    ESP_LOGI(TAG, "save heard nodes to SD: %s (NVS mcset/saveheard)", g_save_heard_to_sd ? "on" : "off");
+}
+
 void begin() {
     initNodeTable();   // S515/EST-463: PSRAM first, before anything can read or restore the table
     if (g_store_mutex == nullptr) g_store_mutex = xSemaphoreCreateRecursiveMutex();
@@ -1280,6 +1319,7 @@ void begin() {
     loadAdvertInterval();    // EST-445: mcid/advint; default Off since S514 (Filip)
     loadNewNodeNotice();     // S514/EST-447: mcset/newnode, default On
     loadHeardToRadio();      // S515/EST-464: mcset/heardto, default Off (Filip's rule)
+    loadSaveHeardToSd();     // S516/EST-476: mcset/saveheard, default On
     loadChannels();
     g_loaded = true;
     ESP_LOGI(TAG, "channels: %u loaded", (unsigned)g_set.count);
@@ -1876,9 +1916,12 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
             // S515/EST-464 (the EST-463 blocker): a verified advert goes through the table's RULE, never straight to
             // contactsUpsert. With the setting Off (the default) that means archive-only; nothing enters the radio
             // automatically. The rule also keeps a hand-chosen radio node in the radio on a refresh.
+            // S516/EST-476: g_save_heard_to_sd is the last argument. Off makes a NEW row session-only and
+            // suspends the automatic Add-to-radio rule; a REFRESH never changes either flag.
             const int      idx =
                 advertInArchive(g_contacts, g_heard_to_radio, pub, name, type, v.path_bytes, ts, heard, rssi_dbm,
-                                snr_db * 10, pos.has_position, pos.lat_e6, pos.lon_e6, radioCapacity());
+                                snr_db * 10, pos.has_position, pos.lat_e6, pos.lon_e6, radioCapacity(),
+                                g_save_heard_to_sd);
             if (idx >= 0) {
                 // Add / rename / route change is worth an immediate write; a repeat advert that only moves
                 // last-heard and SNR waits for the 10-minute floor. The radio file's signature check means an

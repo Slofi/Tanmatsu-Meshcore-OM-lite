@@ -26,7 +26,11 @@ uint32_t get32(const uint8_t* p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-bool selected(const Contact& c, bool radio_only) { return !radio_only || c.in_radio; }
+// S516/EST-476: neither file may hold a session-only row. `session_only` is RAM state; the radio file is only
+// the chosen rows, the archive is every SAVED row. This one predicate is the skip for both encoders.
+bool selected(const Contact& c, bool radio_only) {
+    return !c.session_only && (!radio_only || c.in_radio);
+}
 
 }  // namespace
 

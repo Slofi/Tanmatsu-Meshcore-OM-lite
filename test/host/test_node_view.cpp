@@ -297,6 +297,42 @@ void testSettingsValues() {
   om::ui::nodeStoreCountsText(head, sizeof(head), 32, 500, true, om::mc::radioCapFor(false));
   CHECK(strcmp(head, "Radio 32 / 32 \xc2\xb7 SD 500") == 0);
 
+  // S516/EST-476: session-only rows are NOT counted in SD; the head says how many there are, compactly.
+  om::ui::nodeStoreCountsText(head, sizeof(head), 2, 17, true, om::mc::kMaxRadio, 3);
+  CHECK(strcmp(head, "Radio 2 / 300 \xc2\xb7 SD 17 \xc2\xb7 +3 unsaved") == 0);
+  om::ui::nodeStoreCountsText(head, sizeof(head), 0, 5, false, om::mc::kMaxRadioNvs, 2);
+  CHECK(strcmp(head, "Radio 0 / 32 \xc2\xb7 SD - \xc2\xb7 +2 unsaved") == 0);
+  om::ui::nodeStoreCountsText(head, sizeof(head), 2, 17, true, om::mc::kMaxRadio, 0);
+  CHECK(strcmp(head, "Radio 2 / 300 \xc2\xb7 SD 17") == 0);   // On / no session-only rows: unchanged wording
+  om::ui::nodeStoreInfoText(info, sizeof(info), 10, 17, true, om::mc::kMaxRadio, 3);
+  CHECK(strcmp(info, "Radio 10 / 300 \xc2\xb7 SD 17 \xc2\xb7 +3 unsaved \xc2\xb7 SD ok") == 0);
+
+  // The setting's own pure value/toggle and the dim hint (S516/EST-476).
+  CHECK(strcmp(om::ui::nodeSaveHeardValue(true), "On") == 0);
+  CHECK(strcmp(om::ui::nodeSaveHeardValue(false), "Off") == 0);
+  CHECK(!om::ui::nodeSaveHeardToggle(true));
+  CHECK(om::ui::nodeSaveHeardToggle(false));
+  CHECK(strcmp(om::ui::nodeHeardToRadioHint(true), "") == 0);
+  CHECK(strcmp(om::ui::nodeHeardToRadioHint(false), "needs Save heard nodes On") == 0);
+
+  // S516/EST-476: a session-only row is in "All" only. The "SD only" view and its count must never claim a row
+  // that no file holds (the head's SD number is handled separately, above).
+  om::mc::ContactStore sv;
+  addNode(sv, 101, "SAVED", 1, 100);                       // saved, archive-only
+  uint8_t sp[32];
+  keyFor(sp, 102);
+  CHECK(om::mc::advertInArchive(sv, HeardToRadio::Off, sp, "SESSION", 1, 0, 100, 100, 0, 0, false, 0, 0,
+                                om::mc::kMaxRadio, false) >= 0);
+  CHECK_EQ(sv.count, 2);
+  CHECK_EQ(om::mc::sessionOnlyCount(sv), 1);
+  CHECK_EQ(om::ui::nodeViewCount(sv, om::ui::NodeView::All, om::mc::radioCount(sv)), 2);
+  CHECK_EQ(om::ui::nodeViewCount(sv, om::ui::NodeView::Archive, om::mc::radioCount(sv)), 1);
+  int sv_order[4];
+  const int sv_n = (int)om::mc::contactsOrder(sv, sv_order, om::mc::kMaxNodes);
+  int kept[4];
+  CHECK_EQ(om::ui::nodeViewFilter(sv, sv_order, sv_n, om::ui::NodeView::Archive, kept), 1);
+  CHECK_EQ(om::mc::contactsFind(sv, sv.c[kept[0]].pub), om::mc::contactsFind(sv, sv.c[0].pub));
+
   // The Settings list is the RADIO list: of the five fixture rows only the three in the radio are offered.
   Fixture f;
   buildFixture(f);

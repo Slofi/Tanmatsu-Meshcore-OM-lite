@@ -44,10 +44,16 @@ inline NodeView nodeViewCycle(NodeView v, int delta) {
     return (NodeView)i;
 }
 
-// How many rows the view holds. `radio` is radioCount(store); "SD only" is every row NOT in the radio.
+// How many rows the view holds. `radio` is radioCount(store); "SD only" is every SAVED row NOT in the radio.
+// S516/EST-476: a session-only row is in neither store, so it is in All only — never counted as "SD only" (the
+// chip must not claim a row that no file holds).
 inline int nodeViewCount(const om::mc::ContactStore& s, NodeView v, size_t radio) {
     if (v == NodeView::Radio) return (int)radio;
-    if (v == NodeView::Archive) return (int)(s.count > radio ? s.count - radio : 0);
+    if (v == NodeView::Archive) {
+        const size_t unsaved = sessionOnlyCount(s);
+        const size_t saved   = s.count > unsaved ? s.count - unsaved : 0;
+        return (int)(saved > radio ? saved - radio : 0);
+    }
     return (int)s.count;
 }
 
@@ -60,34 +66,50 @@ inline int nodeViewFilter(const om::mc::ContactStore& s, const int* order, int o
         const int ci = order[i];
         if (ci < 0 || ci >= (int)s.count) continue;   // a stale row id matches nobody
         if (v == NodeView::Radio && !s.c[ci].in_radio) continue;
-        if (v == NodeView::Archive && s.c[ci].in_radio) continue;
+        if (v == NodeView::Archive && (s.c[ci].in_radio || s.c[ci].session_only)) continue;   // S516
         if (out != nullptr) out[n] = ci;
         ++n;
     }
     return n;
 }
 
-// The page head's right-hand text: "Radio 10 / 300 · SD 412". `sd` is EVERY node saved on the SD card
-// (the radio's rows included; one table, one row per node). No card = "SD -", never a number that implies
-// the nodes survive a restart. S516/EST-472 item 6: `radio_cap` is the cap of the store in use
-// (radioCapFor(int_mounted)) — 300 over /int, 32 on the NVS fallback — never a hard-coded 300.
+// The page head's right-hand text: "Radio 10 / 300 · SD 412". `sd` is EVERY SAVED node (the radio's rows
+// included; one table, one row per node). No card = "SD -", never a number that implies the nodes survive a
+// restart. S516/EST-472 item 6: `radio_cap` is the cap of the store in use (radioCapFor(int_mounted)) — 300 over
+// /int, 32 on the NVS fallback — never a hard-coded 300.
+// S516/EST-476: `unsaved` is the session-only row count. It is NOT part of `sd` (those rows are in no file), so
+// the head says it separately and compactly: "Radio 2 / 300 · SD 17 · +3 unsaved".
 inline void nodeStoreCountsText(char* out, size_t cap, size_t radio, size_t sd, bool sd_mounted,
-                                size_t radio_cap = om::mc::kMaxRadio) {
+                                size_t radio_cap = om::mc::kMaxRadio, size_t unsaved = 0) {
     if (out == nullptr || cap == 0) return;
-    if (sd_mounted)
+    if (unsaved > 0) {
+        if (sd_mounted)
+            snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD %u \xc2\xb7 +%u unsaved", (unsigned)radio,
+                     (unsigned)radio_cap, (unsigned)sd, (unsigned)unsaved);
+        else
+            snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD - \xc2\xb7 +%u unsaved", (unsigned)radio,
+                     (unsigned)radio_cap, (unsigned)unsaved);
+    } else if (sd_mounted) {
         snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD %u", (unsigned)radio, (unsigned)radio_cap, (unsigned)sd);
-    else
+    } else {
         snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD -", (unsigned)radio, (unsigned)radio_cap);
+    }
 }
 
 // Settings › OM Lite › NODES, the info row: the same counts plus the card. A missing card is not a failure
 // (the radio list still works), but the SD copy does not survive a restart without it, so it says so.
 inline void nodeStoreInfoText(char* out, size_t cap, size_t radio, size_t sd, bool sd_mounted,
-                              size_t radio_cap = om::mc::kMaxRadio) {
+                              size_t radio_cap = om::mc::kMaxRadio, size_t unsaved = 0) {
     if (out == nullptr || cap == 0) return;
-    if (sd_mounted)
+    if (sd_mounted && unsaved > 0)
+        snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD %u \xc2\xb7 +%u unsaved \xc2\xb7 %s", (unsigned)radio,
+                 (unsigned)radio_cap, (unsigned)sd, (unsigned)unsaved, "SD ok");
+    else if (sd_mounted)
         snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD %u \xc2\xb7 %s", (unsigned)radio, (unsigned)radio_cap,
                  (unsigned)sd, "SD ok");
+    else if (unsaved > 0)
+        snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD - \xc2\xb7 +%u unsaved \xc2\xb7 %s", (unsigned)radio,
+                 (unsigned)radio_cap, (unsigned)unsaved, "no SD card");
     else
         snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD - \xc2\xb7 %s", (unsigned)radio, (unsigned)radio_cap,
                  "no SD card");
@@ -111,6 +133,18 @@ inline om::mc::HeardToRadio nodeHeardToRadioCycle(om::mc::HeardToRadio v) {
         case om::mc::HeardToRadio::All:
         default: return om::mc::HeardToRadio::Off;
     }
+}
+
+// S516/EST-476: Settings › OM Lite › NODES, "Save heard nodes to SD" — On / Off, DEFAULT On. The row's value
+// and toggle are pure; mc_link owns the NVS byte (mcset/saveheard).
+inline const char* nodeSaveHeardValue(bool on) { return on ? "On" : "Off"; }
+inline bool        nodeSaveHeardToggle(bool on) { return !on; }
+
+// The dim hint under "Add heard nodes to the radio" while Save heard nodes is Off: that setting can still be
+// changed (it is stored), but it has no effect until saving is back On. Empty when saving is On, so the same row
+// looks exactly as it did before this ticket.
+inline const char* nodeHeardToRadioHint(bool save_heard_on) {
+    return save_heard_on ? "" : "needs Save heard nodes On";
 }
 
 }  // namespace ui

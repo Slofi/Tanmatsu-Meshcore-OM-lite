@@ -31,7 +31,8 @@ struct NodesView {
     NodeView view        = kNodeViewDefault;
     int      view_count  = 0;
     size_t   radio_count = 0;
-    size_t   archive_count = 0;
+    size_t   archive_count = 0;   // SAVED rows only (S516/EST-476: session-only rows are not on the SD card)
+    size_t   unsaved_count = 0;   // S516/EST-476: session-only rows, shown as "+N unsaved"
     bool     sd_mounted  = true;
     // S516/EST-472 item 6: the cap of the store the radio list actually uses (300 over /int, 32 on the NVS
     // fallback). The head's "Radio N / C" reads this, never a fixed 300.

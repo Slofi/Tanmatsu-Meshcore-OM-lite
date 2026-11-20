@@ -39,6 +39,10 @@ using SettingsValueFn = const char* (*)(Core&);
 // Called by the shell after the frame reports ToggleValue / CycleValue / ActionRow.
 using SettingsHandlerFn = void (*)(Core&, const SettingRow&);
 
+// S516/EST-476: a row may be DIMMED from live state (the "Add heard nodes to the radio" row while saving is
+// Off). Called on every draw like a value getter; nullptr/false means the normal look.
+using SettingsFlagFn = bool (*)(Core&);
+
 // A getter that also sees the ROW (S514/EST-446): one channel per row needs to know which slot to read,
 // and the row's own `id` is the owner's slot number. Kept separate so every EST-448 getter stays as it was.
 using SettingsValueRowFn = const char* (*)(Core&, const SettingRow&);
@@ -63,17 +67,23 @@ struct SettingRow {
   // Per-row getter (wins over read_value and value). At the END so every existing braced initialiser in
   // main.cpp keeps its meaning.
   SettingsValueRowFn read_row_value = nullptr;
+  // S516/EST-476: an optional dim HINT drawn after the label (empty string = none) and the live dim state. Both
+  // are at the very end, so every existing initialiser keeps its meaning.
+  SettingsValueFn read_hint = nullptr;
+  SettingsFlagFn  read_dim = nullptr;
 
   constexpr SettingRow() = default;
   constexpr SettingRow(SettingKind k, uint16_t i, const char* l, const char* v = "",
                        SettingsValueFn rv = nullptr, SettingsHandlerFn he = nullptr,
-                       bool nr = false)
-      : kind(k), id(i), label(l), value(v), read_value(rv), on_enter(he), needs_running(nr) {}
+                       bool nr = false, SettingsValueFn rh = nullptr, SettingsFlagFn rd = nullptr)
+      : kind(k), id(i), label(l), value(v), read_value(rv), on_enter(he), needs_running(nr),
+        read_hint(rh), read_dim(rd) {}
 
   constexpr SettingRow(SettingKind k, uint16_t i, const char* l, const char* v, RowValueFn rv,
-                       SettingsHandlerFn he = nullptr, bool nr = false)
+                       SettingsHandlerFn he = nullptr, bool nr = false, SettingsValueFn rh = nullptr,
+                       SettingsFlagFn rd = nullptr)
       : kind(k), id(i), label(l), value(v), read_value(nullptr), on_enter(he), needs_running(nr),
-        read_row_value(rv.fn) {}
+        read_row_value(rv.fn), read_hint(rh), read_dim(rd) {}
 };
 
 // One section: an uppercase header and the rows under it. A section with zero rows still draws its header;

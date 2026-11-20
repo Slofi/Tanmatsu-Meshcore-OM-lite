@@ -81,6 +81,12 @@ struct Contact {
     // work) but it is not in the radio's own store. Nothing ever sets this from the air — only the user's
     // addToRadio() and the "Add heard nodes to the radio" setting (node_table.h) do, and the setting defaults Off.
     bool     in_radio = false;
+    // S516/EST-476: heard while "Save heard nodes to SD" was OFF. The row is fully usable (Nodes, DM, Ping,
+    // Trace, Map, the fresh dot) but it is RAM only: every encoder skips it, so `nodes.bin`, `radio.bin` and the
+    // NVS fallback never contain it and it is gone after a restart. It is DELIBERATELY not part of any file
+    // format (contact_blob.h): the flag cannot come back from a file, only from this boot. A user action on the
+    // row (Add to radio, Favourite) clears it, because that act means "save this one".
+    bool     session_only = false;
 };
 
 // MeshCore's ONE distinction: only OUT_PATH_UNKNOWN means "no route"; a zero-hop path is a direct neighbour.

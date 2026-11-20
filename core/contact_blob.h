@@ -60,14 +60,16 @@ enum class ContactDecode : uint8_t {
 const char* contactDecodeText(ContactDecode r);
 
 // Encode `s` into `out`. Returns the number of bytes written, or 0 when `out` is null or `cap` is too small.
-// The size depends on s.count, so a caller can ask with cap 0 to learn the requirement first.
+// The size depends on the SAVED count (S516/EST-476 session-only rows are skipped), so a caller can ask with
+// cap 0 to learn the requirement first.
 size_t contactsEncode(const ContactStore& s, uint8_t* out, size_t cap);
 
 // S515/EST-464 (EST-463 item 3): the NVS blob is now only the FALLBACK used when /int does not mount. It must
 // never carry an archive-only node (Filip: nothing enters the radio automatically), and the old 32-row NVS
-// budget still applies to that partition. So this encoder writes ONLY rows with in_radio, at most `max_rows`
-// (32 on the device); returns 0 when out is null, the table is null, or cap is too small. The caller learns
-// whether it had to drop radio rows by comparing the count it wrote with radioCount().
+// budget still applies to that partition. So this encoder writes ONLY SAVED rows with in_radio, at most
+// `max_rows` (32 on the device); S516/EST-476 session-only rows are skipped too. Returns 0 when out is null, the
+// table is null, or cap is too small. The caller learns whether it had to drop radio rows by comparing the count
+// it wrote with radioCount().
 size_t contactsEncodeRadio(const ContactStore& s, uint8_t* out, size_t cap, size_t max_rows);
 
 // S515/EST-464: one version-4 record, for the /int and SD node files, which share this exact record layout.

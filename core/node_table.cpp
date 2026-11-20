@@ -43,7 +43,7 @@ const char* radioResultText(RadioResult r) {
 
 int advertInArchive(ContactStore& s, HeardToRadio setting, const uint8_t pub[32], const char* name, uint8_t type,
                     uint8_t path_len, uint32_t remote_ts, uint32_t heard_at, int rssi, int snr_x10,
-                    bool has_position, int32_t lat_e6, int32_t lon_e6, size_t radio_cap) {
+                    bool has_position, int32_t lat_e6, int32_t lon_e6, size_t radio_cap, bool save_heard) {
     if (pub == nullptr) return -1;
     const bool is_new = contactsFind(s, pub) < 0;
     // The insert branch (fresh, in_radio = false, no inherited route) lives in contactsUpsert, and it is the ONLY
@@ -53,6 +53,12 @@ int advertInArchive(ContactStore& s, HeardToRadio setting, const uint8_t pub[32]
     const int idx = contactsUpsert(s, pub, name, type, path_len, remote_ts, heard_at, rssi, snr_x10, has_position,
                                    lat_e6, lon_e6);
     if (idx < 0) return -1;   // table full: the row is dropped, exactly as before
+    // S516/EST-476: an INSERT heard with Save Off is session-only and never touches the radio, even when
+    // "Add heard nodes to the radio" is All. The user's own Add to radio / Favourite later clears the flag.
+    if (is_new && !save_heard) {
+        s.c[idx].session_only = true;
+        return idx;
+    }
     // S516 (EST-472 item 6): `radio_cap` is the store in use (/int 300, NVS 32), never a fixed 300.
     if (is_new && heardToRadioAllows(setting, type) && radioCount(s) < radio_cap) s.c[idx].in_radio = true;
     return idx;
@@ -61,18 +67,28 @@ int advertInArchive(ContactStore& s, HeardToRadio setting, const uint8_t pub[32]
 size_t radioCount(const ContactStore& s) {
     size_t n = 0;
     for (size_t i = 0; i < s.count && i < s.cap; i++)
-        if (s.c[i].in_radio) n++;
+        if (s.c[i].in_radio && !s.c[i].session_only) n++;
+    return n;
+}
+
+size_t sessionOnlyCount(const ContactStore& s) {
+    size_t n = 0;
+    for (size_t i = 0; i < s.count && i < s.cap; i++)
+        if (s.c[i].session_only) n++;
     return n;
 }
 
 RadioResult addToRadio(ContactStore& s, const uint8_t pub[32], size_t radio_cap) {
     const int idx = contactsFind(s, pub);
     if (idx < 0) return RadioResult::NotFound;
-    if (s.c[idx].in_radio) return RadioResult::AlreadyIn;
+    if (s.c[idx].in_radio && !s.c[idx].session_only) return RadioResult::AlreadyIn;
     // Filip's rule 2: a full radio REFUSES. Nothing is marked, nothing is evicted, no field of any row moves.
     // S516 (EST-472 item 6): full means full for the store in use, not for /int's cap on a device without /int.
     if (radioCount(s) >= radio_cap) return RadioResult::RadioFull;
     s.c[idx].in_radio = true;
+    // S516/EST-476 rule 4: Add to radio is the user saying "save this one", so a session-only row loses the mark
+    // here. A REFUSED add returns above and leaves the row session-only, which is the honest outcome.
+    s.c[idx].session_only = false;
     return RadioResult::Ok;
 }
 
@@ -99,6 +115,10 @@ bool setFavourite(ContactStore& s, const uint8_t pub[32], bool on) {
     const int idx = contactsFind(s, pub);
     if (idx < 0) return false;
     s.c[idx].favourite = on;   // a favourite in the archive is a favourite; it does NOT move the node to the radio
+    // S516/EST-476 rule 4: the Favourite key is a user act on the row, so it also means "save this one". The row
+    // stays archive-only (favourite never implies in_radio) but it is no longer session-only; it is written by
+    // the normal node encoders from now on.
+    s.c[idx].session_only = false;
     return true;
 }
 

@@ -157,17 +157,25 @@ const char* contactDecodeText(ContactDecode r) {
 
 size_t contactsEncode(const ContactStore& s, uint8_t* out, size_t cap) {
     if (out == nullptr || s.count > kMaxContacts || s.c == nullptr) return 0;
-    const size_t need = kContactBlobHeaderBytes + s.count * kContactBlobRecordBytes;
+    // S516/EST-476: a session-only row is RAM state, never a file record. It is skipped here as well as in the
+    // radio/archive encoders, so no blob can ever bring one back after a restart.
+    size_t count = 0;
+    for (size_t i = 0; i < s.count && i < s.cap; i++)
+        if (!s.c[i].session_only) count++;
+    const size_t need = kContactBlobHeaderBytes + count * kContactBlobRecordBytes;
     if (cap < need) return 0;
 
     out[0] = kContactBlobVersion;
     out[1] = 0;                                   // reserved (was the u8 count in versions 1-3)
-    put16(out + 2, (uint16_t)s.count);
+    put16(out + 2, (uint16_t)count);
     put16(out + 4, (uint16_t)kContactBlobRecordBytes);
     size_t o = kContactBlobHeaderBytes;
-    for (size_t i = 0; i < s.count; i++) {
+    size_t written = 0;
+    for (size_t i = 0; i < s.count && i < s.cap && written < count; i++) {
+        if (s.c[i].session_only) continue;
         encodeRecord(s.c[i], out + o);
         o += kContactBlobRecordBytes;
+        written++;
     }
     return need;
 }
@@ -178,7 +186,8 @@ size_t contactsEncodeRadio(const ContactStore& s, uint8_t* out, size_t cap, size
     if (out == nullptr || s.c == nullptr) return 0;
     size_t count = 0;
     for (size_t i = 0; i < s.count && i < s.cap; i++) {
-        if (s.c[i].in_radio && count < max_rows) count++;
+        // S516/EST-476: session-only rows are never written, not even the NVS fallback.
+        if (s.c[i].in_radio && !s.c[i].session_only && count < max_rows) count++;
     }
     const size_t need = kContactBlobHeaderBytes + count * kContactBlobRecordBytes;
     if (cap < need) return 0;
@@ -190,7 +199,7 @@ size_t contactsEncodeRadio(const ContactStore& s, uint8_t* out, size_t cap, size
     size_t o = kContactBlobHeaderBytes;
     size_t written = 0;
     for (size_t i = 0; i < s.count && i < s.cap && written < count; i++) {
-        if (!s.c[i].in_radio) continue;
+        if (!s.c[i].in_radio || s.c[i].session_only) continue;
         encodeRecord(s.c[i], out + o);
         o += kContactBlobRecordBytes;
         written++;
