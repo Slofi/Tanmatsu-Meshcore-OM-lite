@@ -22,20 +22,18 @@ struct HintItem {
     const char* label;   // "move", "open", "back"
 };
 
-// Clock left; battery, wifi and gear sigils right. battery_pct < 0 hides the battery.
+// Clock left; the two notification icons next to it (S516/EST-482); battery, wifi and gear sigils right.
+// battery_pct < 0 hides the battery.
 void drawStatusBar(Screen& s, const char* clock, int battery_pct, bool charging);
 
 // Page-head band: title left, right-hand text right, and the line under it. Returns the y of the line.
 int drawPageHead(Screen& s, const char* title, const char* right_text);
 
-// The bottom bar: this page's actions on the left, the six page keys on the right with `active` in gold.
+// The bottom bar: this page's actions on the left; on the LAUNCHER only, the six page keys on the right with
+// `active` in gold. S516/EST-482: every other page carries its hints alone — the sigils without their words
+// were no use there, and the freed width means no page drops a chip.
 // S513/EST-435: it also draws the app's ONE notice, just above itself, when one is live — see noticeSet().
-//
-// S516/EST-480: `compact_page_keys` drops the six page LABELS and keeps the sigils, so one page can afford
-// more action chips without touching the cluster's spacing or any other page's bar. Only the Nodes list sets
-// it: with the labels the cluster starts at x=350 and two of its hints could never be drawn.
-void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_count,
-                 bool compact_page_keys = false);
+void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_count);
 
 // One key cap, the hint bar's own style (S514/EST-444): dark plate, 1 px outline, dim ink. The bar's chips and
 // the Chat composer's Enter cap both call this, so "the same key-cap style" is one function, not two lookalikes.
@@ -113,25 +111,24 @@ void volumePopupPress(uint32_t now_ms, uint8_t level, bool master_on);
 // True once when the 1.5 s ran out, so the caller repaints the page under the plate.
 bool volumePopupTick(uint32_t now_ms);
 
-// --------------------------------------------------------------------------- the hint bar's red dots (S515/EST-461)
-// Filip's ask: a notification dot on the CHAT sigil while a channel or a DM has unread, and on the NODES sigil
-// while a contact is still NEW. One bit per sigil, so a page cannot draw a dot on somebody else's key:
-//   bit 0 X/Launcher · bit 1 triangle/Nodes · bit 2 square/Chat · bit 3 circle/Map · bit 4 cloud/RPTR
-//   (bit 5 diamond/Settings has no dot). S516/EST-478 moved the pages onto these keys; the BITS did not move.
+// ------------------------------------------------------------ the status bar's notification icons (S516/EST-482)
+// Filip's ask moved the red hint-bar dots into the TOP bar: a chat icon while a channel or a DM has unread,
+// and a node (pin) icon while a fresh node is still unacked. NO red dots are drawn anywhere.
 //
-// The CALLER supplies the data (main.cpp reads the store's own counters), exactly like the notice: every page
-// calls drawHintBar(), so every page shows the dots without a line of its own. The dot is the chat list's badge
-// red (theme.h kBad) and sits OUTSIDE the sigil's gold ring, at its top-right corner.
-constexpr uint8_t kHintDotNodes = 1u << 1;
-constexpr uint8_t kHintDotChat  = 1u << 2;
+// The CALLER supplies the data (main.cpp reads the store's own counters), exactly like the notice; drawStatusBar()
+// draws the icons, and every page (including the Launcher) already calls it. The icons use FIXED slots just
+// after the clock (x = 66 and 88, the widest clock ends at 50), so one appearing or going never moves the
+// clock, the radio dot, the battery or the gear.
+constexpr uint8_t kStatusIconChat = 1u << 0;
+constexpr uint8_t kStatusIconNode = 1u << 1;
 
 // Main task only: set it once per loop pass (the mask is published by the task that draws).
-void    hintDotsSet(uint8_t mask);
-uint8_t hintDots();
+void    statusIconsSet(uint8_t mask);
+uint8_t statusIcons();
 
 // True once after the mask CHANGED — the noticeNeedsRepaint() pattern, so a message arriving while the Map is
-// on screen makes the Chat dot appear with no key press behind it.
-bool hintDotsNeedsRepaint();
+// on screen makes the Chat icon appear with no key press behind it.
+bool statusIconsNeedsRepaint();
 
 // The rounded card style of S513/EST-430: the Chat list's cards and now the start menu's three app cards.
 // `drawRoundedRect` is a per-row span fill with an integer corner (no float, no allocation); `drawCardPlate`

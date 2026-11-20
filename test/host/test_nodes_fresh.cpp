@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Host tests for S515/EST-461: the hint bar's dots, the NEW contact (order + ack + the frozen list) and the power
+// Host tests for S515/EST-461 / S516/EST-482: the top status bar's icons, the NEW contact (order + ack + the frozen list) and the power
 // button's screen state machine. Every rule here is one the device runs: core/nodes_fresh.h, core/screen_power.h
 // and core/mc_store.h's counters are the same headers main.cpp includes.
 #include <stdio.h>
@@ -50,26 +50,27 @@ void addNew(om::mc::ContactStore& s, uint8_t seed, uint32_t heard_at) {
     om::mc::contactsUpsert(s, pub, name, 1, 1, 100 + seed, heard_at, -70, 52, false, 0, 0);
 }
 
-// ---------------------------------------------------------------- item 1: the dots, from the store's own counters
-void dotsFromCounts() {
-    // No unread, no fresh: no dot at all.
-    CHECK_EQ(om::ui::hintDotMask(0, 0, 0), 0);
+// ------------------------------------------- item 1: the status-bar icons, from the store's own counters
+void statusIconsFromCounts() {
+    // No unread, no fresh: neither icon.
+    CHECK_EQ(om::ui::statusIconMask(0, 0, 0), 0);
 
-    // A channel message alone lights the CHAT sigil, and only it.
-    CHECK_EQ(om::ui::hintDotMask(1, 0, 0), om::ui::kHintDotBitChat);
+    // A channel message alone lights the CHAT icon, and only it.
+    CHECK_EQ(om::ui::statusIconMask(1, 0, 0), om::ui::kStatusIconBitChat);
     // A DM alone does too (Filip: "any channel or DM has unread").
-    CHECK_EQ(om::ui::hintDotMask(0, 3, 0), om::ui::kHintDotBitChat);
-    // A new contact alone lights the NODES sigil.
-    CHECK_EQ(om::ui::hintDotMask(0, 0, 2), om::ui::kHintDotBitNodes);
-    // Both: both dots.
-    CHECK_EQ(om::ui::hintDotMask(4, 1, 1), om::ui::kHintDotBitChat | om::ui::kHintDotBitNodes);
+    CHECK_EQ(om::ui::statusIconMask(0, 3, 0), om::ui::kStatusIconBitChat);
+    // A new contact alone lights the NODE icon.
+    CHECK_EQ(om::ui::statusIconMask(0, 0, 2), om::ui::kStatusIconBitNode);
+    // Both: both icons.
+    CHECK_EQ(om::ui::statusIconMask(4, 1, 1), om::ui::kStatusIconBitChat | om::ui::kStatusIconBitNode);
 
-    // The bits are the SIGIL indices of chrome.h: Nodes is kind 1, Chat is kind 2.
-    CHECK_EQ(om::ui::kHintDotBitNodes, 1u << 1);
-    CHECK_EQ(om::ui::kHintDotBitChat, 1u << 2);
+    // S516/EST-482: the bits are chrome.h's own slots, and there is no third bit to leak into the bar.
+    CHECK_EQ(om::ui::kStatusIconBitChat, 1u << 0);
+    CHECK_EQ(om::ui::kStatusIconBitNode, 1u << 1);
+    CHECK_EQ(om::ui::statusIconMask(1, 1, 1) & 0xFCu, 0u);
 
     // …and the real counting code agrees with the list's badges: one unread channel message + one unread DM
-    // from a contact in the table = the chat dot; a fresh row that is then acked = no nodes dot.
+    // from a contact in the table = the chat icon; a fresh row that is then acked = no node icon.
     om::mc::ContactStore s;
     om::mc::MessageRing  msgs;
     om::mc::ReadState    rs;
@@ -93,15 +94,15 @@ void dotsFromCounts() {
     om::mc::unreadTotals(msgs, rs, 1, dms, s, &ch, &dm_unread);
     CHECK_EQ(ch, 1);
     CHECK_EQ(dm_unread, 1);
-    CHECK_EQ(om::ui::hintDotMask(ch, dm_unread, om::mc::contactsFreshCount(s)),
-             om::ui::kHintDotBitChat | om::ui::kHintDotBitNodes);
+    CHECK_EQ(om::ui::statusIconMask(ch, dm_unread, om::mc::contactsFreshCount(s)),
+             om::ui::kStatusIconBitChat | om::ui::kStatusIconBitNode);
 
-    // Reading both leaves no chat dot, but the new contact still shows.
+    // Reading both leaves no chat icon, but the new contact still shows.
     om::mc::markChannelRead(msgs, rs, 0);
     om::mc::dmMarkPeerRead(dms, s, peer);
     om::mc::unreadTotals(msgs, rs, 1, dms, s, &ch, &dm_unread);
     CHECK_EQ(ch + dm_unread, 0);
-    CHECK_EQ(om::ui::hintDotMask(ch, dm_unread, om::mc::contactsFreshCount(s)), om::ui::kHintDotBitNodes);
+    CHECK_EQ(om::ui::statusIconMask(ch, dm_unread, om::mc::contactsFreshCount(s)), om::ui::kStatusIconBitNode);
 
     // A DM from a node that is NOT in the table cannot have a thread row, so it adds nothing (the store rule).
     om::mc::ContactStore other;
@@ -347,7 +348,7 @@ void frozenOrderAfterDelete() {
 }  // namespace
 
 int main() {
-    dotsFromCounts();
+    statusIconsFromCounts();
     orderFavouritesThenFreshThenRest();
     ackRules();
     frozenOrder();

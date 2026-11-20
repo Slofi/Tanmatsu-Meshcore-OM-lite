@@ -37,10 +37,12 @@ struct MapView {
 void drawMap(Screen& s, const MapView& v);
 
 // The map area on the panel, below the chrome. Shared with the key handler so panning and drawing agree.
+// S516/EST-482: the Map page has NO page-head band any more (it only said "Map" and "z16"); the canvas now
+// starts at the status bar's bottom edge and is 44 px taller. Both numbers keep the hint bar clear.
 constexpr int kMapAreaX = 0;
-constexpr int kMapAreaY = 26 + 44;          // under the status bar and the page head
+constexpr int kMapAreaY = 26;                    // = kTmStatusH: the status bar's bottom
 constexpr int kMapAreaW = 800;
-constexpr int kMapAreaH = 480 - 26 - 44 - 24;   // down to the hint bar
+constexpr int kMapAreaH = 480 - 26 - 24;        // = 430: down to the hint bar
 
 }  // namespace ui
 }  // namespace om

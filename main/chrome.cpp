@@ -287,29 +287,28 @@ bool msgPopupNeedsRepaint() {
 // om::ui::om::mc along with it; once any earlier header included mc_store.h globally (chat_mentions.h does),
 // the nested copy vanished and the file would not compile. It belongs at global scope with the other includes.
 
-// ---- S515/EST-461: the hint bar's dots -------------------------------------------------------------------------
-// The main task both writes and reads this (the radio task never decides a dot: it changes the store, and the
-// main task counts). So it is a plain byte, not a critical section — the same reasoning as the notice's copy,
-// with one fewer task involved.
+// ---- S516/EST-482: the top status bar's notification icons ------------------------------------------------
+// The main task both writes and reads this (the radio task never decides an icon: it changes the store, and the
+// main task counts). So it is a plain byte, not a critical section — the same reasoning as the notice's copy.
 namespace {
 
 // The rule's bits live in core/nodes_fresh.h (host-tested); these two names are the chrome's, and the
 // static_asserts make a silent divergence a compile error.
-static_assert(kHintDotNodes == om::ui::kHintDotBitNodes, "the Nodes dot bit moved");
-static_assert(kHintDotChat == om::ui::kHintDotBitChat, "the Chat dot bit moved");
+static_assert(kStatusIconChat == om::ui::kStatusIconBitChat, "the Chat icon bit moved");
+static_assert(kStatusIconNode == om::ui::kStatusIconBitNode, "the Node icon bit moved");
 
-uint8_t g_hint_dots = 0;
+uint8_t g_status_icons = 0;
 
 }  // namespace
 
-void    hintDotsSet(uint8_t mask) { g_hint_dots = (uint8_t)(mask & 0x1F); }
-uint8_t hintDots() { return g_hint_dots; }
+void    statusIconsSet(uint8_t mask) { g_status_icons = (uint8_t)(mask & 0x03); }
+uint8_t statusIcons() { return g_status_icons; }
 
-bool hintDotsNeedsRepaint() {
+bool statusIconsNeedsRepaint() {
     static uint8_t seen = 0;
-    if (g_hint_dots == seen) return false;
-    seen = g_hint_dots;
-    return true;   // one repaint per CHANGE, so a dot cannot cost a frame per loop pass
+    if (g_status_icons == seen) return false;
+    seen = g_status_icons;
+    return true;   // one repaint per CHANGE, so an icon cannot cost a frame per loop pass
 }
 
 // ---- the volume pop-up (S516/EST-478): the display slot above -----------------------------------------
@@ -324,6 +323,44 @@ bool volumePopupTick(uint32_t now_ms) {
     return was && !g_volume.visible;
 }
 
+
+// ---- S516/EST-482: the status bar's two notification icons ------------------------------
+namespace {
+
+// Fixed slots after the clock: the clock starts at kTmPad and the widest one ("23:14") is 32 px on the real
+// hint face, so it ends at 50. The first slot's centre is 66 (9 px of air after the widest clock) and the
+// second is 22 px further right. Neither position depends on what is shown, so an icon appearing or going
+// moves nothing else in the bar.
+constexpr int kStatusIconCx0 = kTmPad + 48;
+constexpr int kStatusIconPitch = 22;
+
+// A speech bubble: a rounded 15x11 body with a tail at the lower left, and two bar-coloured dots so it reads
+// as "a message" and not as a blob at 26 px bar height.
+void drawChatStatusIcon(Screen& s, int cx, int cy, uint16_t c) {
+    drawRoundedRect(s, cx - 7, cy - 6, 15, 11, 3, c);
+    s.fillRect(cx - 5, cy + 5, 4, 1, c);
+    s.fillRect(cx - 5, cy + 6, 3, 1, c);
+    s.fillRect(cx - 5, cy + 7, 2, 1, c);
+    s.fillRect(cx - 3, cy - 2, 2, 2, (uint16_t)kBar);
+    s.fillRect(cx + 2, cy - 2, 2, 2, (uint16_t)kBar);
+}
+
+// A location/node pin: the head is a disc with a hole, the point is a tapering triangle under it — the same
+// shape a map pin has, at 14 px tall so it sits inside the bar.
+void drawNodeStatusIcon(Screen& s, int cx, int cy, uint16_t c) {
+    s.disc(cx, cy - 3, 5, c);
+    for (int i = 0; i <= 7; ++i) {
+        const int half = (7 - i) * 4 / 7;
+        if (half <= 0) {
+            s.px(cx, cy + i, c);
+        } else {
+            s.fillRect(cx - half, cy + i, 2 * half + 1, 1, c);
+        }
+    }
+    s.disc(cx, cy - 3, 2, (uint16_t)kBar);
+}
+
+}  // namespace
 
 // The six page keys, drawn as vectors (BRIEF § 5; the preview tool's recipes, ported).
 // Cloud is an OUTLINE like the others (Filip, S499 "fix the cloud symbol").
@@ -441,6 +478,13 @@ void drawStatusBar(Screen& s, const char* clock, int battery_pct, bool charging)
     s.hline(0, W, kTmStatusH, kLine);
     drawText(s, Face::Hint, kTmPad, textBaseline(s, Face::Hint, 0, kTmStatusH), clock, kDim);
 
+    // S516/EST-482: the notification icons, in FIXED slots next to the clock. Their positions never depend on
+    // the mask, so an icon coming or going moves nothing else in the bar (clock, radio, battery, gear).
+    const int icon_cy = kTmStatusH / 2;
+    if ((g_status_icons & kStatusIconChat) != 0) drawChatStatusIcon(s, kStatusIconCx0, icon_cy, kAcc);
+    if ((g_status_icons & kStatusIconNode) != 0)
+        drawNodeStatusIcon(s, kStatusIconCx0 + kStatusIconPitch, icon_cy, kAcc);
+
     int right = W - kTmPad;
     drawText(s, Face::Hint, right - 14, textBaseline(s, Face::Hint, 0, kTmStatusH), "o", kDim);  // gear
     right -= 26;
@@ -501,8 +545,7 @@ void drawEnterKeyCap(Screen& s, int x, int y, int w, int h, uint16_t ink) {
     drawText(s, Face::Hint, gx + gw + 4, textBaseline(s, Face::Hint, y, h), "Enter", ink);
 }
 
-void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_count,
-                 bool compact_page_keys) {
+void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_count) {
     const int W = kTmW, H = kTmH;
 
     // S515/EST-467: the new-message pop-up comes first and WINS over the one notice while it is up. Both are
@@ -538,23 +581,25 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
     const int cy = hy + kTmHintH / 2;
     const int bl = textBaseline(s, Face::Hint, hy, kTmHintH);
 
-    // S516/EST-478: SIX page keys, X first, in Page order (Launcher, Nodes, Chat, Map, Rptr, Settings).
+    // S516/EST-482: the six page keys belong to the LAUNCHER only. On every other page they were shapes
+    // without words (Filip: "they are no use without the text next to them anyhow"), so those bars carry their
+    // own hints alone; that gives every page the full width and none of them drops a chip any more.
     static const char* page_names[6] = {"LAUNCHER", "NODES", "CHAT", "MAP", "RPTR", "SETTINGS"};
     const Font*        hf            = fontFor(Face::Hint);
+    const bool         launcher      = (active == tm::Page::Launcher);
 
-    // Where the right-hand page-key cluster begins. The LEFT hints are drawn only while they fit before it,
-    // so a page's own actions can never push a chip under the sigils. Six keys need tighter gaps than the
-    // old five (18 after the name, 14 after the sigil) or the cluster would eat half the bar.
-    // S516/EST-480: with the labels dropped (compact) the same 18/14 gaps are kept, so only the words go and
-    // the sigils keep their even spacing.
-    int sx = W - kTmPad;
-    for (int i = 5; i >= 0; i--) {
-        const int tw = (!compact_page_keys && hf && hf->ready()) ? hf->textWidth(page_names[i]) : 0;
-        sx -= tw;
-        sx -= 18;
-        sx -= 14;
+    // Where the right-hand page-key cluster begins. With the cluster gone the hints may use the whole bar.
+    int right_start = W - kTmPad;
+    if (launcher) {
+        int sx = W - kTmPad;
+        for (int i = 5; i >= 0; i--) {
+            const int tw = (hf && hf->ready()) ? hf->textWidth(page_names[i]) : 0;
+            sx -= tw;
+            sx -= 18;
+            sx -= 14;
+        }
+        right_start = sx;
     }
-    const int right_start = sx;
 
     int hx = kTmPad;
     for (int i = 0; i < hint_count && hints && i < 6; i++) {
@@ -566,8 +611,8 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
                                                   : 30)
                                           : 30;
         const int lw = (hf && hf->ready()) ? hf->textWidth(hints[i].label) : 30;
-        // Tighter than the old 6/14/16 spacing: a page can carry four or five action chips, and the six
-        // page keys must all stay readable on the right.
+        // Tighter than the old 6/14/16 spacing: on the Launcher a page can carry four or five action chips,
+        // and the six page keys must all stay readable on the right.
         const int item_w = kw + 4 + 8 + lw + 10;
         if (hx + item_w > right_start - 8) break;   // no room: stop rather than overlap the page keys
         drawKeyCap(s, hx, cy - 9, kw, 18, hints[i].key, kDim);
@@ -576,23 +621,17 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
         hx += 8 + lw + 10;
     }
 
-    sx = W - kTmPad;
-    const uint8_t dots = g_hint_dots;
-    for (int i = 5; i >= 0; i--) {
-        const bool on = (static_cast<int>(active) == i);
-        const int  tw = (!compact_page_keys && hf && hf->ready()) ? hf->textWidth(page_names[i]) : 0;
-        sx -= tw;
-        // S516/EST-480: compact keeps the sigils (and the dot) and drops only the words.
-        if (!compact_page_keys)
+    if (launcher) {
+        int sx = W - kTmPad;
+        for (int i = 5; i >= 0; i--) {
+            const bool on = (static_cast<int>(active) == i);
+            const int  tw = (hf && hf->ready()) ? hf->textWidth(page_names[i]) : 0;
+            sx -= tw;
             drawText(s, Face::Hint, sx, bl, page_names[i], on ? (uint16_t)kAccInk : kDimmer);
-        sx -= 18;
-        drawSymbolSigil(s, i, sx, cy, 7, on ? (uint16_t)kAcc : (uint16_t)kDim, on);
-        // S515/EST-461: the notification dot, at the sigil's TOP-RIGHT and clear of its gold ring (the ring's
-        // nearest point is ~4.9 px from the centre on that diagonal, the dot's edge ~6 px). kBad is the chat
-        // list's unread-badge red, so the two reds on the glass cannot drift apart. S516/EST-478: the bits
-        // still mean Nodes (1, now the triangle) and Chat (2, now the square) — the NEW keys.
-        if ((dots & (1u << i)) != 0) s.disc(sx + 9, cy - 8, 3, kBad);
-        sx -= 14;
+            sx -= 18;
+            drawSymbolSigil(s, i, sx, cy, 7, on ? (uint16_t)kAcc : (uint16_t)kDim, on);
+            sx -= 14;
+        }
     }
 }
 

@@ -555,13 +555,14 @@ const char* gsetWifiAtBoot(tm::Core&) {
     return tm::wifiboot::modeLabel(m);
 }
 
-// Shown only while Off: the sentence starts with "Off:" and explains what Off means. Measured on the real
-// Meta face (sans_meta12.bin): 594 px from x=119, so it ends 46 px before the right-aligned "Off".
+// Shown only while Off: the sentence starts with "Off:" and uses the stock launcher's own wording (Filip).
+// Measured on the real Meta face (sans_meta12.bin): 619 px from x=119; the right-aligned "Off" starts at
+// x=759, so the hint ends 21 px clear of it (640 px available).
 const char* gsetWifiAtBootHint(tm::Core&) {
     tm::wifiboot::Mode m = tm::wifiboot::kDefaultMode;
     wifiBootReadStored(&m);
     return m == tm::wifiboot::Mode::Off
-               ? "Off: the stock launcher does not connect at start; its store and updates still connect when opened"
+               ? "Off: the stock launcher does not connect at start; Repository and Update firmware / radio override this"
                : "";
 }
 
@@ -3189,7 +3190,7 @@ extern "C" void app_main(void) {
     // EST-445/EST-448: the one way into Settings, reached by the DIAMOND from any page (S516/EST-478; the
     // old comma is gone). The tab and SECTION come from the registry
     // (core/settings.h::settingsTargetForPage): an OM Lite page lands on the OM Lite tab at that page's
-    // section (Nodes->NODES, Chat->CHAT, Map->MAP, RPTR->RPTR), the menu and the Settings bar land on
+    // section (Nodes->NODES, Chat->CHAT, Map->MAP, RPTR->RPTR) and the menu land on
     // General. `from` is remembered because Esc at the root returns THERE, not always to the Launcher.
     auto openSettings = [&](tm::Page from) {
         settings_return_page = from;
@@ -4795,9 +4796,9 @@ extern "C" void app_main(void) {
                             ESP_LOGI(TAG, "leave: asking first");
                         } else if (k == tm::Key::Left || k == tm::Key::Right || k == tm::Key::Up ||
                                    k == tm::Key::Down) {
-                            // Left/Right move between the three cards (clamped, no wrap); Down lands on the
-                            // full-width Settings bar under them, Up from it returns to the first card. All of
-                            // that is core/menu_cards, host-tested.
+                            // S516/EST-482: Left/Right move between the three cards (clamped, no wrap);
+                            // Up/Down stay on the card row now that the Settings bar is gone. Settings is the
+                            // diamond symbol key. All of that is core/menu_cards, host-tested.
                             const tm::MenuMove move = (k == tm::Key::Left)     ? tm::MenuMove::Left
                                                       : (k == tm::Key::Right) ? tm::MenuMove::Right
                                                       : (k == tm::Key::Up)    ? tm::MenuMove::Up
@@ -4805,12 +4806,11 @@ extern "C" void app_main(void) {
                             menu_focus = tm::menuFocusMove(menu_focus, move, view.card_count);
                             dirty      = true;
                         } else if (k == tm::Key::Enter) {
-                            if (menu_focus == tm::kMenuSettingsFocus) {
-                                // EST-445: Enter on the full-width Settings bar opens Settings on General.
-                                openSettings(tm::Page::Launcher);
-                            } else {
+                            // S516/EST-482: the Settings bar is gone; the menu has only the three cards, so
+                            // Enter always acts on the focused card. Settings stays on the diamond symbol key.
+                            if (menu_focus >= 0 && menu_focus < view.card_count) {
                                 const tm::MenuAction act =
-                                    tm::menuEnterActionAt(menu_focus, cards[menu_focus].available, view.card_count);
+                                    tm::menuEnterAction(cards[menu_focus].available);
                                 if (act == tm::MenuAction::Open) {
                                     if (!cards[menu_focus].running) {
                                         // Enter OPENS: a stopped app is started first, then the router goes to its
@@ -5033,9 +5033,9 @@ extern "C" void app_main(void) {
             }
         }
 
-        // ---- S515/EST-461: the hint bar's dots, then the Nodes page's frozen order and the NEW-contact ack.
-        // The counts come from the SAME functions the chat list's badges use (unreadTotals sums
-        // unreadForChannel + dmUnreadForPeer), so a dot and its badge cannot disagree.
+        // ---- S516/EST-482: the top status bar's notification icons, then the Nodes page's frozen order and the
+        // NEW-contact ack. The counts come from the SAME functions the chat list's badges use (unreadTotals
+        // sums unreadForChannel + dmUnreadForPeer), so an icon and its badge cannot disagree.
         {
             uint8_t  mask      = 0;
             uint32_t unread_all = 0;
@@ -5045,18 +5045,18 @@ extern "C" void app_main(void) {
                 om::mc::unreadTotals(om::mc::messages(), om::mc::readState(), om::mc::channelCount(),
                                      om::mc::dmThreads(), om::mc::contacts(), &unread_ch, &unread_dm);
                 unread_all = unread_ch + unread_dm;
-                mask = om::ui::hintDotMask(unread_ch, unread_dm, om::mc::contactsFreshCount(om::mc::contacts()));
+                mask = om::ui::statusIconMask(unread_ch, unread_dm, om::mc::contactsFreshCount(om::mc::contacts()));
             }
-            om::ui::hintDotsSet(mask);
-            // S515/EST-468 / S516/EST-477: the LED rule reads the SAME unread total as the Chat dot, plus the
+            om::ui::statusIconsSet(mask);
+            // S515/EST-468 / S516/EST-477: the LED rule reads the SAME unread total as the Chat icon, plus the
             // battery facts the power LED emulates and whether our C6 link is up. The task polls these every
             // 25 ms, so the main loop never does an LED write itself. S516/EST-479: the Settings page flag ends a
             // running colour preview the moment the user leaves Settings, by any key or route.
             om::led::publish(g_screen_power.off, core.router().current() == tm::Page::Settings, unread_all,
                              g_batt.battery_available, g_batt.battery_charging, om::radio::started());
             // A message arriving while the Map (or any page) is on screen raises this with no key press behind
-            // it, so the dot appears at the next 250 ms pass.
-            if (om::ui::hintDotsNeedsRepaint()) dirty = true;
+            // it, so the icon appears at the next 250 ms pass.
+            if (om::ui::statusIconsNeedsRepaint()) dirty = true;
         }
         {
             const tm::Page pnow   = core.router().current();

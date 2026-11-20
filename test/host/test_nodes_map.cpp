@@ -241,31 +241,31 @@ void test_map_saved_view_conversion() {
   v.z     = 16;
 
   int64_t wx = -1, wy = -1;
-  CHECK(om::map::startViewFromSaved(v, 16, 800, 386, &wx, &wy));
+  CHECK(om::map::startViewFromSaved(v, 16, 800, 430, &wx, &wy));
   CHECK_EQ(wx, 1000);
   CHECK_EQ(wy, 2000);
 
-  CHECK(om::map::startViewFromSaved(v, 17, 800, 386, &wx, &wy));
+  CHECK(om::map::startViewFromSaved(v, 17, 800, 430, &wx, &wy));
   CHECK_EQ(wx, 2400);   // centre 1400 -> 2800, minus half a screen
-  CHECK_EQ(wy, 4193);   // centre 2193 -> 4386, minus 193 (area_h/2)
+  CHECK_EQ(wy, 4215);   // centre 2000+215 -> 4430, minus 215 (S516/EST-482: area_h = 430)
 
-  CHECK(om::map::startViewFromSaved(v, 15, 800, 386, &wx, &wy));
+  CHECK(om::map::startViewFromSaved(v, 15, 800, 430, &wx, &wy));
   CHECK_EQ(wx, 300);
-  CHECK_EQ(wy, 903);   // centre 2193 >> 1 = 1096, minus 193
+  CHECK_EQ(wy, 892);   // centre 2215 >> 1 = 1107, minus 215
 
   // Anything invalid answers false, so the caller can fall back to Ljubljana instead of drawing somewhere
   // arbitrary.
   om::map::SavedView bad = v;
   bad.valid             = false;
-  CHECK(!om::map::startViewFromSaved(bad, 16, 800, 386, &wx, &wy));
+  CHECK(!om::map::startViewFromSaved(bad, 16, 800, 430, &wx, &wy));
   bad         = v;
   bad.z       = 8;
-  CHECK(!om::map::startViewFromSaved(bad, 16, 800, 386, &wx, &wy));
+  CHECK(!om::map::startViewFromSaved(bad, 16, 800, 430, &wx, &wy));
   bad.z       = 18;
-  CHECK(!om::map::startViewFromSaved(bad, 16, 800, 386, &wx, &wy));
+  CHECK(!om::map::startViewFromSaved(bad, 16, 800, 430, &wx, &wy));
   CHECK(!om::map::startViewFromSaved(v, 16, 0, 386, &wx, &wy));
-  CHECK(!om::map::startViewFromSaved(v, 16, 800, 386, nullptr, &wy));
-  CHECK(!om::map::startViewFromSaved(v, 16, 800, 386, &wx, nullptr));
+  CHECK(!om::map::startViewFromSaved(v, 16, 800, 430, nullptr, &wy));
+  CHECK(!om::map::startViewFromSaved(v, 16, 800, 430, &wx, nullptr));
 }
 
 }  // namespace

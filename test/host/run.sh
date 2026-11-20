@@ -444,7 +444,7 @@ ASAN_OPTIONS=detect_leaks=1 "$NODEOPSASAN"
     -o "$EMOJI"
 "$EMOJI"
 
-# NEW CONTACTS + DOTS + SCREEN OFF (S515/EST-461): the hint bar's dot mask from the SAME counters the chat
+# NEW CONTACTS + STATUS ICONS + SCREEN OFF (S515/EST-461, S516/EST-482): the top-bar icon mask from the SAME counters the chat
 # list's badges use, the favourites -> fresh -> rest order, the ack rules (a key landing, a 1.5 s rest, page
 # entry alone), the FROZEN order while Nodes is open (appended on arrival, re-sorted on entry, still filtered
 # by the search) and the power button's screen state machine (press toggles, release ignored, a key while off
@@ -512,7 +512,9 @@ ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$NODESTOREASAN"
 # flag, out of range, 0,0), the label greedy (two colliding plates -> the favourite only), the node menu's Map row
 # with and without a position (dim + "no position"), the centre-on-node view and its zoom clamp — and the whole
 # marker+label pass is TIMED on 300 and on 2,000 rows, because the ticket's budget is 2 ms for 300.
-"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+# S516/EST-482: -I ../../main so the test reads the REAL kMapAreaY/H from main/map_page.h and pins the canvas
+# against the status bar and hint bar (tm_theme.h), instead of copying those numbers.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core -I ../../main \
     test_map_nodes.cpp \
     ../../core/map_nodes.cpp ../../core/map_pack.cpp ../../core/map_view.cpp ../../core/mc_store.cpp \
     -lm \

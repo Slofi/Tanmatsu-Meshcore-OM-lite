@@ -399,11 +399,30 @@ def battery(d, x, y, colour, fill_colour, level=0.97, w=22, h=11):
         d.rectangle([x + 2, y + 2, x + 2 + iw, y + h - 2], fill=fill_colour)
 
 
-def status_bar(d, clock='--:--', batt=0.97, gps=False, radio=True):
+def chat_status_icon(d, cx, cy, colour):
+    """S516/EST-482: the status bar's chat icon — a speech bubble with two 'message' holes."""
+    d.rounded_rectangle([cx - 7, cy - 6, cx + 7, cy + 4], radius=3, fill=colour)
+    d.polygon([(cx - 5, cy + 3), (cx - 5, cy + 8), (cx - 1, cy + 4)], fill=colour)
+    d.rectangle([cx - 4, cy - 2, cx - 3, cy - 1], fill=P['Bar'])
+    d.rectangle([cx + 1, cy - 2, cx + 2, cy - 1], fill=P['Bar'])
+
+
+def node_status_icon(d, cx, cy, colour):
+    """S516/EST-482: the status bar's node icon — a location pin (head with a hole, tapering point)."""
+    d.ellipse([cx - 5, cy - 8, cx + 5, cy + 2], fill=colour)
+    d.polygon([(cx - 4, cy - 2), (cx + 4, cy - 2), (cx, cy + 8)], fill=colour)
+    d.ellipse([cx - 2, cy - 5, cx + 2, cy - 1], fill=P['Bar'])
+
+
+def status_bar(d, clock='--:--', batt=0.97, gps=False, radio=True, notify=()):
     """The L2's top bar, at 800 px: clock left; right: radio, (GPS only when present), battery, gear.
 
     No satellite appears on the Tanmatsu itself: it has no GPS. The slot is drawn only when an external
     module is present, which is the L2's own rule for icons that are "on only when they are on".
+
+    S516/EST-482: two notification icons in FIXED slots next to the clock (centres 66 and 88), in the accent
+    colour: a chat bubble while a channel/DM is unread, a pin while a fresh node is unacked. Nothing else in
+    the bar moves when one appears or goes.
     """
     h = TM['status_h']
     d.rectangle([0, 0, TM['W'], h], fill=P['Bar'])
@@ -411,6 +430,11 @@ def status_bar(d, clock='--:--', batt=0.97, gps=False, radio=True):
     fm = font(FONT_MONO, TM['f_status'])
     cy = h // 2
     text(d, (TM['pad'], cy), clock, fm, P['Dim'], anchor='lm')
+
+    if 'chat' in notify:
+        chat_status_icon(d, TM['pad'] + 48, cy, P['Acc'])
+    if 'node' in notify:
+        node_status_icon(d, TM['pad'] + 70, cy, P['Acc'])
 
     x = TM['W'] - TM['pad']
     gear(d, x - 7, cy, 7, P['Dim'])
@@ -429,19 +453,16 @@ def status_bar(d, clock='--:--', batt=0.97, gps=False, radio=True):
         x -= tw(fm, '868') + 22
 
 
-def hint_bar(d, page, actions, dots=(), compact=False):
+def hint_bar(d, page, actions):
     """The key-hint bar (BRIEF § 5): what the keys do HERE, same style as the L2's tab bar.
 
-    Left: this page's actions. Right: the six page keys, the page switch; the current page's key is
-    gold, the rest dim. Drawn as chips so it reads as keys, not as prose.
+    Left: this page's actions. Right: the six page keys on the LAUNCHER ONLY (S516/EST-482); every other
+    page carries its hints alone, with the full bar to use. Drawn as chips so it reads as keys, not prose.
 
     S515/EST-467 + S516/EST-478: this mirrors main/chrome.cpp::drawHintBar's arithmetic EXACTLY — one hint
     face (sans 11) for key caps, labels and page names, a cap of max(30, key width + 10), the 4/8/10
     spacing, and the six-key 18/14 right-cluster gaps. A cap that would run under the page keys (or off the
     left margin) is not drawn, so a preview can never claim more room than the glass has.
-
-    S516/EST-480: the WIDTHS now come from the device's own sans_hint11.bin (htw), not DejaVu; `compact`
-    drops only the six page LABELS and keeps the sigils and the 18/14 gaps, exactly like the device's flag.
     """
     top = TM['H'] - TM['hint_h']
     d.rectangle([0, top, TM['W'], TM['H']], fill=P['Bar'])
@@ -449,22 +470,21 @@ def hint_bar(d, page, actions, dots=(), compact=False):
     f = font(FONT_SANS, TM['f_hint'])
     cy = top + TM['hint_h'] // 2
 
-    # right cluster: the six page keys, from the right edge inward (the device's own loop)
-    pages = ['home', 'nodes', 'chat', 'map', 'rptr', 'settings']
-    labels = ['LAUNCHER', 'NODES', 'CHAT', 'MAP', 'RPTR', 'SETTINGS']
-    sx = TM['W'] - TM['pad']
-    for kind, lab, pname in reversed(list(zip(SIGILS, labels, pages))):
-        on = (pname == page)
-        col = P['Acc'] if on else P['Dimmer']
-        sx -= 0 if compact else htw(lab)
-        if not compact:
+    right_start = TM['W'] - TM['pad']
+    if page == 'home':
+        # right cluster: the six page keys, from the right edge inward (the device's own loop)
+        pages = ['home', 'nodes', 'chat', 'map', 'rptr', 'settings']
+        labels = ['LAUNCHER', 'NODES', 'CHAT', 'MAP', 'RPTR', 'SETTINGS']
+        sx = TM['W'] - TM['pad']
+        for kind, lab, pname in reversed(list(zip(SIGILS, labels, pages))):
+            on = (pname == page)
+            col = P['Acc'] if on else P['Dimmer']
+            sx -= htw(lab)
             text(d, (sx, cy), lab, f, col, anchor='lm')
-        sx -= 18
-        sigil(d, kind, sx, cy, 7, col, width=2)
-        if pname in dots:
-            d.ellipse([sx + 9 - 3, cy - 8 - 3, sx + 9 + 3, cy - 8 + 3], fill=P['Bad'])
-        sx -= 14
-    right_start = sx
+            sx -= 18
+            sigil(d, kind, sx, cy, 7, col, width=2)
+            sx -= 14
+        right_start = sx
 
     # left cluster: the same fit rule and spacing as the device
     hx = TM['pad']
@@ -557,7 +577,7 @@ MODULES = [
 ]
 
 
-def launcher(dots=(), name='2026-11-13-launcher-home.png', volume=None):
+def launcher(name='2026-11-13-launcher-home.png', volume=None, notify=()):
     """The Launcher home: this app's own menu (BRIEF § 3), CD clarity in the L2's clothes.
 
     Left: the module list, one row per module, each with a state chip (CD's status dot made explicit).
@@ -567,7 +587,7 @@ def launcher(dots=(), name='2026-11-13-launcher-home.png', volume=None):
     img, d = new_screen()
     W, H, pad = TM['W'], TM['H'], TM['pad']
 
-    status_bar(d)
+    status_bar(d, notify=notify)
 
     # page header: title left, the shared core's readiness right, one line under
     y = TM['status_h']
@@ -670,7 +690,7 @@ def launcher(dots=(), name='2026-11-13-launcher-home.png', volume=None):
         text(d, (x, yy), line, fnote2, P['Dimmer'])
         yy += 16
 
-    hint_bar(d, 'home', [('l/r', 'select'), ('Enter', 'open'), ('esc', 'quit')], dots)
+    hint_bar(d, 'home', [('l/r', 'select'), ('Enter', 'open'), ('esc', 'quit')])
     # S516/EST-478: the volume plate over the page, exactly where drawHintBar() puts it.
     if volume is not None:
         volume_popup_plate(d, volume)
@@ -1794,17 +1814,20 @@ MENU_OWNS = {
 }
 
 
-def menu():
+def menu(notify=(), name='2026-11-18-menu-cards.png'):
     """The start menu: three large app cards side by side, the focused one ringed in gold.
 
     Same rounded-card style as the Chat list (S513/EST-430): kPanel + 1 px kLine when resting, kSelBg + 2 px
     kAcc when focused, radius 6. Each card: the name large, one dim description, the state chip, then for the
     running card its memory and uptime (the numbers the old detail pane carried). The focused card's own line
     sits under the row; the hint bar shows the new keys.
+
+    S516/EST-482: the full-width Settings bar is gone (main/launcher_page.cpp), so the card group is centred
+    in the work box between the page head and the hint bar; the page keys are on this page only.
     """
     img, d = new_screen()
     W, H, pad = TM['W'], TM['H'], TM['pad']
-    status_bar(d)
+    status_bar(d, notify=notify)
 
     y = TM['status_h']
     text(d, (pad, y + TM['head_h'] // 2), 'Tanmatsu', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
@@ -1812,10 +1835,15 @@ def menu():
          P['Dim'], anchor='rm')
     hline(d, 0, W, y + TM['head_h'], P['Line'])
 
-    top = y + TM['head_h'] + TM['menu_top']
     gap = TM['menu_gap']
-    cw = (W - 2 * pad - 2 * gap) // 3
     ch = TM['menu_card_h']
+    body_top = y + TM['head_h']
+    body_bot = H - TM['hint_h']
+    group_h = ch + 28 + 24
+    top = body_top + max(TM['menu_top'], (body_bot - body_top - group_h) // 2)
+    if top + group_h > body_bot:
+        top = body_bot - group_h
+    cw = (W - 2 * pad - 2 * gap) // 3
     for i, card in enumerate(MENU_CARDS):
         x = pad + i * (cw + gap)
         focused = (i == 0)
@@ -1854,7 +1882,7 @@ def menu():
          font(FONT_MONO, TM['f_meta']), P['Dim'])
 
     hint_bar(d, 'home', [('←→', 'select'), ('Enter', 'open'), ('esc', 'quit')])
-    return save(img, '2026-11-18-menu-cards.png')
+    return save(img, name)
 
 
 # ------------------------------------------------------------------------------------- settings general
@@ -1952,8 +1980,8 @@ def settings_general(save_name='2026-11-19-settings-general.png', focus_label='N
             break
         setrow(d, lx0, lx1, yy, label, value, focused=(label == focus_label),
                chevron=(label == 'Name' or label in sound_rows),
-               hint=('Off: the stock launcher does not connect at start; its store and updates still '
-                     'connect when opened') if label == 'Wi-Fi at boot' else None)
+               hint=('Off: the stock launcher does not connect at start; Repository and Update firmware / '
+                     'radio override this') if label == 'Wi-Fi at boot' else None)
         yy += row_h + 2
 
     scroll_indicator(d, (lx0, body_top, W - 8, body_bot), total_h, body_bot - body_top, 0)
@@ -2717,7 +2745,7 @@ def rptr_status():
     return save(img, '2026-11-19-rptr-status.png')
 
 
-# ------------------------------------------------- S515/EST-461: the NEW contacts, and the hint bar's dots
+# ------------------------------------------- S515/EST-461: the NEW contacts (the list dot stayed in EST-482)
 # Invented, like every fixture here. Two favourites on top, then the still-NEW rows (their red dot), then the
 # rest by last heard — core/mc_store.h::contactsOrder's order, drawn at the device's own row geometry.
 NODES_FRESH = [
@@ -2802,23 +2830,40 @@ def nodes_fresh():
     text(d, (x, yy + 22), 'f: favourite. The dot goes once the box lands here.',
          font(FONT_SANS, TM['f_body']), P['Dimmer'])
 
-    hint_bar(d, 'nodes', [('Enter', 'menu'), ('f', 'favourite'), ('/', 'search'), ('esc', 'back')],
-             dots=('chat', 'nodes'))
+    hint_bar(d, 'nodes', [('Enter', 'menu'), ('f', 'favourite'), ('/', 'search'), ('esc', 'back')])
     return save(img, '2026-11-19-nodes-fresh.png')
 
 
 def hint_dots():
-    """The hint bar with BOTH notification dots: Chat (a channel or a DM is unread) and Nodes (a contact is
-    still new). Drawn on the Launcher on purpose — the dots belong to the chrome, not to a page."""
-    return launcher(dots=('chat', 'nodes'), name='2026-11-19-hint-dots.png')
+    """S516/EST-482: the two notification icons moved to the TOP status bar (the red hint-bar dots are gone).
+    Drawn on the Launcher on purpose — the icons belong to the chrome, not to a page."""
+    return menu(notify=('chat', 'node'), name='2026-11-19-hint-dots.png')
 
 
 # ------------------------------------------------- S516/EST-478: the six page keys + the volume pop-up
 def hintbar_keys():
     """The SIX page keys, X first (S516/EST-478): X/F1 Launcher, triangle Nodes, square Chat, circle Map,
-    cloud RPTR, diamond Settings. The two red dots sit on NODES (triangle) and CHAT (square), their NEW
-    keys. Drawn on the Launcher, where the dots do not belong to the page."""
-    return launcher(dots=('chat', 'nodes'), name='2026-11-20-hintbar-keys.png')
+    cloud RPTR, diamond Settings. S516/EST-482: they are drawn on the Launcher ONLY, and the two notification
+    icons live in the top bar."""
+    return menu(notify=('chat', 'node'), name='2026-11-20-hintbar-keys.png')
+
+
+# ---------------------------------------------------------- S516/EST-482: the top-bar icons and the other shots
+def topbar_notify(name='2026-11-20-topbar-notify.png'):
+    """The status bar with BOTH notification icons: the chat bubble (a channel/DM is unread) and the node pin
+    (a fresh node is unacked), in fixed slots after the clock. Nothing red, nothing shifting."""
+    return menu(notify=('chat', 'node'), name=name)
+
+
+def launcher_nosettings(name='2026-11-20-launcher-nosettings.png'):
+    """The Launcher without the full-width Settings tile: the three cards + their own line, re-centred in the
+    work box, Settings on the diamond symbol key, the page keys on this page only."""
+    return menu(name=name)
+
+
+def settings_wifi_hint():
+    """The General tab with 'Wi-Fi at boot' focused and the ticket's own sentence as its dim hint."""
+    return settings_general(save_name='2026-11-20-settings-wifi-hint.png', focus_label='Wi-Fi at boot')
 
 
 def volume_popup():
@@ -2951,7 +2996,7 @@ def nodes_head_unsaved():
          font(FONT_SANS, TM['f_body']), P['Dimmer'])
 
     hint_bar(d, 'nodes', [('<>', 'view'), ('Enter', 'menu'), ('/', 'search'), ('esc', 'back'),
-                          ('f', 'fav'), ('a', 'adv')], dots=('chat', 'nodes'), compact=True)
+                          ('f', 'fav'), ('a', 'adv')])
     return save(img, '2026-11-20-nodes-head-unsaved.png')
 
 
@@ -2990,7 +3035,7 @@ def nodes_views(name='2026-11-19-nodes-views.png'):
          font(FONT_SANS, TM['f_body']), P['Dimmer'])
 
     hint_bar(d, 'nodes', [('<>', 'view'), ('Enter', 'menu'), ('/', 'search'), ('esc', 'back'),
-                          ('f', 'fav'), ('a', 'adv')], dots=('chat', 'nodes'), compact=True)
+                          ('f', 'fav'), ('a', 'adv')])
     return save(img, name)
 
 
@@ -3040,7 +3085,7 @@ def nodes_sd_wording():
          font(FONT_SANS, TM['f_body']), P['Dimmer'])
 
     hint_bar(d, 'nodes', [('<>', 'view'), ('Enter', 'menu'), ('/', 'search'), ('esc', 'back'),
-                          ('f', 'fav'), ('a', 'adv')], dots=('chat', 'nodes'), compact=True)
+                          ('f', 'fav'), ('a', 'adv')])
     return save(img, '2026-11-19-nodes-sd-wording.png')
 
 
@@ -3077,7 +3122,7 @@ def popup_msg():
         yy += 28
 
     hint_bar(d, 'nodes', [('<>', 'view'), ('Enter', 'menu'), ('/', 'search'), ('esc', 'back'),
-                          ('f', 'fav'), ('a', 'adv')], dots=('chat', 'nodes'), compact=True)
+                          ('f', 'fav'), ('a', 'adv')])
 
     # ---- the pop-up panel, centred, drawn over the page exactly like drawMessagePopup() -----------------
     pw = 560
@@ -3191,16 +3236,16 @@ MAP_NODE_INK = '#1a1a18'   # main/map_page.cpp kMapVoid: the plate and the marke
 
 
 def _map_base(z):
-    """The Map page's chrome and an invented tile area: the panel is 800x386 under the head (main/map_page.h)."""
-    img, d = new_screen()
-    W, pad = TM['W'], TM['pad']
-    status_bar(d)
-    y = TM['status_h']
-    text(d, (pad, y + TM['head_h'] // 2), 'Map', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
-    text(d, (W - pad, y + TM['head_h'] // 2), 'z%d' % z, font(FONT_MONO, TM['f_meta']), P['Dim'], anchor='rm')
-    hline(d, 0, W, y + TM['head_h'], P['Line'])
+    """The Map page's chrome and an invented tile area — S516/EST-482: NO page head, 800x430 under the status bar.
 
-    mx0, my0 = 0, y + TM['head_h']
+    The zoom level is a small house plate in the TOP-RIGHT corner, drawn last by _map_z_plate(), exactly like
+    main/map_page.cpp.
+    """
+    img, d = new_screen()
+    W = TM['W']
+    status_bar(d)
+
+    mx0, my0 = 0, TM['status_h']
     mx1, my1 = W, TM['H'] - TM['hint_h']
     d.rectangle([mx0, my0, mx1 - 1, my1 - 1], fill='#2b3126')          # land
     d.rectangle([mx0, my0, mx1 - 1, my1 - 1], outline=P['Line'], width=1)
@@ -3250,6 +3295,18 @@ def _map_markers(d, area, nodes, labels=False, highlight=None):
             text(d, (box[0] + 4, box[1] + 2), nodes_name, fhint, P['Ink'])
 
 
+def _map_z_plate(d, area, z):
+    """S516/EST-482: the zoom level on a small house plate in the map's TOP-RIGHT corner, drawn last."""
+    mx0, my0, mx1, my1 = area
+    del mx0, my1
+    txt_ = 'z%d' % z
+    fz = font(FONT_MONO, TM['f_hint'])
+    pw, ph = tw(fz, txt_) + 16, 20
+    x0, y0 = mx1 - 8 - pw, my0 + 8
+    plate(d, [x0, y0, x0 + pw, y0 + ph], P['Panel2'], P['Line'], r=4, w=1)
+    text(d, (x0 + pw / 2, y0 + ph / 2), txt_, fz, P['Ink'], anchor='mm')
+
+
 def map_nodes_z12():
     """S515/EST-466, item 6: z12 — MARKERS, no labels (the names start at z13). Six positioned nodes: clients,
     a repeater, a room, and one favourite with its gold ring. Nothing here waits for a tile: this is the layer
@@ -3258,6 +3315,7 @@ def map_nodes_z12():
     _map_markers(d, area, MAP_NODES_Z12)
     text(d, (area[0] + 12, area[3] - 26), 'Esri, HERE, Garmin, OSM', font(FONT_MONO, TM['f_label']),
          P['Dim'])
+    _map_z_plate(d, area, 12)
     hint_bar(d, 'map', [('dpad', 'pan'), ('+/-', 'zoom'), ('esc', 'back')])
     return save(img, '2026-11-19-map-nodes.png')
 
@@ -3270,8 +3328,21 @@ def map_nodes_z14():
     _map_markers(d, area, MAP_NODES_Z14, labels=True, highlight='TEST-A1')
     text(d, (area[0] + 12, area[3] - 26), 'Esri, HERE, Garmin, OSM', font(FONT_MONO, TM['f_label']),
          P['Dim'])
+    _map_z_plate(d, area, 14)
     hint_bar(d, 'map', [('dpad', 'pan'), ('+/-', 'zoom'), ('esc', 'back')])
     return save(img, '2026-11-19-map-nodes-z14.png')
+
+
+def map_nohead(name='2026-11-20-map-nohead.png'):
+    """S516/EST-482: the Map page with NO page head — the canvas starts at the status bar's bottom (y=26) and is
+    430 px tall, with the zoom level on a small plate in the top-right corner and the three map keys alone."""
+    img, d, area = _map_base(16)
+    _map_markers(d, area, MAP_NODES_Z14, labels=True, highlight='TEST-A1')
+    text(d, (area[0] + 12, area[3] - 26), 'Esri, HERE, Garmin, OSM', font(FONT_MONO, TM['f_label']),
+         P['Dim'])
+    _map_z_plate(d, area, 16)
+    hint_bar(d, 'map', [('dpad', 'pan'), ('+/-', 'zoom'), ('esc', 'back')])
+    return save(img, name)
 
 
 MAP_NODES_Z12 = [
@@ -3651,6 +3722,8 @@ RENDERERS = dict(chat_select=chat_select, chat_msg_menu=chat_msg_menu, chat_msg_
                  settings_sound=settings_sound, settings_led=settings_led,
                  settings_sound_picker=settings_sound_picker, popup_msg=popup_msg,
                  hintbar_keys=hintbar_keys, volume_popup=volume_popup,
+                 topbar_notify=topbar_notify, launcher_nosettings=launcher_nosettings,
+                 map_nohead=map_nohead, settings_wifi_hint=settings_wifi_hint,
                  chat_mentions=chat_mentions, mention_picker=mention_picker)
 
 

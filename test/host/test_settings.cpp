@@ -617,28 +617,22 @@ void test_confirm_sheet() {
 }
 
 // ------------------------------------------------------------------------------------------ 5. menu bar
-void test_menu_settings_bar() {
-  printf("test  Down from the cards lands on the Settings bar; Up returns\n");
+void test_menu_cards_only() {
+  printf("test  Up/Down stay on the card row; the Settings bar is gone\n");
   CHECK_EQ(tm::kMenuCards, 3);
-  CHECK_EQ(tm::kMenuSettingsFocus, 3);
+  CHECK_EQ(tm::kMenuFocusCount, tm::kMenuCards);
 
-  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Down), 3);   // OM Lite -> Settings bar
-  CHECK_EQ(tm::menuFocusMove(1, tm::MenuMove::Down), 3);
-  CHECK_EQ(tm::menuFocusMove(2, tm::MenuMove::Down), 3);
-  CHECK_EQ(tm::menuFocusMove(3, tm::MenuMove::Down), 3);   // clamped on the bar
-  CHECK_EQ(tm::menuFocusMove(3, tm::MenuMove::Up), 0);     // back to the first card
-  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Up), 0);     // clamped on the card row
+  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Down), 0);   // S516/EST-482: no row below the cards
+  CHECK_EQ(tm::menuFocusMove(1, tm::MenuMove::Down), 1);
+  CHECK_EQ(tm::menuFocusMove(2, tm::MenuMove::Down), 2);
+  CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Up), 0);
   CHECK_EQ(tm::menuFocusMove(1, tm::MenuMove::Up), 1);
-  CHECK_EQ(tm::menuFocusMove(3, tm::MenuMove::Left), 3);   // the bar has no horizontal neighbour
-  CHECK_EQ(tm::menuFocusMove(3, tm::MenuMove::Right), 3);
+  CHECK_EQ(tm::menuFocusMove(2, tm::MenuMove::Up), 2);
   CHECK_EQ(tm::menuFocusMove(2, tm::MenuMove::Right), 2);  // cards still clamp at the last
   CHECK_EQ(tm::menuFocusMove(0, tm::MenuMove::Left), 0);
 
-  CHECK(tm::menuEnterActionAt(3, false, 3) == tm::MenuAction::OpenSettings);
-  CHECK(tm::menuEnterActionAt(0, true, 3) == tm::MenuAction::Open);
-  CHECK(tm::menuEnterActionAt(1, false, 3) == tm::MenuAction::ComingLater);
-  CHECK(tm::menuEnterActionAt(-1, true, 3) == tm::MenuAction::None);
-  CHECK(tm::menuEnterActionAt(9, true, 3) == tm::MenuAction::None);
+  CHECK(tm::menuEnterAction(true) == tm::MenuAction::Open);
+  CHECK(tm::menuEnterAction(false) == tm::MenuAction::ComingLater);
 }
 
 }  // namespace
@@ -803,7 +797,7 @@ int main() {
   test_tab_move();
   test_frame_keys();
   test_confirm_sheet();
-  test_menu_settings_bar();
+  test_menu_cards_only();
   test_sub_page_keys();
   test_sub_page_list_scroll();
 

@@ -711,6 +711,6 @@ constexpr bool advertScheduleDue(uint32_t interval_s, uint32_t elapsed_s, bool e
 }
 
 // The image's version, shown in General > DEVICE. One constant: the next ticket bumps this line.
-constexpr const char* kAppVersion = "77";   // S516 (EST-481): @[Name] mentions + the name picker
+constexpr const char* kAppVersion = "78";   // S516 (EST-482): top-bar icons, page keys only on the Launcher, no map head, no Settings tile
 
 }  // namespace tm

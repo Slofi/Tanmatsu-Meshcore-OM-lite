@@ -205,10 +205,8 @@ void drawMap(Screen& s, const MapView& v) {
     s.clear((uint16_t)kBg);
     drawStatusBar(s, v.clock, v.battery_pct, v.charging);
 
-    char head_right[32];
-    snprintf(head_right, sizeof(head_right), "z%d", v.z);
-    const int head_bot = drawPageHead(s, "Map", head_right);
-    (void)head_bot;
+    // S516/EST-482: the page-head band is GONE (Filip: it only said "Map" and "z16" and took 44 px). The
+    // canvas starts at the status bar's bottom; kMapAreaY/kMapAreaH in map_page.h are the one place that says so.
 
     // The map area, filled with the void colour first: a tile that is not decoded yet (or that the pack does not
     // have) leaves a visible hole rather than yesterday's pixels or the previous page.
@@ -280,10 +278,27 @@ void drawMap(Screen& s, const MapView& v) {
         s.frame(cx - 3, cy - 3, 6, 6, 1, kAcc);
     }
 
+    // S516/EST-482: the zoom level, on a small house plate in the map's TOP-RIGHT corner. It is drawn AFTER
+    // the tiles and the node layer, so a name plate that happens to land there cannot hide it; the only other
+    // overlays are the centre crosshair (middle) and the attribution (bottom right), so there is no collision.
+    {
+        char       ztext[8];
+        snprintf(ztext, sizeof(ztext), "z%d", v.z);
+        const Font* zf    = fontFor(Face::Hint);
+        const int   ztw   = (zf != nullptr && zf->ready()) ? zf->textWidth(ztext) : 18;
+        const int   zpw   = ztw + 16;
+        const int   zph   = 20;
+        const int   zx    = kMapAreaX + kMapAreaW - 8 - zpw;
+        const int   zy    = kMapAreaY + 8;
+        drawRoundedRect(s, zx, zy, zpw, zph, 4, kPanel2);
+        s.frame(zx, zy, zpw, zph, 1, kLine);
+        drawTextCentred(s, Face::Hint, zx + zpw / 2, textBaseline(s, Face::Hint, zy, zph), ztext, kInk);
+    }
+
     // Attribution, bottom right of the map area: the source's terms require it to be visible.
     drawTextRight(s, Face::Hint, kMapAreaX + kMapAreaW - 6, kMapAreaY + kMapAreaH - 6, attribution(), kWhite);
 
-    // S516/EST-478: Settings is the diamond in the page-key cluster; no `, settings` chip here.
+    // S516/EST-482: the page keys live on the Launcher only, so this bar is the three map keys alone.
     static const HintItem hints[] = {{"dpad", "pan"}, {"+/-", "zoom"}, {"esc", "back"}};
     drawHintBar(s, tm::Page::Map, hints, 3);
 }

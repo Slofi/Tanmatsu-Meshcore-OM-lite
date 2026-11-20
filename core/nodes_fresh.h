@@ -102,17 +102,18 @@ inline bool nodesFrozenAfterRemove(NodesFrozen& f, int removed) {
     return changed;
 }
 
-// ---------------------------------------------------------------- the hint bar's dot mask (S515/EST-461 item 1)
-// Bits are the sigil indices of main/chrome.h (static_asserted there, so the two cannot drift).
-constexpr uint8_t kHintDotBitNodes = 1u << 1;
-constexpr uint8_t kHintDotBitChat  = 1u << 2;
+// ------------------------------------------------------ the status bar's notification icons (S516/EST-482)
+// The bits moved out of the hint bar and into the top status bar (main/chrome.h, static_asserted there):
+// CHAT while a channel or a DM has unread, NODE while a contact is still new. The same two numbers the Chat
+// list's badges and the Nodes dot use; main.cpp only supplies the counts.
+constexpr uint8_t kStatusIconBitChat = 1u << 0;
+constexpr uint8_t kStatusIconBitNode = 1u << 1;
 
-// The mask, from the SAME numbers the Chat list's badges are drawn from: chat while a channel OR a DM has
-// unread, nodes while a contact is still new. main.cpp only supplies the counts.
-inline uint8_t hintDotMask(uint32_t channel_unread, uint32_t dm_unread, size_t fresh_count) {
+// The mask. No other bit exists: an icon is either shown by its own rule or it is not shown at all.
+inline uint8_t statusIconMask(uint32_t channel_unread, uint32_t dm_unread, size_t fresh_count) {
     uint8_t m = 0;
-    if (channel_unread + dm_unread > 0) m |= kHintDotBitChat;
-    if (fresh_count > 0) m |= kHintDotBitNodes;
+    if (channel_unread + dm_unread > 0) m |= kStatusIconBitChat;
+    if (fresh_count > 0) m |= kStatusIconBitNode;
     return m;
 }
 

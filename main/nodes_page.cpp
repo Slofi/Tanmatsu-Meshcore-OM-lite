@@ -306,15 +306,9 @@ void drawNodes(Screen& s, const NodesView& v) {
     // S513/EST-432: the advert key works on this page too, so it is a hint and not only the empty-list line.
     // S514/EST-449: `/` opens the search, and while the BAR has the focus it gets its own (shorter) hints.
     // S514/EST-455: with the menu up, the same three keys describe the sheet (Esc closes it).
-    // S515 (Claude, review): "lt/rt" -> "<>" and "favourite" -> "fav": six chips overflowed the bar's left edge by
-    // ~50 px in the preview (the font has no arrow glyphs, Latin-1 + Ext-A only).
-    // S515/EST-465: "<> view" first — the filter key must be visible. Left/Right are free on this page (Up/Down
-    // move the list and every other arrow/letter already has a job), so no new letter steals a typed character
-    // from the search or an existing shortcut.
-    // S516/EST-480: the two shortcut hints are BACK. Measured on the real hint face (sans_hint11.bin), the
-    // six page labels leave the cluster at x=350 and the list could only draw three chips; so, in the ticket's
-    // fallback order: "a advert" -> "a adv" and the page labels are dropped on THIS page (`compact` below),
-    // which starts the cluster at x=590. The six chips end at x=501: no overlap, nothing cut.
+    // S516/EST-480: the two shortcut hints are BACK ("a advert" -> "a adv").
+    // S516/EST-482: the six PAGE KEYS no longer appear on this page, so the compact path is gone; the six
+    // chips end at x=501 (measured on sans_hint11.bin), leaving 281 px to the right edge. Nothing is dropped.
     static const HintItem hints_list[] = {{"<>", "view"}, {"Enter", "menu"}, {"/", "search"},
                                           {"esc", "back"}, {"f", "fav"}, {"a", "adv"}};
     static const HintItem hints_search[] = {{"type", "search"}, {"dn", "list"}, {"esc", "clear/back"}};
@@ -324,7 +318,7 @@ void drawNodes(Screen& s, const NodesView& v) {
     else if (v.search_focused)
         drawHintBar(s, tm::Page::Nodes, hints_search, 3);
     else
-        drawHintBar(s, tm::Page::Nodes, hints_list, 6, /*compact_page_keys=*/true);
+        drawHintBar(s, tm::Page::Nodes, hints_list, 6);
 }
 
 void drawNodeMenu(Screen& s, const mc::Contact& c, int focus, uint32_t now, bool ping_pending,

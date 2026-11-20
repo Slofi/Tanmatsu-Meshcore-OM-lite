@@ -15,6 +15,126 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## S516 (EST-482) top-bar notifications, page keys only on the Launcher, map head removed
+
+> Written by **DeepSeek** for ticket **EST-482**: fenced Paperclip run, no session start or end, nothing
+> installed, flashed, pushed or committed (`.git` read only; Claude reviews and commits). Starting point
+> **v77 `4b672cc`**, tree clean, **not installed** (v76 runs on the device). **RESULT: version 78; nothing
+> installed, flashed, pushed or committed.**
+
+### What it does
+
+**1. Page keys only on the Launcher.** `main/chrome.cpp::drawHintBar` draws the six sigils (+ labels) only when
+`active == Page::Launcher`; every other page's bar is its hints alone and may use the full 18…782 px. The
+`compact_page_keys` parameter (EST-480) is gone from the header, the implementation and the Nodes caller. **No
+page gets a dropped hint back, because no hint array had been shortened:** the only compression ever applied was
+the page-key *labels*/sigils themselves; the Nodes list already carried all six hints and had used `compact` so
+they could fit beside the cluster. Measured on `sans_hint11.bin`, every page's full array now ends well inside
+the bar:
+
+| bar | ends at x | spare to 782 |
+|---|---|---|
+| Nodes list (6 chips) | 501 | 281 |
+| Chat list (4) | 375 | 407 |
+| Settings (4) | 386 | 396 |
+| Rptr list (4) | 363 | 419 |
+| Map (3) | 260 | 522 |
+
+(The menu/search/sel/mention variants are shorter still; none drops a chip.)
+
+**2. Notification icons in the TOP status bar; no red dots.** The v57/EST-461 hint-bar dots are removed
+(`s.disc(..., kBad)` is gone from `drawHintBar`). `main/chrome.cpp::drawStatusBar` now draws a **speech bubble**
+while any channel or DM has unread and a **node/location pin** while any fresh node is unacked, from the same
+`statusIconMask()` rule and the same store counters the dots used (now in `core/nodes_fresh.h`). **Placement:
+FIXED slots after the clock** — centres x=66 and x=88, 22 px apart, because the widest clock ("23:14" on the real
+hint face) is 32 px from x=18 and ends at 50. An icon appearing or going therefore moves nothing: the clock, the
+radio dot, the wifi sigil, the battery and the gear keep their exact positions. Both icons are drawn in the
+status bar's **accent** colour (`kAcc`, not red), 15×11 and 13×14 px inside the 26 px bar. The refresh path is
+unchanged: `main.cpp` computes the mask once per loop pass and `statusIconsNeedsRepaint()` raises `dirty`, so a
+message arriving on any page shows the icon with no key press. Every page, including the Launcher, already calls
+`drawStatusBar()`. **The Nodes list's per-row new-node dot STAYS:** it is drawn by its own `s.disc(...)` in
+`main/nodes_page.cpp:217`, not through the removed chrome dot code — only the primitive `Screen::disc` is shared.
+The Chat list's red unread badge is also unchanged: it carries a COUNT on each card, not this notification.
+
+**3. The Map page head is removed.** `main/map_page.cpp` no longer calls `drawPageHead("Map", "zN")`. The canvas
+now starts at the status bar's bottom and is 44 px taller: `main/map_page.h` has
+`kMapAreaY = 26` (= `kTmStatusH`) and `kMapAreaH = 480 - 26 - 24 = 430`. The zoom level is a small house plate
+(fill `kPanel2`, 1 px `kLine`, radius 4, 20 px tall) in the map's **TOP-RIGHT corner**, drawn after the tiles,
+node markers and labels so a name plate cannot hide it; the crosshair is centred and the attribution is
+bottom-right, so nothing else collides. **Tiles: 800×430 is 3.13×1.68 tiles, so a view needs 4–5 columns × 2–3
+rows = 8…15 tiles.** The 430 px height can never need a fourth row (2×256 = 512 > 430); compared with the old
+386, the third row starts at `shift_y` 83 instead of 127. The cache keeps `kCacheSlots = 20`, i.e. **5 slots of
+headroom over a full 5×3 view**, exactly as before. Every user was checked: the tile fill/stand-ins clip against
+`kMapAreaY/H`, `viewTilesFor`/`panBy`/`zoomTo`/`clampWorldPixel`/`centreOnNode` take the same constants from
+`main.cpp`, the marker label greedy and cull use the new height, and no other y offset assumed the head (the only
+absolute offsets are relative to `kMapAreaY`: +4 and +28 in the page). The map's own hint bar is unchanged (three
+keys, now without the sigils).
+
+**4. Wi-Fi hint wording.** General › WI-FI › "Wi-Fi at boot" (Off) now says the stock launcher's own sentence:
+*"Off: the stock launcher does not connect at start; Repository and Update firmware / radio override this"*.
+Measured on the real Meta face (`sans_meta12.bin`) it is **619 px** from x=119; the right-aligned "Off" starts at
+759, so there are **640 px available** and **21 px clear**. Preview checked at the same geometry
+(`shots/2026-11-20-settings-wifi-hint.png`); the DejaVu stand-in is 616 px and also clears the value.
+
+**5. The Launcher's Settings tile is removed.** The full-width Settings bar under the cards is gone (its 56 px
+height and the `kTmMenuSettingsH` constant), Settings remains the **diamond symbol key**, and
+`kMenuSettingsFocus` / `MenuAction::OpenSettings` / `menuEnterActionAt()` / its `main.cpp` Enter branch are
+deleted. `menuFocusMove` now clamps on the three cards: Left/Right stop at the ends, Up/Down stay put. The cards
+plus their one dim "owns" line are **re-centred** in the 386 px work box (70…456): group height
+232+28+24 = 284, so the card top moves from 92 to **121**, leaving 51 px above and below. The host tests cover the
+new moves.
+
+### Numbers
+
+`sh test/host/run.sh` **exit 0**. `make build` **exit 0**, `application.bin` **1,758,240 B (0x1AD420)**, **+112 B**
+over v77's recorded hex `0x1AD3B0` (the old PROGRESS line wrote that as 1,758,160 B, 32 B above its own hex — a
+pre-existing transcription slip, noted rather than copied). Only the pre-existing warning remains
+(`main.cpp:2232 unused variable 'order'`). **Two arms, each reverted:**
+* old map-head constants restored in `main/map_page.h` (`kMapAreaY = 70`, `kMapAreaH = 386`) →
+  `FAIL test/host/test_map_nodes.cpp:92  om::ui::kMapAreaY == om::ui::kTmStatusH (got 70, want 26)`
+  (`map nodes: 173 checks, 1 FAILURES`, exit 1);
+* the two status-icon bits swapped behind `statusIconMask()` →
+  `FAIL test/host/test_nodes_fresh.cpp:68  om::ui::kStatusIconBitChat == 1u << 0 (got 2, want 1)`
+  `FAIL test/host/test_nodes_fresh.cpp:69  om::ui::kStatusIconBitNode == 1u << 1 (got 4, want 2)`
+  `FAIL test/host/test_nodes_fresh.cpp:70  om::ui::statusIconMask(1, 1, 1) & 0xFCu == 0u (got 4, want 0)`
+  (`test_nodes_fresh: 112 checks, 3 failures`, exit 1).
+Restored: `test_map_nodes` 180 checks, `test_nodes_fresh` 112, the menu 22, Settings 297, suite exit 0.
+
+The new host test `testMapAreaMeetsChrome()` (in `test_map_nodes.cpp`) takes the real `kMapArea*` from
+`main/map_page.h` and the chrome from `main/tm_theme.h` (run.sh now passes `-I ../../main`) and checks
+`kMapAreaY == kTmStatusH`, `kMapAreaH == 430`, and `kMapAreaY + kMapAreaH == kTmH - kTmHintH` — the canvas top is
+the status bar's bottom and its bottom is the hint bar's top. `test_nodes_map.cpp`'s saved-view case moved to the
+new 430 px area (centre 2215; at z17 4215, at z15 892). The map-nodes cull/label/timing tests now run against the
+real 800×430 (2,000 rows still 254–279 µs).
+
+**Previews:** `shots/2026-11-20-topbar-notify.png` (the status bar with both icons on the Launcher),
+`-map-nohead.png` (the taller map, z16 plate top-right, no head, no page keys),
+`-launcher-nosettings.png` (three cards re-centred, no Settings tile, page keys on the Launcher only) and
+`-settings-wifi-hint.png` (the new sentence beside "Off"). The preview tool now draws the status-bar icons and
+the page keys only on `'home'`, and `_map_base()` has no head; all 51 renderers were re-run into `/tmp` to prove
+the tool still runs.
+
+### What was read
+`docs/PROGRESS.md` (the S516 entries at the top), `main/chrome.{h,cpp}`, `main/map_page.{h,cpp}`,
+`main/launcher_page.{h,cpp}`, `main/nodes_page.cpp`, `main/main.cpp` (the launcher key branch, the map start/pan/
+zoom/centre code, the notification mask, Settings › General), `main/settings_page.cpp`, `core/menu_cards.{h,cpp}`,
+`core/nodes_fresh.h`, `core/map_view.{h,cpp}`, `core/map_nodes.h`, `core/settings.h`, `test/host/run.sh` and the
+map/menu/nodes/Settings tests, `tools/preview_tanmatsu.py`, and the device font blobs `sans_meta12.bin` /
+`sans_hint11.bin` (widths by the same VLW parser the preview tool uses).
+
+### What was NOT checked (honest list)
+* **Nothing is on glass.** All four previews and every geometry above are host renders; v76 still runs on the
+  device.
+* The status-bar icon shapes are new vector drawings; their legibility at 1:1 on the panel was not measured,
+  only rendered at 800×480.
+* The map's saved last view is stored as a top-left world pixel, so a view saved with the OLD 386 px area and
+  restored with the new 430 px one is centred 22 px lower rather than re-migrated; the ticket did not ask for a
+  migration and the format is unchanged.
+* The Wi-Fi sentence is measured in the device face by the font parser, not read off the glass; the preview uses
+  DejaVu and is 3 px narrower.
+
+
+**Claude's review of EST-482 (S516, 2026-11-20 23:2x):** previews checked (top-bar bubble + pin in fixed slots after the clock, no red dots; the map from the status bar to the hint bar with the z plate top-right; the launcher without the Settings tile). Map: 20 cache slots for at most 15 visible tiles at 430 px; the canvas-edge test is armed. Known, accepted: a map view saved under v77 restores 22 px off-centre once. Accepted. Suite exit 0, build exit 0.
 ## S516 (EST-481) @[Name] mentions
 
 > Written by **DeepSeek** for ticket **EST-481**: fenced Paperclip run, no session start or end, nothing

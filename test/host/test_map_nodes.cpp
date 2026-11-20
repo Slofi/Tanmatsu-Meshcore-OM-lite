@@ -20,6 +20,8 @@
 #include "map_view.h"
 #include "mc_store.h"
 #include "node_menu.h"
+#include "map_page.h"     // S516/EST-482: kMapAreaY/H, the REAL map area
+#include "tm_theme.h"     // kTmStatusH/kTmHintH/kTmH, the chrome the area must meet
 
 namespace {
 
@@ -49,8 +51,10 @@ int g_failures = 0;
     }                                                                                \
   } while (0)
 
-constexpr int kW = 800;
-constexpr int kH = 386;   // main/map_page.h::kMapAreaH, the real map area
+// S516/EST-482: the REAL map area (no page head any more). Taking the numbers from main/map_page.h instead of
+// copying them means this whole suite moves with the canvas, and testMapAreaMeetsChrome pins the chrome edges.
+constexpr int kW = om::ui::kMapAreaW;
+constexpr int kH = om::ui::kMapAreaH;
 
 // A fake font: 6 px a character. Every collision case below is arithmetic on this, so the numbers are exact.
 int fakeMeasure(void* ctx, const char* utf8) {
@@ -78,6 +82,23 @@ void putContact(om::mc::ContactStore& s, size_t i, const char* name, uint8_t typ
   c.lat_e6       = lat;
   c.lon_e6       = lon;
   c.pub[0]       = (uint8_t)i;
+}
+
+// ------------------------------------------------------------------------------ the map area and the chrome
+// S516/EST-482: the Map page lost its 44 px page head. These four numbers are the whole interface between the
+// canvas and the chrome; if any of them drifts, a tile row hides under the status bar or the hint bar.
+void testMapAreaMeetsChrome() {
+  printf("test  the map canvas starts at the status bar and ends at the hint bar\n");
+  CHECK_EQ(om::ui::kMapAreaY, om::ui::kTmStatusH);                          // top = status bar's bottom
+  CHECK_EQ(om::ui::kMapAreaY, 26);
+  CHECK_EQ(om::ui::kMapAreaH, 430);                                          // 480 - 26 - 24
+  CHECK_EQ(om::ui::kMapAreaY + om::ui::kMapAreaH, om::ui::kTmH - om::ui::kTmHintH);  // bottom = hint bar's top
+  CHECK_EQ(om::ui::kMapAreaX, 0);
+  CHECK_EQ(om::ui::kMapAreaW, om::ui::kTmW);
+  // At most 5 columns x 3 rows: 2*256 = 512 px already covers the 430 px height, so no fourth row exists and
+  // the 20-slot tile cache still has 5 slots of headroom (see core/map_view.h::kCacheSlots).
+  CHECK(om::ui::kMapAreaH <= 2 * om::map::kTilePx);
+  CHECK(om::ui::kMapAreaH > om::map::kTilePx);
 }
 
 // ---------------------------------------------------------------------------------------------- the projection
@@ -430,6 +451,7 @@ void testCost() {
 
 int main() {
   // The store's own PSRAM hook stays at malloc on the host (mc_store.cpp's default).
+  testMapAreaMeetsChrome();
   testProjectionCorners();
   testProjectionCentreAndSigns();
   testCulling();
