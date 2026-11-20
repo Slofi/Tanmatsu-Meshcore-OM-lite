@@ -588,13 +588,20 @@ bool settingsReadStart() {
         unlock();
         return false;
     }
-    // A read in flight is dropped first: 'r' means "read it all again", and the old answer would land on a row
-    // this pass has already asked about.
-    s_cli.clear();
+    // S516/EST-475 (A6): the pending line is NOT dropped here any more. Clearing it (as this did) put the NEXT
+    // `get` on the air while the old line's answer was still coming: a late `get tx` answer ("14") then landed on
+    // `get name`, and a `set`'s answer besides. The v68 late window exists to attribute an answer to the line that
+    // asked; dropping that line from under it defeats the window, and 'r' is exactly what a user presses while
+    // the page says "waiting for the repeater...". So only the LADDER restarts: the slot stays `used` (which
+    // already holds the ladder) until the answer, the late window's end or a timeout clears it, and the full
+    // re-read then starts at step 0. Cost: after 'r' the first line can wait up to one deadline (8 s) or one
+    // late window (16 s) — the page already says it is waiting.
     s_readStep = 0;
     s_readStop = rptr::kSetReadCount;
+    const bool held = s_cli.used;   // read under the lock; the log line below says whether the re-read waits
     unlock();
-    ESP_LOGI("rptr", "settings: reading the repeater's %d value(s)", rptr::kSetReadCount);
+    ESP_LOGI("rptr", "settings: reading the repeater's %d value(s)%s", rptr::kSetReadCount,
+             held ? " (after the line in flight)" : "");
     return true;
 }
 

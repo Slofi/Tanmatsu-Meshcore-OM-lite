@@ -69,6 +69,28 @@ NodeFileResult nodeFileDecode(const uint8_t* in, size_t len, ContactStore& out);
 // become the real name (the ticket's rule: the temp file is CRC-checked before it is trusted).
 NodeFileResult nodeFileCheck(const uint8_t* in, size_t len);
 
+// S516/EST-475 (A2): is a refused temp file DAMAGED (safe to delete) or merely from a format THIS build does not
+// know? Only Truncated and BadCrc prove damage. A wrong magic/version/record width/count/size may be a perfectly
+// good file written by a newer (or older) app version; deleting it would destroy it for the version that can
+// read it, so `readNodeFileOrTemp()` keeps those and just falls back. (The next write still reuses the same temp
+// name — see PROGRESS; this rule only stops the boot from DESTROYING the file.)
+inline bool nodeFileTempIsTorn(NodeFileResult r) {
+    return r == NodeFileResult::Truncated || r == NodeFileResult::BadCrc;
+}
+
+// S516/EST-475 (B): when must the SD archive be rewritten? A STRUCTURAL change (a new row, a rename, a type or
+// route change, a delete, a favourite or an ack) is what a power cut must not lose and keeps the old 30 s floor.
+// A SOFT change (a repeat advert moving only last-heard/SNR/position) is already covered by the row on the card;
+// rewriting all 318,016 bytes for it every 30 s cost ~38 MB/h and a main-task freeze each time, so it waits the
+// same 10-minute floor the radio file gives the same fields. `last_write_ms == 0` means "nothing written yet".
+constexpr uint32_t kArchiveWriteMs     = 30u * 1000u;
+constexpr uint32_t kArchiveSoftWriteMs = 10u * 60u * 1000u;
+inline bool archiveWriteDue(uint32_t now_ms, uint32_t last_write_ms, bool structural, bool soft) {
+    if (!structural && !soft) return false;
+    const uint32_t floor_ms = structural ? kArchiveWriteMs : kArchiveSoftWriteMs;
+    return last_write_ms == 0 || (uint32_t)(now_ms - last_write_ms) >= floor_ms;
+}
+
 // Mark every row in_radio, up to `cap` (a radio file is by definition the radio list; a migrated v1-v3 NVS blob
 // had no flag at all). Returns how many were marked.
 size_t markAllInRadio(ContactStore& s, size_t cap = kMaxRadio);

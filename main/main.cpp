@@ -4054,6 +4054,13 @@ extern "C" void app_main(void) {
                                 node_menu_open  = false;
                                 node_menu_index = -1;
                                 refocusAfterDelete(pub, old_focus);
+                                // S516/EST-475 (A5): the dwell (`nodes_ack`) holds a SHOWN ROW, and the row that
+                                // now sits under the box is a different node. Without this the dwell timer the
+                                // box started on the deleted node could already be past 1.5 s and ack (clear the
+                                // red dot of) the node that slid up, on this very pass, without the box ever
+                                // resting on it. Restart the dwell on the new row: it acks only after a real rest.
+                                om::ui::nodesAckEnter(nodes_ack, nodes_focus,
+                                                      (uint32_t)(esp_timer_get_time() / 1000));
                             }
                         } else if (r.event == tm::SettingsEvent::ConfirmCancelled) {
                             ESP_LOGI(TAG, "nodes: remove cancelled; nothing changed");

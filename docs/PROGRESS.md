@@ -15,6 +15,233 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-20 · S516 (EST-475) sweep round 3: tonight's fixes against all their callers, and the archive write at full size
+
+> Written by **DeepSeek** for ticket **EST-475**: fenced Paperclip run, no session start or end, nothing installed,
+> flashed, pushed or committed (`.git` read only; Claude reviews and commits). Starting point **v68 `f59609e`**,
+> tree clean, INSTALLED on the device since 20:09. This entry is written FIRST and filled in as the work goes.
+> **Version 69** (`core/settings.h`) because the code changed. Round 3 covers (A) every fix of EST-472/473/474 and
+> Claude's review fixes at ALL their callers, and (B) the SD archive write at 2,000 rows.
+>
+> **RESULT:** version **69**. `sh test/host/run.sh` **exit 0**, suites summed **34,238** (this ticket's own sum;
+> the only suite whose count changed is `node_store` **205 → 228**, +23 in BOTH the `-O2` and the ASan stage = **+46**,
+> exactly the difference from the EST-474 entry's 34,192; the only sanitizer noise is still the vendored Ed25519's
+> pre-existing `left shift of negative value`). `make build` **exit 0**, `application.bin` **1,742,128 B
+> (0x1A9530)**, **+560 B** over v68's 1,741,568 B (total image 1,741,724 B); DIRAM **297,204 B used / 275,164 B
+> free (51.93 %)**, +8 B over v68 (one `bool` + padding). **Five defects found and fixed** (A1, A2, A3, A5, A6 — A1/A2/A3 are regressions from tonight's fixes),
+> **one fix by design in B** (the archive's structural/soft floor), two items reported and not fixed (A4, A7),
+> one checked clean (A8). Two new host tests, both armed; the four device-glue fixes say so. Nothing installed or
+> seen on glass; `.git` untouched, no commit; **no SSH** was needed (the device is on Filip's USB, not on a server —
+> its timing is not visible from this sandbox).
+
+### The eight-item checklist (one line each, severity where something was wrong)
+
+1. **defect (fixed, no host test — file syscalls in `main/`):** a failed `rename` removed the temp after the OLD
+   file had already been removed, leaving NEITHER name → the next boot fell back to the 32-row NVS store. Severity:
+   **lose data** (rare: the rename must fail). Every caller's reaction to `false` was read: radio (10 s retry +
+   dirty re-raised), archive (30 s retry + dirty), boot migration (one warning, retried at exit), shutdown (one log;
+   the change is lost) — **no path shows the failure to the user**: the counts are RAM counts. Pre-existing, reported.
+2. **defect (fixed, test armed):** yes — `nodeFileCheck` answers `BadVersion`/`BadRecordSize`/`BadCount`/`BadSize`/
+   `BadMagic` for a structurally sound file this build merely cannot read, and the EST-472 fix deleted the temp for
+   every non-`Ok`. After an app-version change plus a power cut in the write gap, the other version deleted the only
+   copy. Now only `Truncated`/`BadCrc` are removed; the rest are KEPT and logged. Severity: **lose data** (rare).
+3. **defect (fixed, no host test — boot state):** YES, on the no-`/int` fallback the NVS blob was rewritten on
+   **every exit** even with nothing changed, because `g_radio_have_signature` was never seeded at boot (the forced
+   `structural` pass in `nodeStorageShutdown` always found "no signature yet"). The boot now encodes the same bytes
+   and seeds the signature; a failed encode leaves it false, so the exit still retries. Severity: **wear** (16 KB
+   NVS partition shared with the launcher; no user-visible effect).
+4. **checked, nothing material:** the wake discard only drains the pop-up slot and dismisses the live pop-up; it
+   never touches unread counters, the seen point or the Chat dot (those are set by `mc_link` when the message is
+   pushed). One **microsecond-wide race** remains: a message offered after the power-press event flipped
+   `screen_off` to false but before the very next `msgPopupPoll(..., true, ...)` is discarded. Nothing is lost
+   (thread, sound, unread dot and LED stay) and closing it needs an arrival timestamp in the pending slot, so it is
+   reported, not fixed. Severity: **cosmetic**.
+5. **defect (fixed, no host test — the rule is `main`'s):** the focus, the menu index and the dots after the remap
+   are right (the box lands on the row that slid up, `node_menu_index = -1`, dots come from the remapped store
+   rows), but the **ack dwell** (`nodes_ack`) holds a SHOWN row and its 1.5 s timer is not restarted by the
+   delete: the node that slid into the deleted row could be acked (red dot cleared) on the very next pass without
+   the box ever resting on it. Now `nodesAckEnter()` re-seats the dwell on the new row (no ack). Severity: **mislead**.
+6. **defect (fixed, no host test — `main/` state machine):** status requests are independent (a RESPONSE, its own
+   `s_statusPending`; checked, nothing), the read ladder is held by `s_cli.used` (checked), logout is safe
+   (`s_cli.clear()` + `s_haveTarget=false`, so a late answer is refused and the v66 second door drops it —
+   checked) — but **`settingsReadStart()` ('r') cleared the pending line**, which re-opened the exact EST-473 §6a
+   misattribution the v68 window was built to close: a late `get tx` answer could land on the newly sent `get name`.
+   'r' is what a user presses while the page says "waiting…". Fixed: only the LADDER restarts; the slot is left to
+   the answer/late-window/timeout. Cost: the re-read starts up to 8 s (16 s in a late window) later, visibly
+   "waiting". Severity: **mislead**.
+7. **report only (not a crash, no data loss):** a `kTxtTypeSignedPlain` (2) DM is no longer dropped as repeater
+   traffic (the corrected constant), but it is **decoded with the wrong text offset**: MeshCore's signed layout is
+   `ts(4) | flags | sender_prefix(4) | text` (`BaseChatMesh.cpp:290-297`, text from `data[9]`), while `dmOpen` starts
+   the text at `plain[5]`. A room server's signed message therefore shows up in Chat as up to 4 binary bytes (often
+   empty, cut at the first NUL) instead of the text, and no ACK is sent (the ACK branch is `PLAIN`-only; signed wants
+   a 4-byte ack). Signed **channel** text is refused whole by `parsePlain` (`mc_wire.cpp:151`) and only logged.
+   Severity: **mislead** (a person's message shown as junk). Not fixed — the ticket says report only.
+8. **checked, nothing:** `DmSummary` is only ever DEFAULT-constructed in arrays (`main.cpp:2495`, `:3287`,
+   `test_store.cpp:267/287/348`), assigned via `out[n++] = dmSummaryForPeer(...)` (copy assignment re-points
+   `name`), copied in the test, never `memset`/`memcpy`/sorted/aggregate-initialised (the user-declared copy ctor
+   makes it a non-aggregate, so any brace-init would not compile). `name` may point into the DM RING
+   (`m->peer_name`) — the summaries are filled and drawn/copied inside one `StoreLock`, so no ring wrap can move
+   them mid-use (same rule as `ChannelSummary`).
+
+### A. WHAT WAS READ, AND THE FIXES IN DETAIL
+
+**1. `writeFileAtomic` (`main/mc_link.cpp:618-659`) and every caller.** The write/flush/fsync/fclose checks of
+EST-472 are right: a failure removes the temp and keeps the old file, and the callers retry (radio: 10 s +
+`g_contacts_write_failed`, dirty re-raised under the lock; archive: 30 s, `g_archive_dirty = true`) or report once
+(boot migration: one warning, retried on the forced exit write because `have_signature` stays false). `stat` +
+`remove` of the old file is the gap the temp covers. **The regression:** after `remove(path)` succeeds, a failed
+`rename` did `remove(tmp)` too — both names gone; midnight's own comment ("a power cut in that gap leaves only the
+temp file") was no longer true for the non-power failure path. **Fix:** keep the finished temp (`:649-657`); the
+next boot's `readNodeFileOrTemp` CRC-checks it, renames it into place and loads it. **The user-visible counts:** no
+path tells the user a write failed — the Nodes head, "Stored nodes" and the radio counter are RAM counts, so a
+card/flash failure is log-only. That is pre-existing and was left alone. Severity: **lose data**, rare.
+
+**2. `readNodeFileOrTemp` (`:686-707`) and the version question.** The check-before-trust is right, but "not Ok"
+was treated as "damaged". `nodeFileCheck` returns `BadVersion`, `BadRecordSize`, `BadCount`, `BadSize` and
+`BadMagic` for files whose bytes are coherent and whose CRC may be perfectly good — a file from another app
+version. Deleting those destroys the one copy that the other version can read. **Fix:** `nodeFileTempIsTorn()`
+(`core/node_store.h:72-79`) is true only for `Truncated` and `BadCrc`; everything else is logged as "from another
+format; KEPT" and the store falls back for this boot. **What the other version's file does now, honestly:** a
+newer/older **real** file is still `nodeFileDecode`-refused whole (unchanged); the radio boot then migrates from
+NVS and rewrites `radio.bin` at once, and the archive is rewritten by the first dirty write, so a downgrade still
+REPLACES the newer file in the end. Not deleting it at boot is the minimum the regression needs; a "saw a newer
+version, do not touch this store this session" rule would be a new feature, and the ticket did not ask for one.
+
+**3. `nodeStorageShutdown` on the NVS fallback (`:1020-1038`, boot seed at `:797-817`).** Yes, it wrote the blob
+on every exit: `g_radio_have_signature` is only set by a successful write (`:939-940`) or by an `/int`
+load/migration (`:769-770`, `:789-790`), and the no-`/int` boot path set neither, so the forced `structural` pass
+always found "no signature yet". **Fix:** the boot encodes the NVS blob with the writer's own call/args and seeds
+`g_radio_signature`/`g_radio_have_signature`, but ONLY when nothing is pending: `restoreContacts()` raises the
+structural flag when it dropped a record, and seeding then would make the writer's signature check skip the write
+that must remove it. A failed encode leaves the flag false, so the exit still tries. NVS
+bytes: 32 rows × 159 B + 6 B header ≈ 5.1 KB per rewrite; the partition is 16 KB and shared with the launcher, so
+one unnecessary blob per app exit is real wear. Severity: **wear** (no user-visible symptom).
+
+**4. The wake-path discard (`main.cpp:3036-3058`, `chrome.cpp:172-215`, `core/msg_popup.h:66-80`).** The discard
+calls `msgPopupPoll(now, true, ...)`, which drains `g_pending_popup` into `offer(..., screen_off=true)`: that only
+dismisses the live pop-up and clears the count. Unread/dot/seen are set where the message is pushed
+(`mc_link.cpp`), not here, so they cannot be dropped. A message that arrives AFTER the wake is safe **except** in
+the window between the power-press `onEvent` (which clears `off`) and the very next statement, the discard poll —
+a few microseconds. It needs an arrival timestamp in the pending slot (and a cutoff) to close, and nothing but the
+pop-up is lost; reported, not fixed. Severity: **cosmetic**.
+
+**5. `nodesFrozenAfterRemove` (`main.cpp:4030-4064`, `core/nodes_fresh.h:77-103`).** The remap itself is right
+and `refocusAfterDelete` (`:2190-2200`) puts the box on the row that slid up (`contactsFind` after the delete is
+-1 → keep `old_focus`, clamped), the menu is closed and `node_menu_index = -1`, and the dots come from the
+remapped store rows. **The regression:** the ack dwell is a SHOWN-position timer (`nodes_ack`) and the delete did
+not restart it, so a rest that began on the deleted node could be past 1.5 s and ack the NEXT node on the same
+pass. Fix: `nodesAckEnter(nodes_ack, nodes_focus, now)` after the refocus. Severity: **mislead** (a red dot gone
+without a look).
+
+**6. The v68 late window (`main/rptr_link.cpp`).** Status: `statusRequest()` is independent (its reply is a
+RESPONSE parsed by `handleReply`; nothing shares the CLI slot) — checked. The login ladder and the read ladder are
+both held by `!s_cli.used` (checked, `:285`). Logout: `logout()` clears the slot AND `s_haveTarget`, so a late
+answer is refused at `onCliAnswer`'s first test and the v66 second door drops the CLI-typed text — checked. **'r':
+the defect.** `settingsReadStart()` (`:585`) cleared `s_cli` and restarted the ladder, so the exact old
+misattribution came back (a `get tx` answer on the new `get name`). Fix: only `s_readStep/s_readStop` are reset;
+the slot stays until the answer / late-window end / timeout. Cost: the full re-read can start up to 8 s (16 s in a
+late window) later — the page already says "waiting for the repeater…". Side effect, documented: if the pending
+line was a `set`, its own one-row re-read still narrows the full re-read to that row — the user can press 'r'
+again. Severity: **mislead**.
+
+**7. `kTxtTypeSignedPlain` (report only).** See the checklist: not dropped (good), but the text offset is wrong
+(`plain[5]` vs `plain[9]`), so a signed room message appears as up to four binary bytes (usually empty, cut at the
+first NUL) and gets no ACK; signed channel text is refused whole by `parsePlain` and only logged. No crash, no
+existing data lost. Severity: **mislead**, reported.
+
+**8. `DmSummary`.** See the checklist: no `memset`/`memcpy`/sort/aggregate init anywhere; every copy goes through
+the re-pointing ctor/assignment; the ring pointer lives only inside one `StoreLock`. Checked, nothing.
+
+### B. THE ARCHIVE WRITE AT FULL SIZE (2,000 rows)
+
+**(1) The cost.** The file is `12 + rows × 159 + 4` bytes — **159 B per record**, not `sizeof(Contact)` = 164; the
+ticket's 328,000 B is the struct, the file is **318,016 B** (500 rows: **79,516 B**). Measured on the host with
+`-O2` (`sweep/est475_bench.cpp`, same `nodeFileEncode` + CRC the device runs):
+
+| rows | file | encode incl. CRC (host) | on the P4 (est. 5-10×) | fixed FatFs cost (device, 17-row log) | 318 KB at 1-5 MB/s | total estimate |
+|---|---|---|---|---|---|---|
+| 17 | 2,719 B | 0.040 ms | ~0.2-0.4 ms | **25-39 ms measured** | — | 25-39 ms |
+| 500 | 79,516 B | 0.74 ms | 4-7 ms | 25-39 ms | 16-80 ms | **~50-145 ms** |
+| 2,000 | 318,016 B | 2.90 ms | 15-30 ms | 25-39 ms | 64-318 ms | **~110-400 ms** |
+
+The device figures are an ESTIMATE: the one real device datapoint (17 rows, 25-39 ms) is almost all fixed cost
+(open + fsync + remove + rename), and the marginal SD throughput of this card is not measured anywhere in the
+repo. 2,000 rows is above ~150 ms across most of the plausible range; 500 rows is borderline. One `archive: … ms`
+line on the glass at 2,000 rows would settle it. **While it runs** the MAIN task is inside `contactsPersistTick`:
+no key is read (the BSP still queues them) and no frame is drawn — the screen and input freeze for that time; the
+pop-up's 10 s expiry, the clock row and the auto-repeat are checked on the same task, so they are late by the same
+amount; the LED (`om-led`, separate task), the sound and the radio keep running. One more wait: the radio task's
+`dm-*.log` append takes the same FatFs volume lock, so an RX that wants to log a DM waits for the write too — true
+today and unchanged by this ticket.
+
+**(2) Every trigger and its floor.** (Only `contactsPersistTick` writes; the radio task only raises flags.)
+
+| trigger | call | archive floor before | now |
+|---|---|---|---|
+| new node (first verified advert) | `advertInArchive` + `markContactsDirty(true)` | 30 s | 30 s |
+| rename / type change / path_len change | same, `structural` | 30 s | 30 s |
+| route learned (PATH) or cleared (failed direct DM) | `markContactsDirty(true)` | 30 s | 30 s |
+| repeat advert (last-heard/SNR/position only) | `markContactsDirty(false)` | **30 s** | **10 min** |
+| new-dot ack | `markContactsAck` (5 s radio floor) | 30 s | 30 s |
+| favourite toggle | `contactsSetFavourite` → structural | 30 s | 30 s |
+| add to radio / remove from radio / delete everywhere / clear radio | forced | immediate | immediate |
+| leaving Nodes with anything dirty | `contactsAckLeave` → forced | immediate | immediate |
+| Esc to the launcher | `nodeStorageShutdown` → forced | immediate | immediate |
+| a failed archive write | — | 30 s retry | 30 s retry |
+
+The 10-minute floor did **not** apply to the archive at all before this ticket — only to `radio.bin`'s soft
+changes. **Worst case per hour** (30 new nodes/h + 300 known nodes re-advertising every 3 h ≈ 100 adverts/h): the
+dirty stream is 130 events/h, one every ~28 s, so the 30 s floor is always expired → **120 writes/h = 38.2 MB/h**
+of card writes, and 120 × (0.11-0.4 s) = **13-48 s/h of frozen main task** (1.3 % of the time), a hiccup every
+30 s. With the fix: structural events (30/h) keep 30 s, soft-only gets 6/h → **~36 writes/h (11.4 MB/h, 4-14 s/h,
+-70 %)**; on a mesh with re-adverts and no new nodes it is **120 → 6/h (-95 %)**. User actions are still unbounded
+(each forced action is one full write), by design — that is the power-cut guarantee after a delete.
+
+**(3) The fix, and why this one.** Implemented: the archive's floor is now **structural = 30 s, soft = 10 min**
+(`core/node_store.h:81-92` `archiveWriteDue()`, used at `main/mc_link.cpp:959-1011`; the structural flag is raised
+in `markContactsDirty`/`markContactsAck`, `mc_link.cpp:216-233`; a failed write re-raises both so it retries on
+30 s, never 10 min). Chosen over the low-priority writer task because it is the **smallest** change that keeps
+every power-cut guarantee: no new task, no second 318 KB PSRAM buffer, no shutdown wait, the same
+`writeFileAtomic`, the same file format — and the trigger table shows about three quarters of the events on a
+busy mesh (100 of 130/h) are repeat adverts that change nothing a reboot could lose (the row is already on the card; only last-heard/SNR/position lag,
+exactly the fields `radio.bin` already lets lag 10 minutes). **The freeze is made rarer, not shorter** (up to
+20× on a re-advert-only mesh, ~3× in the 30-new-nodes/h worst case): a
+single 2,000-row write still costs the estimate above. If that is visible on the glass at 30 structural writes/h,
+the next step is the writer task (second PSRAM buffer + priority-1 task + a shutdown wait), which I did not do
+blind — it cannot be measured from this sandbox and it is a much bigger change to a data-integrity path.
+
+### Armed tests (fix reverted → the FAIL line, then restored byte-identical)
+
+| rule | armed line | FAIL observed (with the rule reverted) |
+|---|---|---|
+| A2 torn-temp rule → "delete every refused temp" (EST-472's behaviour) | `test_node_store.cpp:195` | `FAIL test_node_store.cpp:195  !om::mc::nodeFileTempIsTorn(om::mc::NodeFileResult::BadVersion)` (222 checks, 1 failure) |
+| B archive floor → one 30 s floor (v68's behaviour) | `test_node_store.cpp:213` | `FAIL test_node_store.cpp:213  !mc::archiveWriteDue(31000, 1000, false, true)` (216 checks, 1 failure) |
+
+Both restored: `cmp` identical to the saved copies; the whole suite then 228 checks / 0 failures in both stages.
+The other four fixes are device glue with no host seam (file syscalls, boot state, the screen-off event order, a
+main-loop timer) and are marked as such rather than given a test that could not fail.
+
+### Honest limits of this run
+
+- **Nothing was installed, flashed or seen on glass.** Every device claim is from reading the code and the host
+  model; the archive timings are the estimate above, **not** a measurement at 500/2,000 rows.
+- **The kept temp is still reused:** the next write opens `nodes.tmp` with `"wb"`, so a downgraded app overwrites
+  the newer file on its first write (see A2). The fix stops the boot from destroying it, not the format change
+  from doing so eventually.
+- **The archive freeze is reduced in frequency, not duration** (B3); the async writer is named as the next step.
+- **A4's µs race** and **A7's signed-plain text offset** are reported, not fixed (the ticket says report only for
+  A7; A4 loses no data).
+- **No SSH and no server access** were needed or made; the Tanmatsu is on Filip's USB and is not visible from this
+  sandbox. `.git` untouched, no commit.
+
+### Next step
+
+Claude reviews and commits v69; the next install is Filip's. If he wants the freeze gone rather than rare, the
+priority-1 archive writer task is the follow-up (EST-476): one extra PSRAM buffer, `xSemaphoreCreateBinary` +
+`xTaskCreate` in `nodeStorageBegin`, the shutdown waiting for `busy`, and the same `writeFileAtomic`.
+
+
+**Claude's review of EST-475 (S516, 2026-11-20 20:2x):** read the diff against its callers. Accepted: a failed rename keeps the finished temp (the next boot recovers it; a later write rewrites the temp, which is torn only if the power is cut during that write, and then the CRC rejects it); only a torn temp (Truncated/BadCrc) is deleted, another format's temp is kept; the boot seeds the radio signature so the NVS fallback is not rewritten on every exit; the ack dwell restarts on the row that slid up after a delete; 'r' no longer clears a pending CLI line; the archive's soft changes (last heard, SNR, position) wait 10 min while structural changes, acks and failures keep 30 s and user actions still force. Trade-off accepted: a node's new position can be lost if the power is cut within 10 min of the advert. **Open, recorded for Filip's list:** item 7, a signed-plain DM (room servers) is decoded at the wrong text offset (MeshCore's signed text starts at plain[9], ours at plain[5]), shows garbage and gets no ACK: not fixed tonight (rooms are not supported yet). The freeze at 2,000 rows is an ESTIMATE (110-400 ms); measure on the device before building a writer task. Suite exit 0, build exit 0 (1,742,128 B).
 ## 2026-11-20 · S516 (EST-474) late CLI answers
 
 > Written by **DeepSeek** for ticket **EST-474**: fenced Paperclip run, no session start or end, nothing installed,

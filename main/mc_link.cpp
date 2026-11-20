@@ -171,12 +171,14 @@ constexpr const char* kRadioTempPath   = "/int/om-lite/radio.tmp";
 constexpr const char* kArchiveDir      = "/sdcard/om-lite";
 constexpr const char* kArchiveFilePath = "/sdcard/om-lite/nodes.bin";
 constexpr const char* kArchiveTempPath = "/sdcard/om-lite/nodes.tmp";
-constexpr uint32_t    kArchiveWriteMs  = 30u * 1000u;   // the SD archive: at most one write per 30 s (+ forced)
+// The archive's floors live in core/node_store.h (kArchiveWriteMs / kArchiveSoftWriteMs) with the rule that uses
+// them, `archiveWriteDue()` — host-tested, so the 30 s/10 min split cannot drift from the writer.
 
 bool          g_int_mounted   = false;
 wl_handle_t   g_int_wl        = WL_INVALID_HANDLE;
 bool          g_sd_ready      = false;   // the card the archive can use (main tells us at boot)
 bool          g_archive_dirty = false;
+bool          g_archive_struct = false;  // a change to what a row IS (not just last-heard/SNR/position)
 bool          g_archive_force = false;
 uint32_t      g_archive_last_write_ms = 0;
 bool          g_archive_write_failed  = false;
@@ -215,6 +217,10 @@ void markContactsDirty(bool structural) {
     if (structural) g_contacts_dirty_struct = true;
     else g_contacts_dirty_soft = true;
     g_archive_dirty = true;   // anything that changes the table changes the archive too
+    // S516/EST-475 (B): the archive's floor is 30 s only for a change to what a row IS. A repeat advert (soft)
+    // only moves last-heard/SNR/position, which the row on the card already has, and rewriting all 318 KB for it
+    // every 30 s was ~38 MB/h and a main-task freeze each time — it waits the radio file's own 10-minute floor.
+    if (structural) g_archive_struct = true;
 }
 
 // S515/EST-461: an ack clears `fresh` on one row. It rides the same writer, with its own floor: it must not
@@ -222,6 +228,7 @@ void markContactsDirty(bool structural) {
 void markContactsAck(bool leaving_page) {
     g_contacts_dirty_ack = true;
     g_archive_dirty      = true;
+    g_archive_struct     = true;   // `fresh` is a persisted row field: the dot must not come back after a restart
     if (leaving_page) {
         g_contacts_ack_force = true;
         g_archive_force      = true;   // "on leaving Nodes": the archive is written now, past the 30 s floor
@@ -639,8 +646,11 @@ bool writeFileAtomic(const char* path, const char* tmp, const uint8_t* data, siz
         return false;
     }
     if (rename(tmp, path) != 0) {
-        ESP_LOGW(TAG, "node storage: rename %s -> %s failed (errno %d)", tmp, path, errno);
-        remove(tmp);
+        // S516/EST-475 (A1): the old file is ALREADY GONE at this point, so `tmp` is the only copy of a complete,
+        // fsynced file. Removing it (as this branch did) left neither name behind and the next boot fell back to
+        // the 32-row NVS store. Keep it: readNodeFileOrTemp() CRC-checks it, renames it into place and loads it.
+        ESP_LOGW(TAG, "node storage: rename %s -> %s failed (errno %d); the finished temp is kept for the next boot",
+                 tmp, path, errno);
         return false;
     }
     return true;
@@ -669,9 +679,10 @@ bool readNodeFile(const char* path, size_t* out_len) {
 
 // S515 (Claude, review): the file, or, when it is absent, the temp file a power cut between writeFileAtomic()'s
 // remove and its rename left behind. S516 (EST-472 item 2): the temp file is CRC-CHECKED BEFORE it is trusted —
-// it is renamed into place only when every byte the header claims is there and the CRC agrees. A torn temp is
-// removed instead (its only other copy, the old file, was already removed by writeFileAtomic), the caller falls
-// back to the NVS store, and a corrupt radio.bin is not left behind for every later boot to reject.
+// it is renamed into place only when every byte the header claims is there and the CRC agrees, so a torn temp can
+// never become the real name. S516/EST-475 (A2): a temp is DELETED only when it is provably torn (Truncated or
+// BadCrc). A wrong version/record width/magic/count is not damage — another app version wrote it, and this build
+// must not destroy it just because it cannot read it (nodeFileTempIsTorn).
 bool readNodeFileOrTemp(const char* path, const char* tmp, size_t* out_len) {
     if (readNodeFile(path, out_len)) return true;
     struct stat st;
@@ -679,9 +690,15 @@ bool readNodeFileOrTemp(const char* path, const char* tmp, size_t* out_len) {
     if (!readNodeFile(tmp, out_len)) return false;
     const NodeFileResult checked = nodeFileCheck(g_node_file_buf, *out_len);
     if (checked != NodeFileResult::Ok) {
-        ESP_LOGW(TAG, "node storage: %s is not usable (%s); removed, the store falls back", tmp,
-                 nodeFileResultText(checked));
-        remove(tmp);
+        if (nodeFileTempIsTorn(checked)) {
+            ESP_LOGW(TAG, "node storage: %s is torn (%s); removed, the store falls back", tmp,
+                     nodeFileResultText(checked));
+            remove(tmp);
+        } else {
+            // Not damage: keep every byte for the app version that wrote it. The store falls back for this boot.
+            ESP_LOGW(TAG, "node storage: %s is from another format (%s); KEPT, the store falls back", tmp,
+                     nodeFileResultText(checked));
+        }
         *out_len = 0;
         return false;
     }
@@ -780,6 +797,23 @@ size_t nodeStorageBegin(bool sd_mounted) {
             // No /int: the NVS blob is the store, so the rows it holds keep their radio mark. A v1-v3 blob had no
             // mark and every row in it WAS a radio node.
             migrateNvsToRadio(g_contacts, g_nvs_blob_version);
+            // S516/EST-475 (A3): seed the signature with exactly the bytes the writer below would produce. Without
+            // this, g_radio_have_signature is false for the whole session on the NVS fallback, so the forced radio
+            // write in nodeStorageShutdown() rewrote the blob on EVERY exit even when nothing had changed (NVS
+            // wear on the 16 KB partition the launcher shares). A failed encode leaves have_signature false, so the
+            // exit still tries.
+            //
+            // ONLY when nothing is pending: restoreContacts() raises the structural flag when it DROPPED a record
+            // (an incomplete key must leave the blob too). Seeding then would say "the file already matches" and
+            // the writer's signature check would skip that write, bringing the bad row back on every boot.
+            const bool pending = g_contacts_dirty_struct || g_contacts_dirty_soft || g_contacts_dirty_ack;
+            const size_t sig_bytes =
+                pending ? 0
+                        : contactsEncodeRadio(g_contacts, g_contact_blob, kContactBlobMaxBytes, kNodeNvsRadioCap);
+            if (g_contact_blob != nullptr && sig_bytes > 0) {
+                g_radio_signature      = nodeFileCrc32(g_contact_blob, sig_bytes);
+                g_radio_have_signature = true;
+            }
         }
     }
 
@@ -921,18 +955,22 @@ void contactsPersistTick() {
         }
     }
 
-    // ---- the SD archive: all nodes, at most once per 30 s, plus leaving Nodes / Esc ---------------------------
+    // ---- the SD archive: all nodes. 30 s after a STRUCTURAL change, 10 min after a soft one, plus forced ------
     if (!g_sd_ready) return;
-    bool archive_dirty = false, archive_force = false;
+    bool archive_dirty = false, archive_struct = false, archive_force = false;
     {
         StoreLock l;
-        archive_dirty = g_archive_dirty;
-        archive_force = g_archive_force;
+        archive_dirty  = g_archive_dirty;
+        archive_struct = g_archive_struct;
+        archive_force  = g_archive_force;
         g_archive_force = false;
     }
     if (!archive_dirty && !archive_force) return;
-    if (!archive_force && g_archive_last_write_ms != 0 &&
-        (uint32_t)(now - g_archive_last_write_ms) < kArchiveWriteMs) {
+    // S516/EST-475 (B): the rule is pure and host-tested (core/node_store.h). A forced write (a user action, or
+    // leaving Nodes/Esc) skips both floors; otherwise a structural change keeps the old 30 s floor and a
+    // repeat-advert-only change waits the radio file's 10-minute floor instead of rewriting 318 KB every 30 s.
+    if (!archive_force &&
+        !archiveWriteDue(now, g_archive_last_write_ms, archive_struct, archive_dirty && !archive_struct)) {
         g_archive_force = archive_force;
         return;
     }
@@ -941,7 +979,12 @@ void contactsPersistTick() {
         StoreLock l;
         archive_rows  = g_contacts.count;
         archive_bytes = nodeFileEncode(g_contacts, false, 0, g_node_file_buf, kNodeFileMaxBytes);
-        if (archive_bytes > 0) g_archive_dirty = false;
+        // Cleared BEFORE the lock is released: a change that lands during the write raises them again and the next
+        // pass writes the newer table (the write's own success must never swallow it).
+        if (archive_bytes > 0) {
+            g_archive_dirty  = false;
+            g_archive_struct = false;
+        }
     }
     if (archive_bytes == 0) {
         ESP_LOGE(TAG, "archive: encode failed (%u rows), not written", (unsigned)archive_rows);
@@ -962,7 +1005,8 @@ void contactsPersistTick() {
     } else {
         g_archive_write_failed = true;
         StoreLock l;
-        g_archive_dirty = true;
+        g_archive_dirty  = true;
+        g_archive_struct = true;   // a failed write retries on the 30 s floor, never the 10-minute one
         ESP_LOGE(TAG, "archive: write failed after %u ms; next try in %u s", ms, (unsigned)(kArchiveWriteMs / 1000));
     }
 }
@@ -980,6 +1024,7 @@ void nodeStorageShutdown() {
         g_contacts_ack_force    = true;
         g_archive_force         = true;
         g_archive_dirty         = true;
+        g_archive_struct        = true;   // forced anyway, but the state must stay coherent after the write
         // The retry floor must not swallow the LAST write of the session.
         g_contacts_last_attempt_ms = 0;
     }

@@ -184,6 +184,55 @@ void testFileCheckBeforeTrust() {
   CHECK_EQ((int)om::mc::nodeFileCheck(buf, n), (int)om::mc::nodeFileDecode(buf, n, s));
 }
 
+// S516/EST-475 (A2): only a PROVABLY torn temp may be deleted. A file this build cannot read because of its
+// version/record width/magic/count/size may be perfectly good and belong to another app version — deleting it
+// would destroy data the other version can still read, so readNodeFileOrTemp() keeps it and falls back.
+void testTempDeleteOnlyWhenTorn() {
+  CHECK(om::mc::nodeFileTempIsTorn(om::mc::NodeFileResult::Truncated));
+  CHECK(om::mc::nodeFileTempIsTorn(om::mc::NodeFileResult::BadCrc));
+  // Everything else is a FORMAT answer, never proof of damage. The two the ticket names first (a version bump
+  // and a record-size change between app versions) are checked first, so an armed run's first FAIL names them.
+  CHECK(!om::mc::nodeFileTempIsTorn(om::mc::NodeFileResult::BadVersion));
+  CHECK(!om::mc::nodeFileTempIsTorn(om::mc::NodeFileResult::BadRecordSize));
+  CHECK(!om::mc::nodeFileTempIsTorn(om::mc::NodeFileResult::BadCount));
+  CHECK(!om::mc::nodeFileTempIsTorn(om::mc::NodeFileResult::BadSize));
+  CHECK(!om::mc::nodeFileTempIsTorn(om::mc::NodeFileResult::BadMagic));
+  CHECK(!om::mc::nodeFileTempIsTorn(om::mc::NodeFileResult::Ok));
+  CHECK(!om::mc::nodeFileTempIsTorn(om::mc::NodeFileResult::Empty));
+}
+
+// S516/EST-475 (B): the archive's two floors. A structural change (a row was born, renamed, re-typed, re-routed,
+// deleted, favourited or acked) keeps the 30 s floor; a repeat advert moving only last-heard/SNR/position waits
+// the radio file's own 10-minute floor, so a 2,000-row archive is not rewritten every 30 s for nothing.
+void testArchiveWriteDue() {
+  namespace mc = om::mc;
+  // Nothing dirty: never.
+  CHECK(!mc::archiveWriteDue(100000, 1000, false, false));
+
+  // Soft only: 30 s is NOT enough any more; 10 min is.
+  CHECK(!mc::archiveWriteDue(31000, 1000, false, true));
+  CHECK(mc::archiveWriteDue(601000, 1000, false, true));
+  CHECK(!mc::archiveWriteDue(600999, 1000, false, true));
+
+  // Structural: the old 30 s floor, exactly.
+  CHECK(!mc::archiveWriteDue(30999, 1000, true, false));
+  CHECK(mc::archiveWriteDue(31000, 1000, true, false));
+  // Both flags: the structural floor wins.
+  CHECK(mc::archiveWriteDue(31000, 1000, true, true));
+  CHECK(!mc::archiveWriteDue(29999, 1000, true, true));
+
+  // Nothing written yet: the first change goes at once, soft or not.
+  CHECK(mc::archiveWriteDue(5, 0, false, true));
+  CHECK(mc::archiveWriteDue(5, 0, true, false));
+
+  // The 32-bit wrap: last write 0xFFFFFF00; delta = now + 256 (mod 2^32), so 30 s later is now = 29744.
+  CHECK(!mc::archiveWriteDue(29743, 0xFFFFFF00u, true, false));
+  CHECK(mc::archiveWriteDue(29744, 0xFFFFFF00u, true, false));
+  // …and a soft change 10 minutes after that same write: now = 599744.
+  CHECK(!mc::archiveWriteDue(599743, 0xFFFFFF00u, false, true));
+  CHECK(mc::archiveWriteDue(599744, 0xFFFFFF00u, false, true));
+}
+
 // ---- 2. the step-0 NVS fallback encoder ----------------------------------------------------------
 void testNvsEncoderOnlyRadioAndCapped() {
   om::mc::ContactStore s;
@@ -331,6 +380,8 @@ int main() {
   testArchiveFileRoundTrip();
   testCodecRefusals();
   testFileCheckBeforeTrust();
+  testTempDeleteOnlyWhenTorn();
+  testArchiveWriteDue();
   testNvsEncoderOnlyRadioAndCapped();
   testMergeRules();
   testMigrationFromLegacyBlobs();
