@@ -709,6 +709,6 @@ constexpr bool advertScheduleDue(uint32_t interval_s, uint32_t elapsed_s, bool e
 }
 
 // The image's version, shown in General > DEVICE. One constant: the next ticket bumps this line.
-constexpr const char* kAppVersion = "70";   // S516/EST-476: Save heard nodes to SD (session-only nodes)
+constexpr const char* kAppVersion = "71";   // S516 (Claude): Chat page stack overflow fixed (static ChatView, 16 KB main stack)
 
 }  // namespace tm

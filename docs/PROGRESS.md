@@ -15,6 +15,12 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## S516 (Claude) v71: the Chat page crashed the device (main task stack overflow), fixed
+
+**Found by Filip on the glass, 2026-11-20 20:5x (v69):** opening Chat (circle, key 23) showed a light-blue screen and the device was stuck; the console showed `Guru Meditation Error: Core 0 panic'ed (Stack protection fault)` in task `main`, twice (20:5x and after a restart at 20:55). Decoded against a v69 rebuild in a separate worktree (same size; differs only in the build timestamp): MEPC/RA in `drawTextClipped` / `drawChatCard` / `clipInto` / `Font::textWidth`, i.e. the leaves of the chat list draw. **Cause:** `app_main`'s `drawChatPage` lambda had a **5,632 B** stack frame because it built `om::ui::ChatView cv` (**4,836 B**: the v64 chat menu added `menu[5]` + `info[14]`) on the stack; with `app_main`'s own 2,192 B that is 7,824 of the **8,192 B** main task stack. Nobody opened Chat on the device between v64 and tonight (v65 and v68 logs: 0 presses of key 23), and the host suite cannot see a device stack.
+**Fix:** the view is a static, rebuilt in place every frame (`new (&cv_storage) ChatView()`, `static_assert` trivially destructible); the main task stack is **16,384 B** (`sdkconfigs/tanmatsu`, plus the generated `sdkconfig_tanmatsu`, which is untracked and does not pick up a new default by itself). After: the lambda is no longer among the large frames (largest left on the path: `app_main` 2,192, `chatInfoRows` 1,936). A boot-time line now logs the main stack's low-water mark after the first Chat draw. Suite exit 0, build exit 0 (1,745,776 B).
+**Lesson (Claude):** a new page-sized view struct on the main task needs a device check of the stack, not only host tests; the largest-frames listing (objdump `addi sp,sp,-N` per function) is a cheap gate.
+
 ## 2026-11-20 · S516 (EST-476) Save heard nodes to SD
 
 > Written by **DeepSeek** for ticket **EST-476**: fenced Paperclip run, no session start or end, nothing installed,

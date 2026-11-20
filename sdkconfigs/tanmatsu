@@ -47,3 +47,6 @@ CONFIG_ESP_REV_MIN_FULL=1
 CONFIG_JD_USE_ROM=n
 CONFIG_JD_FORMAT_RGB565=y
 CONFIG_JD_SZBUF=512
+
+# S516 (Claude): the main task draws every page and runs the UI loop; 8 KB overflowed on the Chat page (ChatView 4,836 B in drawChatPage, crash on the device 2026-11-20). 16 KB = margin; internal RAM had 246 KB free.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384

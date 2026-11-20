@@ -8,6 +8,8 @@
 //
 // It does NOT install anything and does NOT flash: the AppFS sideload (docs/RECOVERY.md) is a separate,
 // Filip-present step.
+#include <new>   // placement new: the static ChatView (S516)
+#include <type_traits>
 #include <stdio.h>
 #include <string.h>
 
@@ -2466,7 +2468,14 @@ extern "C" void app_main(void) {
     };
 
     auto drawChatPage = [&]() {
-        om::ui::ChatView cv;
+        // S516 (Claude): ChatView is 4,836 B (the v64 chat menu added menu[5] + info[14]); built on the 8 KB main
+        // stack it overflowed on the device ("Stack protection fault" in task main, 2026-11-20, every Chat open).
+        // One static view, rebuilt in place each frame (placement new = the same defaults as a fresh local); only
+        // the main task draws.
+        static_assert(std::is_trivially_destructible<om::ui::ChatView>::value,
+                      "ChatView is rebuilt in place every frame");
+        static om::ui::ChatView cv_storage;
+        om::ui::ChatView&       cv = *new (&cv_storage) om::ui::ChatView();
         cv.open          = chat_open;
         cv.dm_open       = chat_dm_open;
         cv.clock         = clockText();
@@ -2699,6 +2708,13 @@ extern "C" void app_main(void) {
                 }
             }
             om::ui::drawChat(g_screen, cv);
+            // S516 (Claude): the main stack's headroom, once, after the first full Chat draw (the page that overflowed).
+            static bool s_chat_stack_logged = false;
+            if (!s_chat_stack_logged) {
+                s_chat_stack_logged = true;
+                ESP_LOGI(TAG, "stack: main task %u B free at the low-water mark (after the first Chat draw)",
+                         (unsigned)(uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)));
+            }
         }
     };
 
