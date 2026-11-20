@@ -683,8 +683,15 @@ int confirmWriteText(char* out, size_t cap, const char* line, const char* curren
   if (out == nullptr || cap == 0) return 0;
   out[0] = '\0';
   if (line == nullptr || line[0] == '\0') return 0;
-  const int n = snprintf(out, cap, "Send \"%s\"? The repeater says %s now.",
-                         line, (current != nullptr && current[0] != '\0') ? current : "nothing");
+  // S516 (EST-473): "The repeater says nothing now" was wrong in BOTH cases it was produced. An ACTION row
+  // (advert.zerohop / advert / clock sync) has no value to compare against at all, and a SETTING row that has not
+  // been read yet has an UNKNOWN value — neither is "nothing", and the second one reads like an answer. The line
+  // is the whole question then; a value clause is only added when there is a value.
+  if (current == nullptr || current[0] == '\0') {
+    const int n = snprintf(out, cap, "Send \"%s\"?", line);
+    return n > 0 && (size_t)n < cap ? n : 0;
+  }
+  const int n = snprintf(out, cap, "Send \"%s\"? The repeater says %s now.", line, current);
   return n > 0 && (size_t)n < cap ? n : 0;
 }
 

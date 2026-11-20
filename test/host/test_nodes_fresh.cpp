@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "contact_admin.h"   // S516/EST-473: contactRemoveAt(), the shift a delete really makes
 #include "mc_store.h"
 #include "nodes_fresh.h"
 #include "nodes_search.h"
@@ -283,6 +284,66 @@ void screenMachine() {
     CHECK(!p.off);
 }
 
+// ------------------------------------- S516 (EST-473): a node DELETED while the page is open
+// `Delete everywhere` removes one row and contactRemoveAt() shifts the rows after it DOWN one, while the frozen
+// snapshot holds STORE INDICES. Without the re-map every entry above the deleted row names the NEXT node: the list
+// shows one node twice, drops the last one, and the ack/menu lands on a node the user did not pick. The ORDER the
+// user is looking at must survive the delete; only the indices move.
+void frozenOrderAfterDelete() {
+    printf("test  a node deleted while Nodes is open keeps every OTHER row on its node\n");
+    om::mc::ContactStore s;
+    addNew(s, 1, 100);   // store row 0 -> "N1"
+    addNew(s, 2, 300);   // store row 1 -> "N2"  (the one that gets deleted)
+    addNew(s, 3, 200);   // store row 2 -> "N3"
+    addNew(s, 4, 400);   // store row 3 -> "N4"
+
+    // The page opened on a SCRAMBLED order (freshness/heard order, which is what contactsOrder really returns —
+    // an identity order would hide the defect, because a shift then maps to the right successor by luck).
+    om::ui::NodesFrozen f;
+    const int order[4] = {2, 0, 3, 1};   // N3, N1, N4, N2
+    om::ui::nodesFrozenBegin(f, order, 4);
+    CHECK_EQ(f.count, 4);
+    CHECK_EQ(f.order[3], 1);
+
+    // Delete "N2" (store row 1), exactly as nodeDeleteEverywhere does it: the rows after it move down one.
+    const int removed = (int)om::mc::contactsFind(s, s.c[1].pub);
+    CHECK_EQ(removed, 1);
+    CHECK(om::mc::contactRemoveAt(s, (size_t)removed));
+    CHECK_EQ(s.count, 3);
+
+    // The device calls the re-map first (main.cpp, Delete everywhere), then the same sync every draw runs.
+    CHECK(om::ui::nodesFrozenAfterRemove(f, removed));
+    (void)om::ui::nodesFrozenSync(f, s);
+
+    // Three rows left, in the SAME order, each still naming its own node — N4 last, N2 gone, nothing doubled.
+    CHECK_EQ(f.count, 3);
+    CHECK_EQ(f.order[0], 1);   // was store row 2, now 1: still "N3"
+    CHECK_EQ(f.order[1], 0);   // unchanged: "N1"
+    CHECK_EQ(f.order[2], 2);   // was store row 3, now 2: still "N4"
+    CHECK(strcmp(s.c[f.order[0]].name, "N3") == 0);
+    CHECK(strcmp(s.c[f.order[1]].name, "N1") == 0);
+    CHECK(strcmp(s.c[f.order[2]].name, "N4") == 0);
+    // The deleted node is nowhere in the snapshot (the defect showed it twice and lost "N4").
+    for (int i = 0; i < f.count; ++i) CHECK(strcmp(s.c[f.order[i]].name, "N2") != 0);
+
+    // Deleting the LAST store row shifts nothing; only that row's entry goes (the list was N4, N1, N3).
+    om::ui::NodesFrozen g;
+    const int order2[3] = {2, 0, 1};
+    om::ui::nodesFrozenBegin(g, order2, 3);
+    CHECK(om::mc::contactRemoveAt(s, s.count - 1));   // store row 2 = "N4"
+    CHECK(om::ui::nodesFrozenAfterRemove(g, 2));
+    CHECK_EQ(g.count, 2);
+    CHECK_EQ(g.order[0], 0);   // "N1" stays where it was
+    CHECK_EQ(g.order[1], 1);   // "N3" stays where it was
+    CHECK(strcmp(s.c[g.order[0]].name, "N1") == 0);
+    CHECK(strcmp(s.c[g.order[1]].name, "N3") == 0);
+
+    // A stale row id (-1: the node left the table before the delete) changes nothing and does not renumber.
+    CHECK(!om::ui::nodesFrozenAfterRemove(g, -1));
+    CHECK_EQ(g.count, 2);
+    CHECK_EQ(g.order[0], 0);
+}
+
 }  // namespace
 
 int main() {
@@ -290,6 +351,7 @@ int main() {
     orderFavouritesThenFreshThenRest();
     ackRules();
     frozenOrder();
+    frozenOrderAfterDelete();
     screenMachine();
     printf("test_nodes_fresh: %d checks, %d failure%s\n", g_checks, g_failures, g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

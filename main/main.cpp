@@ -4032,9 +4032,20 @@ extern "C" void app_main(void) {
                                 uint8_t pub[32];
                                 memcpy(pub, g_confirm_pub, sizeof(pub));
                                 const int old_focus = nodes_focus;
+                                // S516/EST-473: the frozen order holds STORE INDEXES and Delete everywhere shifts
+                                // the rows after the deleted one DOWN one. The index is therefore taken by KEY
+                                // before the delete and the snapshot re-mapped after it, or every row below the
+                                // delete would name the next node (see core/nodes_fresh.h). An index of -1 (the
+                                // node left the table in between) remaps nothing.
+                                int removed_row = -1;
+                                {
+                                    om::mc::StoreLock l;
+                                    removed_row = om::mc::contactsFind(om::mc::contacts(), pub);
+                                }
                                 if (om::mc::nodeDeleteEverywhere(pub)) {
                                     om::ui::noticeSet("Deleted from the radio and the SD card; its DM history stays",
                                                       3000);
+                                    (void)om::ui::nodesFrozenAfterRemove(nodes_frozen, removed_row);
                                 } else {
                                     om::ui::noticeSet("Node not deleted", 3000);
                                 }

@@ -74,6 +74,34 @@ inline bool nodesFrozenSync(NodesFrozen& f, const om::mc::ContactStore& s) {
     return changed;
 }
 
+// S516 (EST-473): a row was DELETED and the rows after it shifted DOWN one. `order` holds STORE indices, so
+// every entry above the deleted row silently names the NEXT node — the list would show one node twice, lose the
+// last one, and Enter would open a menu on a node the user did not pick. "Drop rows that left the table" cannot
+// see it: after a shift every index is still in range.
+//
+// Re-MAP instead of re-sorting, because the freeze is the whole point ("the row keeps its place until the user
+// leaves Nodes"): the deleted row's entry goes, every entry above it moves down with its node, and the ORDER the
+// user is looking at does not change. `removed` is the deleted row's STORE index, taken BEFORE the delete
+// (`contactsFind` on the key, not the position). A store that was cleared needs nothing: every index is then out
+// of range and nodesFrozenSync() drops the lot.
+inline bool nodesFrozenAfterRemove(NodesFrozen& f, int removed) {
+    if (removed < 0) return false;
+    bool changed = false;
+    int  n       = 0;
+    for (int i = 0; i < f.count; ++i) {
+        const int e = f.order[i];
+        if (e == removed) {
+            changed = true;   // this node is gone
+            continue;
+        }
+        const int v = (e > removed) ? e - 1 : e;   // its row moved down one
+        if (v != e) changed = true;
+        f.order[n++] = v;
+    }
+    f.count = n;
+    return changed;
+}
+
 // ---------------------------------------------------------------- the hint bar's dot mask (S515/EST-461 item 1)
 // Bits are the sigil indices of main/chrome.h (static_asserted there, so the two cannot drift).
 constexpr uint8_t kHintDotBitNodes = 1u << 1;

@@ -301,6 +301,8 @@ bool cliParseTypedPosition(const char* typed, int32_t* latE6, int32_t* lonE6);
 
 // ---------------------------------------------------------------------------------- the confirm sheet's words
 // Every change names the exact line that will go on the air and the value the row shows now (EST-470 item 3).
+// S516 (EST-473): when there IS no value — an action row (advert, clock sync), or a setting not read yet — the
+// question is the line alone; it never claims the repeater "says nothing", which is a different statement.
 int confirmWriteText(char* out, size_t cap, const char* line, const char* current);
 int confirmRebootText(char* out, size_t cap, const char* name);   // "Reboot X? It is off the mesh for ~10 s."
 

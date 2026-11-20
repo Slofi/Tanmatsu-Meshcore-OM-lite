@@ -614,6 +614,11 @@ void testCliTypedPosition() {
     CHECK(om::rptr::cliParseTypedPosition(" -46.25 , -14.5 ", &lat, &lon));  // spaces a paste leaves behind
     CHECK_EQ(lat, -46250000);
     CHECK_EQ(lon, -14500000);
+    // S516 (EST-473): more decimals than the CLI's 5-decimal form. The 7th digit is ROUNDED away, never truncated
+    // (core/rptr_model.cpp:629-637), so "46.1234567" is 46.123457 and not 46.123456.
+    CHECK(om::rptr::cliParseTypedPosition("46.1234567, 14.4", &lat, &lon));
+    CHECK_EQ(lat, 46123457);
+    CHECK_EQ(lon, 14400000);
     CHECK(!om::rptr::cliParseTypedPosition("46.25", &lat, &lon));       // no comma
     CHECK(!om::rptr::cliParseTypedPosition("46.25,", &lat, &lon));      // empty half
     CHECK(!om::rptr::cliParseTypedPosition(",14.5", &lat, &lon));
@@ -630,8 +635,14 @@ void testConfirmWords() {
     CHECK_STR(text, "Send \"set tx 20\"? The repeater says 22 dBm now.");
     CHECK(om::rptr::confirmWriteText(text, sizeof(text), "powersaving on", "off") > 0);
     CHECK_STR(text, "Send \"powersaving on\"? The repeater says off now.");
+    // S516 (EST-473): NO value → the line alone. An ACTION row (advert, clock sync) has no current value at all,
+    // and a row not read yet has an unknown one; "The repeater says nothing now" was neither.
     CHECK(om::rptr::confirmWriteText(text, sizeof(text), "set tx 20", "") > 0);
-    CHECK_STR(text, "Send \"set tx 20\"? The repeater says nothing now.");   // a row not read yet
+    CHECK_STR(text, "Send \"set tx 20\"?");   // a row not read yet
+    CHECK(om::rptr::confirmWriteText(text, sizeof(text), "advert", nullptr) > 0);
+    CHECK_STR(text, "Send \"advert\"?");
+    CHECK(om::rptr::confirmWriteText(text, sizeof(text), "clock sync", "") > 0);
+    CHECK_STR(text, "Send \"clock sync\"?");
     CHECK_EQ(om::rptr::confirmWriteText(text, sizeof(text), "", "22 dBm"), 0);
     CHECK_EQ(om::rptr::confirmWriteText(text, sizeof(text), nullptr, nullptr), 0);
 

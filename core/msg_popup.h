@@ -60,7 +60,8 @@ struct MsgPopup {
     //   screen_off      no pop-up, and NO queue for later: this message is dropped here
     //   own             our own echo never pops up (and never clears somebody else's pop-up)
     //   same_chat_open  that chat is on screen: do not show it (and leave any other pop-up alone)
-    //   arrived         how many messages this call stands for (normally 1); they add to "+N more"
+    //   arrived         how many messages this call stands for (normally 1). The newest is the one shown; all the
+    //                   others are counted into "+N more", and so is a pop-up this one replaces
     bool offer(uint32_t now_ms, bool screen_off, bool own, bool same_chat_open, PopupChat c,
                uint8_t ch, const uint8_t* pub, uint32_t arrived = 1) {
         if (screen_off) {
@@ -72,8 +73,14 @@ struct MsgPopup {
 
         const bool was_visible = visible;
         if (!was_visible) {
-            extra = 0;
+            // S516 (EST-473): `arrived` can be a BATCH — the radio task offers every message at once and the main
+            // loop polls twice a second (main/chrome.cpp), so two messages can land inside one window. The newest
+            // is the one on the plate; the others are what "+N more" counts. It used to read 0 here, so a batch
+            // arriving with no pop-up up showed the newest and said nothing about the first one.
+            extra = arrived > 0 ? arrived - 1 : 0;
         } else if (arrived > 0) {
+            // A pop-up is already up: the message it was showing joins the ones not shown, so the batch counts
+            // whole (and a single message still reads "+1 more").
             extra += arrived;
             if (extra > kMsgPopupMaxExtra) extra = kMsgPopupMaxExtra;
         }

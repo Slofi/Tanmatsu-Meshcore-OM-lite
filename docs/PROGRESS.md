@@ -15,6 +15,337 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-20 · S516 (EST-473) bug sweep round 2
+
+> Written by **DeepSeek** for ticket **EST-473**: fenced Paperclip run, no session start or end, nothing installed,
+> flashed, pushed or committed (`.git` was read only; Claude reviews and commits). Starting point **v66 `a7da1c3`**
+> — round 1 (EST-472) plus Claude's two review fixes. **Round 2 covers the user-facing features round 1 did not
+> touch:** chat selection + message menu (v64), time row (v63), map nodes (v63), message LED (v63), new-node dots
+> and their ack (v62), repeater part 2a (v65), the new-message pop-up (v62). **Version: 67 only if the code
+> changes.** This entry is written FIRST and filled in as the sweep goes.
+>
+> **RESULT:** version **67** (`core/settings.h`). `sh test/host/run.sh` **exit 0**, suites summed
+> **33,971 → 34,046** (+75 checks: nodes_fresh 85 → 111 in the -O2 and the ASan stage, msg_popup 51 → 60, rptr
+> 287 → 294 in both; every stage included, the only sanitizer noise is still the vendored Ed25519's pre-existing
+> `left shift of negative value` in `fe.c`). Both numbers come from the same script run in THIS ticket, on v66 and
+> on v67 — the round-1 entry's 33,244 is its own count and I did not try to reproduce it.
+> `make build` **exit 0**, `application.bin` **1,741,552 B (0x1A92F0)**, +160 B over v66's 1,741,392 B (total image
+> 1,741,148 B; flash image 1,630,930 B); DIRAM **297,196 B used / 275,172 B free (51.92 %)** — unchanged from v66,
+> because every fix is code and strings and adds no RAM. **Four defects found: three fixed, each with an armed host
+> test, one NOT fixed** and argued in § 6a (a protocol limit, not an oversight). Nothing was installed or seen on
+> glass.
+
+### The eight-item checklist (one line each)
+
+0. **checked, nothing new** in (a); one NEW instance of (b) — found and fixed in § 5; (c) every MeshCore constant
+   verified against the vendored source (§ 0's table), one comment-only mismatch (`kMaxPlain`'s cited formula).
+1. **checked, nothing** — the box is kept by seq (`main/main.cpp:2574`) and a dim row runs nothing
+   (`main/main.cpp:3102`); the reply prefix is bounded (`core/chat_select.cpp:122`, `main/main.cpp:3114`).
+2. **checked, nothing** — ONE bump site (`main/mc_link.cpp:1471`), reached only from the seen-ring drop
+   (`:1510`); the "heard = copies+1" pairing holds on every path (`core/chat_meta.cpp:83-101`).
+3. **checked, nothing** — `has_position` is tested before projecting (`main/map_page.cpp:150`), the cull is
+   half-open (`core/map_nodes.cpp:30`), the lock is held for the marker pass only (`main/map_page.cpp:270`).
+4. **checked, nothing** — the 20 s group is modular (`core/message_led_rule.h:115`), I2C only on a changed frame
+   (`main/message_led.cpp:115`), automatic mode restored on every stop path (`:59-65`, `:196`).
+5. **defect (fixed, test armed)** — the frozen Nodes order holds STORE INDEXES and a delete shifts the rows
+   (`core/nodes_fresh.h:87`, `main/main.cpp:4048`). Severity: mislead.
+6. **defect (not fixed, why)** — a CLI answer that arrives after the deadline can be applied to the NEXT line
+   (`main/rptr_link.cpp:259` then `:648`); **defect (fixed, test armed)** — the action rows' confirm sheet said
+   "The repeater says nothing now" (`core/rptr_model.cpp:682`). Severity: mislead / cosmetic.
+7. **defect (fixed, test armed)** — a batch of messages arriving with no pop-up up lost its "+N more"
+   (`core/msg_popup.h:80`). Severity: mislead.
+
+### 0. THE CLASS round 1 found — searched for again, all over the tree
+
+**(a) a struct holding a pointer into its OWN buffer, returned by value or copied.** Exactly one exists and v66
+already fixed it: `DmSummary` (`core/mc_store.h:268-296`) — `name` may point at its own `short_name`, and the copy
+constructor/assignment re-point it (`copyFrom`), tested at `test/host/test_store.cpp:299`. I re-read the copy path
+and then swept every header in `core/` and `main/` for a struct that holds BOTH a char array and a
+`char*`/`const char*` member: the only two are `ChatView` (`main/chat_page.h:60`) and `SettingsView`
+(`main/settings_page.h`), whose pointers are set by the caller for one draw and never point into their own storage.
+**checked, nothing new.**
+
+**(b) a pointer taken from a ring, the node table or a static buffer and kept after the data can move.**
+
+- `DmSummary.name` / `ChannelSummary.sender|text` point into the rings; the Chat list and the open thread are
+  filled AND drawn inside one `StoreLock` (`main/main.cpp:2456-2557`), so a wrap cannot move them mid-draw.
+  **checked.**
+- A static-buffer getter called twice inside one `snprintf`: the Settings getters each own their buffer
+  (`nodesStoresValue` `main/main.cpp:625`, `mapStartZoomValue` `:659`, the pack rows `:694-704`) and
+  `tm::settingsRowValue()` is called ONCE per row (`main/settings_page.cpp:99`), immediately drawn. **checked,
+  nothing.**
+- **One NEW instance: the Nodes frozen order** — an array of STORE INDICES kept across a DELETE, which shifts the
+  rows down one. Fixed in § 5.
+- ⚠️ **Latent, NOT a defect today (named, not changed):** `main/main.cpp:2539/2572/2587-2588` size the chat draw's
+  `srcs[]`, `seqs[]`, `line_counts[]` and `wraps[]` by `om::mc::kMaxDms` while they are filled with CHANNEL
+  messages (`messagesForChannel(..., kMaxMessages)`). Today `kMaxMessages == kMaxDms == 64` (`core/mc_store.h:39`,
+  `:214`), so nothing overflows; the *constant* is the wrong one and a future ring resize would overflow the stack.
+  No fix here — there is no defect to fix, and the ticket's rule is not to invent one.
+
+**(c) protocol constants copied by hand — EVERY MeshCore constant in `core/`, against the vendored source.** The
+tree was read at `firmware/lib/meshcore` (v1.18.0) and `firmware/reference/meshcore-repeater-v1.18.0`:
+
+| our constant (`core/…`) | value | vendored source | ok |
+|---|---|---|---|
+| `kMaxPayload` `mc_wire.h:32` | 184 | `MeshCore.h:18` MAX_PACKET_PAYLOAD 184 | ✓ |
+| `kMaxPath` `mc_wire.h:33` | 64 | `MeshCore.h:20` MAX_PATH_SIZE 64 | ✓ |
+| `kSecretBytes` `mc_wire.h:34` | 32 | `MeshCore.h:6` PUB_KEY_SIZE 32 (GroupChannel::secret) | ✓ |
+| `kKeyBytes` `mc_wire.h:35` | 16 | `MeshCore.h:10` CIPHER_KEY_SIZE 16 | ✓ |
+| `kMacBytes` `mc_wire.h:36` | 2 | `MeshCore.h:15` CIPHER_MAC_SIZE 2 | ✓ |
+| `kBlockBytes` `mc_wire.h:37` | 16 | `MeshCore.h:11` CIPHER_BLOCK_SIZE 16 | ✓ |
+| `kMaxText` `mc_wire.h:38` | 160 | `helpers/BaseChatMesh.h:8` MAX_TEXT_LEN = 10×16 | ✓ |
+| `kMaxPlain` `mc_wire.h:37` | 168 | `Mesh.cpp:544` `data_len + 1 + CIPHER_BLOCK_SIZE-1 > MAX_PACKET_PAYLOAD` → 168 | ✓ value |
+| `kMaxNameChars` `mc_wire.h:39` | 31 | `NodePrefs::node_name[32]` (L2 `settings.h`) | ✓ |
+| `kFloodPathHashSize` `mc_wire.h:44` | 2 | app choice; `path_len = ((hs-1)<<6)|n`, `Packet.h:80-81` | ✓ |
+| `kRouteTransportFlood/Flood` `mc_wire.h:46-47` | 0x00/0x01 | `Packet.h:14-15` | ✓ |
+| `kTypeAdvert/GrpTxt/Response/Control` `mc_wire.h:48-51` | 04/05/01/0B | `Packet.h:21-30` | ✓ |
+| `kTxtTypePlain` `mc_wire.h:52` | 0 | `helpers/TxtDataHelpers.h:6` | ✓ |
+| `kTypeTxtMsg/Ack/Path` `mc_dm.h:32-34` | 02/03/08 | `Packet.h:22,23,27` | ✓ |
+| `kRouteDirect` `mc_dm.h:35` | 0x02 | `Packet.h:16` | ✓ |
+| `kTxtTypeCliData/SignedPlain/CliCommand` `mc_dm.h:42-44` | 1/2/3 | `helpers/TxtDataHelpers.h:7-9` | ✓ (v66 fix) |
+| `kAckBytes` `mc_dm.h:51` | 6 | `helpers/BaseChatMesh.cpp:244-250` `uint8_t ack_hash[6]` | ✓ |
+| `kPathHashSize` `mc_dm.h:52` | 1 | `MeshCore.h:18` PATH_HASH_SIZE 1 | ✓ |
+| `kOutPathUnknown` `mc_store.h:43` | 0xFF | `helpers/ClientACL.h:13` | ✓ |
+| `kAdvTypeChat` `mc_identity.h:28` | 1 | `helpers/AdvertDataHelpers.h:8` | ✓ |
+| `kAdvNameMask/LatLon/Feat1/Feat2` `mc_identity.h:29-34` | 80/10/20/40 | `helpers/AdvertDataHelpers.h:12-16` | ✓ |
+| advert field ORDER flags→lat,lon→feat1→feat2→name | — | `helpers/AdvertDataHelpers.cpp:4-29` | ✓ |
+| `kTypeReq/TxtMsg/AnonReq/Control` `rptr_wire.h:38-42` | 00/02/07/0B | `Packet.h:20-30` | ✓ |
+| `kReqTypeGetStatus` `rptr_wire.h:46` | 0x01 | repeater `MyMesh.cpp:46` | ✓ |
+| `kCtlDiscoverReq/Resp` `rptr_wire.h:47-48` | 0x80/0x90 | repeater `MyMesh.cpp:787/809`, `Mesh.cpp:70` | ✓ |
+| `kAdvTypeRepeater` `rptr_wire.h:49` | 2 | `helpers/AdvertDataHelpers.h:9` | ✓ |
+| `kDmRouteFlood` `dm_send.h:43` | 0x01 | `Packet.h:15` | ✓ |
+
+**One comment-only mismatch:** `kMaxPlain`'s comment cites `MAX_PACKET_PAYLOAD - CIPHER_BLOCK_SIZE - 3`
+(= 165, `MeshCore.h:19` `MAX_GROUP_DATA_LENGTH`) but the **value 168** is the limit `createGroupDatagram`
+actually enforces (`Mesh.cpp:544`, `+1+16 > 184`). The value is right and every buffer that uses it
+(`mc_wire.cpp:179`, `channel_scope.cpp:153`) is right; the formula in the comment is the wrong one. Not changed —
+a code change here would be a comment edit inside a constant whose value is already correct, and I would rather
+Claude decide whether to touch it.
+
+### 1. CHAT SELECTION + MESSAGE MENU — checked, nothing
+
+Read: `core/chat_select.{h,cpp}` and every call site in `main/main.cpp` (2,221-2,400, 3,060-3,260, 2,520-2,660).
+
+- **A message arriving while selecting:** the box keeps a SEQ, never a slot, and the index is recomputed on every
+  draw from the frame's own list (`main.cpp:2574`); `chatSelScroll` (`core/chat_select.cpp:116`) then scrolls so the
+  SAME line stays framed and the window grows above it. A key press re-derives the index from the same list in one
+  lock (`chatSelStep`, `main.cpp:2264-2292`), so a message arriving mid-press cannot move it by two.
+- **Ring wrap:** if the selected seq was evicted, `main.cpp:2576` CLOSES the box instead of framing whatever took
+  the slot. (One edge: if the eviction happens between two draws and a key lands before the repaint,
+  `chatSelMove(-1, delta, n)` treats "not found" as "no box yet" (`core/chat_select.cpp:96-104`) and moves from the
+  newest. That needs a 64-message burst inside one frame's gap; cosmetic, not reachable in practice.)
+- **An empty chat:** Up from the composer does nothing (`chatSeqAtFromNewest(0) == 0`, `main.cpp:3244-3250`), so no
+  box is opened on a channel with no messages.
+- **DM vs channel:** the same three lambdas read the DM ring when `chat_dm_open` (`main.cpp:2237/2269/2300`), and
+  `chatMsgCount`/`chatSeqAtFromNewest`/`chatSelStep` agree on which ring they are in.
+- **Reply "@Name ":** the prefix buffer is 40 bytes and the name is at most 23 (`kNameBytes` 24), so "@" + 23 + " "
+  always fits; UTF-8 is copied byte for byte (`snprintf %s`, no truncation); an EMPTY sender writes nothing
+  (`core/chat_select.cpp:122-128`), so Reply simply hands the composer back. If the prefix would overrun the
+  120-byte composer the insert is skipped and the draft is left exactly as it was (`main.cpp:3114`) — the EST-469
+  rule Claude accepted, unchanged.
+- **A sender not in the node table (or deleted):** the node is resolved under the lock at the moment Enter is
+  pressed (`chatMenuBuild`, `main.cpp:2330-2360`), a row that could not be resolved is DIM with its reason, and a
+  dim row runs nothing (`main.cpp:3102`). The DM row's label, and every row's right-hand reason, are COPIES
+  (`ChatMsgRow::label/value`, `core/chat_select.h:43-44`), never a `const char*` into a buffer that could die.
+- **Esc:** `chatCloseSelection()` (`main.cpp:2221-2228`) touches only the box/menu/sheet. Composer and
+  `composer_len` are untouched, so the draft comes back byte for byte; every typed key while a sheet is up is
+  swallowed (`main.cpp:3078-3082`), so nothing can reach the composer.
+
+### 2. TIME ROW — checked, nothing
+
+- **Nothing bumps the counters twice.** There is exactly ONE increment site (two loops, one function):
+  `noteDroppedCopy` (`main/mc_link.cpp:1471-1484`), called only from the seen-ring drop branch (`:1510`), once per
+  dropped frame. Our own echo and the ACK are different frames (different payload → different fingerprint), so an
+  ACK cannot add a copy; a duplicate flood copy is one drop and so one count. `heard N×` = `copies + 1`
+  (`core/chat_meta.cpp:83-88`) and `repeated N×` = `copies` (`:100-104`) therefore hold on every path.
+- **"via <name>":** 0 matches → the hash itself, exactly 1 → that contact's name, 2 or more → **nobody's name**
+  (`core/chat_meta.cpp:31-55`); a prefix-only row is not a node (`contactKeyIncomplete`). Same rule as the Info
+  sheet's hop rows (`chat_select.cpp:210`).
+- **Bytes:** set from the frame length for a channel (`main/mc_link.cpp:1898` via `takeWirePath`) and for an
+  incoming DM (`:1711`), and from the built frame for our own DM (`:2155/2310`); 0 means unknown and prints
+  nothing.
+- **Older / restored records show nothing false:** `mc_history` writes `repeats = 0` and restores `copies = 0`,
+  `frame_len = 0`, no route (`core/mc_history.cpp:69/176/291`), and `pathFromRecord` refuses the v57 fake shape
+  (hops 1 with pathCount 0) so `hops_known` stays false (`:29-47`). The dim row then shows no hops, no via, no
+  bytes and no count, and the Info sheet prints "not kept after a restart" instead of a zero.
+
+### 3. MAP NODES — checked, nothing (with the lock number)
+
+- **0,0 and out-of-range:** `positionDrawable` refuses 0,0 and outside ±90/±180 (`core/map_nodes.h:29-37`), and the
+  marker loop tests `has_position` BEFORE projecting (`main/map_page.cpp:150`), so a row with stale lat/lon but no
+  position flag can never be drawn.
+- **A node exactly on a tile edge:** the projection is view-local subtraction of the pack's own world pixel
+  (`core/map_nodes.cpp:12-35`) and the cull is half-open, so a point on the right/bottom edge belongs to the next
+  view and one on the left/top edge to this one. `test_map_nodes` pins a tile corner at z9..z17.
+- **Label overlap at every zoom:** the greedy is zoom-independent and runs only from z13 (`core/map_nodes.cpp:82-146`);
+  a plate that would leave the view or overlap an already-placed one is skipped and the MARKER stays.
+- **The node menu's Map at z15 outside the pack:** `centreOnNode` clamps the zoom and the world pixel
+  (`core/map_nodes.cpp:160-172`), and the page then draws the void, the marker and the label — there are simply no
+  tiles there. The page has no "no map data here" sentence; **noted, not a defect** (the void colour is documented
+  as exactly that, `main/map_page.cpp:25`).
+- **Cost per frame with 2,000 rows, under the lock:** the marker+label pass measured on the HOST (-O2,
+  `test_map_nodes`) is **405-458 µs** for 2,000 rows with **1,450 markers in view and 16 labels** (300 rows: 70 µs).
+  The lock (`om::mc::StoreLock` at `main/map_page.cpp:270`) is held for that pass and released before the panel
+  blit, and the radio task takes the same recursive mutex for an advert insert (`main/mc_link.cpp:1816`), so it
+  **does wait** — for that pass, on the pass a repaint happens. The device's own figure is NOT measured here (the
+  host adds its share of disc/label drawing, ~1,450 discs, which the test does not do); a few ms is the honest
+  estimate and no RX packet is at risk at that scale (the frame sits in the driver's queue, and a LoRa text is
+  >100 ms of airtime).
+
+### 4. MESSAGE LED — checked, nothing
+
+- **The 20 s group across the `esp_timer` wrap and long gaps:** the phase is `(now - start) % 20000` on a uint32
+  monotonic clock (`core/message_led_rule.h:115`), i.e. pure modular arithmetic; a wrap or a task blocked for
+  seconds changes nothing. The 10 s pop-up timeout uses a signed difference for the same reason
+  (`core/msg_popup.h:108-113`).
+- **Unread cleared while locked:** nothing can clear it while the screen is off — every navigation/key event is
+  swallowed (`main/main.cpp:3060-3065`) — and the moment it does reach 0 the next 25 ms tick leaves manual mode
+  (`main/message_led.cpp:115` → `applyFrame`'s `!manual` branch, `:59-65`), so the blinking stops.
+- **The choice changing in Settings:** `s_choice` is read on every tick and a different index restarts the burst
+  (`core/message_led_rule.h:109-113`); the frame only reports `changed` when `manual`, `lit`, or `led` differs
+  (`:126`), so a re-read of the same value costs no I2C.
+- **Pixels 0-1:** in manual mode `applyFrame` writes all six dark and then lights only the chosen one
+  (`main/message_led.cpp:79-82`). 0/1 are only ever turned OFF, which is the ticket's rule ("all LEDs would be off").
+- **Automatic mode back on every path:** the screen coming on (`setScreenOff(false)`, `main.cpp:3050`), the unread
+  reaching 0, the choice going Off (all three through the `!manual` branch), and Esc to the launcher
+  (`restoreAutomatic`, `main/message_led.cpp:196-209`, called FIRST in `leaveToLauncher`, `main.cpp:217`).
+  `begin()` also forces automatic (`:139`). The panic case stays unfixable in-process (round 1 § 3).
+- **I2C traffic while locked:** three blinks = 6 changed frames (on at 0/300/600 ms, off at 120/420/720), then
+  nothing until 20 s → **0.3 frames/s average**, each frame 6 pixel writes + one `bsp_led_send()`.
+
+### 5. NEW-NODE DOTS + ACK — defect (fixed, test armed)
+
+**The defect.** `nodesFrozenSync()` (`core/nodes_fresh.h:47-75`) keeps the page's frozen order true to the table by
+dropping entries whose INDEX is out of range. But `Delete everywhere` (`main/main.cpp:4045` →
+`core/node_table.cpp:87-96`, i.e. `contactRemoveAt`, `core/contact_admin.h:40-45`) **shifts every row after the
+deleted one down one**. After the shift every frozen index is still in range, so nothing is dropped and every entry
+above the deleted row now names the NEXT node: the list shows one node twice, the last node silently disappears,
+and the box (re-found by key, `refocusAfterDelete`, `main.cpp:2196`) stays where it was while the row under it now
+names another node. The snapshot also feeds the node menu and the ack, so both inherit the wrong mapping.
+
+**The fix.** `nodesFrozenAfterRemove(f, removed)` (`core/nodes_fresh.h:77-103`) re-MAPS instead of re-sorting — the
+ORDER the user is looking at is the whole point of the freeze, so the deleted node's entry goes and every entry
+above it moves down one with its node. `main.cpp:4035-4048` takes the deleted row's index by KEY under the lock
+BEFORE the delete and calls the re-map after it (an index of -1, the node already gone, remaps nothing). Every
+other removal path is already safe: `RemoveContact`/`RemoveFromRadio` close the page (the snapshot is rebuilt on
+entry, `main.cpp:4594`), and `Clear all` leaves every index out of range, which the sync drops.
+
+**Armed** (`test/host/test_nodes_fresh.cpp:287-345`, a scrambled order [N3,N1,N4,N2] with N2 deleted).
+
+**The rest of item 5, checked:**
+- **Landing vs resting:** a key that LANDS on a row acks at once (`nodesAckKeyMoved`, `core/nodes_fresh.h:132`),
+  a 1.5 s REST acks (`nodesAckTick`, `:140`), and opening the page acks nothing (`nodesAckEnter`, `:125`).
+- **Persisted without a write per key press:** `contactsAckFresh` (`main/mc_link.cpp:1029`) only raises flags; the
+  one writer applies a **5 s** floor (`kContactsAckWriteMs`, `:148`, used at `:858`) and forces the write on
+  leaving the page (`contactsAckLeave`, `:1041-1049`).
+- **A node deleted while fresh:** the row is gone, so `contactsFreshCount` drops and the dot clears
+  (`hintDotMask`, `core/nodes_fresh.h:112-117`) — the delete path itself was the defect above.
+- **The dot clears when the last fresh node is acked:** same function, from the same counter the badges use.
+- **The order stays until leaving:** the snapshot is re-sorted only on page entry (`main.cpp:4592-4602`).
+
+### 6. RPTR PART 2a — one defect NOT fixed, one cosmetic fixed
+
+**6a. DEFECT (not fixed, why): an answer that arrives after the deadline can be applied to the NEXT line.**
+`sendCliLocked` keeps one pending line (`main/rptr_link.cpp:146-171`, `if (s_cli.used) return false`), `tick()`
+clears it at the deadline (`:259-268`) and the read ladder sends the NEXT `get` in the very same pass (`:280-287`).
+`onCliAnswer` then applies whatever CLI text arrives to the line that is pending NOW (`:646-661`), and
+`settingsApplyRead` validates it against **that line's** format (`core/rptr_model.cpp:424`). The CLI has no request
+id, so a late answer is indistinguishable from the new line's answer. Concrete worst case: the answer to `get tx`
+(`"> 14"`) is a legal coordinate, so the Position row would show **14.00000** as "the repeater says"; a late
+`get name` answer is a legal owner info. Severity: **mislead** (a plausible wrong value presented as the repeater's
+own; a change typed on top of it goes to the confirm sheet, which does name the line, so the user can catch it).
+The `set lat`/`set lon` pair is safe (`s_second` is dropped on a timeout, `:265-268`), so a HALF position is never
+applied.
+**Why not fixed:** without a request id there is no sound way to attribute A's answer once B is on the air. The two
+honest options both change the timing EST-470 chose: (1) after a timeout, drop the FIRST answer that arrives —
+if the timed-out line never answered, that eats a good answer once; or (2) after a timeout wait one more deadline
+(8 s) before the next line, and treat an answer inside that window as the old line's. This needs Claude/Filip's
+call, not my guess at 20:30.
+
+**6b. Two quick changes (queue of one): checked, nothing.** A second change while a line is pending is refused by
+`sendCliLocked` and the page says "Not sent: a line is still waiting for its answer" (`main/main.cpp:3416-3419`);
+nothing is replaced, and the row keeps the value it was READ as.
+
+**6c. DEFECT (fixed, test armed): the confirm sheet's text for a row with nothing to compare against.**
+`confirmWriteText` (`core/rptr_model.cpp:682-697`) ended every question with *"The repeater says nothing now."*
+when the row had no value — which is every ACTION row (`advert.zerohop`, `advert`, `clock sync`,
+`setRowActionCmd`) and every SETTING row not read yet. "Says nothing" is a claim about an answer that was never
+asked, and for a not-yet-read row it reads like the repeater had answered. Now the sentence carries the value
+clause only when there IS a value: `Send "advert"?`. Severity: **cosmetic** (it cannot act wrongly — only
+mis-describe). Armed at `test/host/test_rptr.cpp:641-645`.
+The other rows were read at their call sites (`main.cpp:3466-3490`, `rptrConfirm` `:2989`) and do name both the
+exact line and the value: Name/Owner/Position/TX/Repeat/Power save all come from `rptrRowValue()`, i.e. the
+repeater's own last answer. Reboot uses its own sentence (`confirmRebootText`, `:698`).
+
+**6d. Position input: checked, nothing.** `cliParseTypedPosition` (`core/rptr_model.cpp:643-669`) accepts
+"46.25, 14.5", "46.25,14.5", "  46.25 ,  14.5  " (the leading spaces are skipped by `cliStripPrefix`'s loop,
+`:573-574`, the trailing ones trimmed at `:656-657`), and a leading `-`/`+` on either half (`:614-621`). Too many
+decimals are rounded at the 7th (`:629-637`). Out of range is refused (lat ±90, lon ±180, `:664-665`) as are an
+empty half, a missing comma, "abc", and a second comma (`parseUnsigned` rejects any non-digit, `:297`). Tests:
+`test/host/test_rptr.cpp:609-628` (the 7-decimal rounding was pinned in this ticket).
+
+**6e. TX power clamp: checked, nothing.** The stepper clamps its draft to 1..22 (`main/main.cpp:3524-3527`) and
+`cliTx` clamps again (`core/rptr_model.cpp:558-565`), so no path can build `set tx 0` or `set tx 30`. Enter on an
+unread row starts the draft at 14 (`main.cpp:3562`).
+
+**6f. The password never in a log line or on screen: checked, nothing.** Every `ESP_LOG` in `rptr_*` was read
+(21 in `main/rptr_link.cpp`; `rptr_page.cpp`, `core/rptr_model.cpp`, `core/rptr_wire.cpp` have none). The only
+mention is *"password remembered for this repeater (never printed)"* (`rptr_link.cpp:142`). The CLI lines that ARE
+logged (`:159/163/167/260`) never carry it. The login screen draws one dot per character
+(`main/rptr_page.cpp:149-151`).
+
+### 7. NEW-MESSAGE POP-UP — defect (fixed, test armed)
+
+**The defect.** The radio task offers EVERY arrival; `main/chrome.cpp:172-186` keeps the newest head+text and a
+COUNT, and `msgPopupPoll` passes that count as `arrived` (`:201-202`). `offer()` set `extra = 0` whenever no
+pop-up was visible (`core/msg_popup.h:74-75` old), so **two messages inside one 250 ms poll** showed the newest and
+said nothing about the other — the user never learned a second message arrived. (With a pop-up already up the count
+was right: the message it was showing joins the not-shown ones, so `extra += arrived` is exactly right and is
+unchanged.)
+**The fix.** A brand-new pop-up counts everything but the newest: `extra = arrived - 1` (`core/msg_popup.h:80`).
+**Armed** (`test/host/test_msg_popup.cpp:73-91`).
+
+**The other paths, checked:**
+- **Never our own:** `offer(..., own=false, ...)` is only reached after the seen-ring check, which drops our own
+  echo before the DM/channel branch (`main/mc_link.cpp:1494-1512`).
+- **Not for the open chat, channel AND DM:** `msgPopupPoll` builds the open chat's identity from the page state
+  (`main.cpp:4420-4435`), and `sameChat` compares the KIND first, then the channel index or the peer key
+  (`core/msg_popup.h:52-57`, `main/chrome.cpp:196-200`). The Chat LIST (`chat_open == false`) suppresses nothing.
+- **Not for a CLI text:** `rptrlink::onCliAnswer` consumes a CLI_DATA/CLI_COMMAND text before the DM path
+  (`main/rptr_link.cpp:619`), and the v66 second door drops one that missed it (`main/mc_link.cpp:1685`).
+- **Not while locked:** `offer` with `screen_off` dismisses and queues nothing (`core/msg_popup.h:67-71`); the
+  every-pass poll passes `g_screen_power.off` (`main.cpp:4435`), and BOTH power-button edges poll with
+  `screen_off = true` (`:3040`, `:3048`) so a message that landed before the poll is discarded on the wake press
+  (the v66 fix) and one that lands while off is never kept.
+- **The 10 s timeout:** a signed difference, so the 32-bit wrap is safe (`core/msg_popup.h:108-114`), and a newer
+  message RESTARTS the 10 s (`:88`). A key while it is up dismisses and is swallowed (`:100-105`, `main.cpp:3070-3077`).
+
+### Armed tests (the fix reverted → the FAIL line, then restored)
+
+| fix | armed line | FAIL observed (with the fix reverted) |
+|---|---|---|
+| § 5 frozen order after a delete | `test_nodes_fresh.cpp:315` | `FAIL …:315 om::ui::nodesFrozenAfterRemove(f, removed)` — and then, in the same run, `FAIL …:320 f.order[0] == 1 (got 2, want 1)`, `FAIL …:323 strcmp(s.c[f.order[0]].name, "N3") == 0` (the first row now shows N4) and 10 more |
+| § 6c rptr confirm text | `test_rptr.cpp:641` | `FAIL …:641 got "Send \"set tx 20\"? The repeater says nothing now." want "Send \"set tx 20\"?"` (+ `:643` and `:645` for `advert` and `clock sync`) |
+| § 7 pop-up batch count | `test_msg_popup.cpp:77` | `FAIL …:77 p.extra == 1 (got 0, want 1)` |
+
+All three were re-run restored: 111 / 294 / 60 checks, 0 failures.
+
+### Honest limits of this run
+
+- **Nothing was installed, flashed or seen on glass.** The device-only claims (the lock's real duration, the I2C
+  frames the coprocessor sees, the pop-up on the panel) are from reading the code and from the host model.
+- **§ 6a is NOT fixed** and needs a decision (see the two options). Until then a repeater that answers later than
+  8 s can put a wrong value in a row.
+- **The map's device cost is an estimate.** The host figure (405-458 µs / 2,000 rows / 1,450 in view) is measured;
+  the disc-and-label drawing on the P4 is not.
+- **Not swept in this ticket** (round 1's scope, not repeated): locking, persistence/power cut, exit paths,
+  no-`/int` caps, memory. Round 2 covered the seven user-facing features above only.
+- **A latent trap was named and not changed** (the chat draw's `kMaxDms`-sized arrays holding channel messages, § 0b).
+- **No SSH was made for this ticket**; `~/Projects` was read in place and the tree is left uncommitted for Claude.
+
+
+
+**Claude's review of EST-473 (S516, 2026-11-20 19:5x):** read the code diff against its call sites. Accepted all three fixes. Frozen order: checked that Delete everywhere is the only path that shifts rows while Nodes is open (the table never evicts: `node_table.cpp:72`; Settings' Remove closes the Nodes page), and the index is taken by key under the lock before the delete. Pop-up batch count and the confirm text: correct. **§ 6a decided by Claude (a lower-level call, Filip not needed):** option 2, after a CLI timeout hold the next line for one more deadline and give an answer inside that window to the timed-out line; it never throws away a good read and costs 8 s only after a timeout. Filed as EST-474. Suite exit 0, build exit 0 (1,741,552 B). Not seen on the device yet.
 ## 2026-11-20 · S516 (EST-472) bug sweep of v57-v65
 
 > Written by **DeepSeek** for ticket **EST-472**: fenced Paperclip run, no session start or end, nothing installed,

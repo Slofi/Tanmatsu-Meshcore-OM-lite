@@ -67,6 +67,29 @@ void test_show_replace_and_more() {
   CHECK_EQ(p.until_ms, 4000 + om::ui::kMsgPopupMs);
 }
 
+// S516 (EST-473): a BATCH with no pop-up up. The radio task offers every message at once and the main loop polls
+// twice a second, so two messages can land in one window: the newest is on the plate and the other one is what
+// "+N more" has to count, or the user never learns it arrived.
+void test_batch_with_nothing_up() {
+  printf("test  two messages in one poll: the newest shows and the other is '+1 more'\n");
+  MsgPopup p;
+  CHECK(p.offer(1000, false, false, false, PopupChat::Channel, 1, nullptr, 2));
+  CHECK_EQ(p.extra, 1);
+  CHECK(p.visible);
+  CHECK_EQ(p.chat, PopupChat::Channel);
+  CHECK_EQ(p.channel, 1);
+
+  // One message alone still says nothing extra.
+  MsgPopup q;
+  CHECK(q.offer(1000, false, false, false, PopupChat::Channel, 1, nullptr));
+  CHECK_EQ(q.extra, 0);
+
+  // The cap holds for a batch too (the poll's own counter stops at 99).
+  MsgPopup r;
+  CHECK(r.offer(1000, false, false, false, PopupChat::Channel, 1, nullptr, 99));
+  CHECK_EQ(r.extra, 98);
+}
+
 void test_key_swallow() {
   printf("test  any key dismisses and is reported as swallowed; the next key is not\n");
   MsgPopup p;
@@ -150,6 +173,7 @@ void test_extra_cap() {
 
 int main() {
   test_show_replace_and_more();
+  test_batch_with_nothing_up();
   test_key_swallow();
   test_timeout_and_wrap();
   test_same_chat_rule();
