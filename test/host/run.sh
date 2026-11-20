@@ -50,11 +50,12 @@ NODEVIEW="$(mktemp /tmp/tm-node-view.XXXXXX)"
 NODESMAPN="$(mktemp /tmp/tm-nodes-map-nodes.XXXXXX)"
 MSGPOPUP="$(mktemp /tmp/tm-msg-popup.XXXXXX)"
 MSGLED="$(mktemp /tmp/tm-message-led.XXXXXX)"
+WIFIBOOT="$(mktemp /tmp/tm-wifi-boot.XXXXXX)"
 RPTRED="$(mktemp -d /tmp/tm-rptr-ed.XXXXXX)"
 CHANORACLE="$(mktemp -d /tmp/tm-chan-oracle.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$VOLUME" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN" "$NODEVIEW" "$NODESMAPN" "$MSGPOPUP" "$MSGLED" "$SELECT"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$VOLUME" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN" "$NODEVIEW" "$NODESMAPN" "$MSGPOPUP" "$MSGLED" "$WIFIBOOT" "$SELECT"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -512,3 +513,11 @@ ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$NODESTOREASAN"
     test_message_led.cpp \
     -o "$MSGLED"
 "$MSGLED"
+
+# S516/EST-480: "Wi-Fi at boot" (core/wifi_boot.h). OUR key mcset/wifiboot is not derived from the
+# launcher's system/ntp; Off at start writes 0 ONLY on a real difference, On never touches the key at
+# start, and the switch itself writes 1 (On) / 0 (Off) exactly once.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_wifi_boot.cpp \
+    -o "$WIFIBOOT"
+"$WIFIBOOT"

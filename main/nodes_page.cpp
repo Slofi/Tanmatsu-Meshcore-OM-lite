@@ -311,8 +311,12 @@ void drawNodes(Screen& s, const NodesView& v) {
     // S515/EST-465: "<> view" first — the filter key must be visible. Left/Right are free on this page (Up/Down
     // move the list and every other arrow/letter already has a job), so no new letter steals a typed character
     // from the search or an existing shortcut.
+    // S516/EST-480: the two shortcut hints are BACK. Measured on the real hint face (sans_hint11.bin), the
+    // six page labels leave the cluster at x=350 and the list could only draw three chips; so, in the ticket's
+    // fallback order: "a advert" -> "a adv" and the page labels are dropped on THIS page (`compact` below),
+    // which starts the cluster at x=590. The six chips end at x=501: no overlap, nothing cut.
     static const HintItem hints_list[] = {{"<>", "view"}, {"Enter", "menu"}, {"/", "search"},
-                                          {"esc", "back"}, {"f", "fav"}, {"a", "advert"}};
+                                          {"esc", "back"}, {"f", "fav"}, {"a", "adv"}};
     static const HintItem hints_search[] = {{"type", "search"}, {"dn", "list"}, {"esc", "clear/back"}};
     static const HintItem hints_menu[]   = {{"up/dn", "move"}, {"Enter", "choose"}, {"esc", "close"}};
     if (v.menu_open)
@@ -320,7 +324,7 @@ void drawNodes(Screen& s, const NodesView& v) {
     else if (v.search_focused)
         drawHintBar(s, tm::Page::Nodes, hints_search, 3);
     else
-        drawHintBar(s, tm::Page::Nodes, hints_list, 6);
+        drawHintBar(s, tm::Page::Nodes, hints_list, 6, /*compact_page_keys=*/true);
 }
 
 void drawNodeMenu(Screen& s, const mc::Contact& c, int focus, uint32_t now, bool ping_pending,

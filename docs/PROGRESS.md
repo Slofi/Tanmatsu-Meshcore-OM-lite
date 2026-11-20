@@ -15,6 +15,77 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## S516 (EST-480) Wi-Fi toggle + Nodes hints back
+
+> Written by **DeepSeek** for ticket **EST-480**: fenced Paperclip run, no session start or end, nothing
+> installed, flashed, pushed or committed (`.git` read only; Claude reviews and commits). Starting point
+> **v75 `c7e20ab`**, tree clean, **not installed** (v74 runs on the device). **RESULT: version 76; nothing
+> installed, flashed, pushed or committed.**
+
+Two small items. **(A)** Settings › General gains **WI-FI › "Wi-Fi at boot"** (Off / On, **default Off**) with a
+dim hint while Off: *"Off: the stock launcher does not connect at start; its store and updates still connect
+when opened"* (the ticket's sentence; 594 px on the real Meta face, ending 46 px before the right-aligned
+"Off"). OUR choice lives in NVS **`mcset`/`wifiboot`** (u8, next to `heardto`/`saveheard`/`newnode`),
+never derived from the launcher's key. The launcher's own switch is NVS **`system`/`ntp`** (u8): the stock
+launcher connects Wi-Fi at boot ONLY when it is 1; a missing key reads as off (ticket's citation, read-only source at
+`/home/slofi/dev/tanmatsu-launcher` @ `3ceac92`: `main/main.c:187`, `main/ntp.c:22-49`; that path is **not
+visible from this sandbox**, so the citation is the ticket's, not a re-read). With our setting **Off**, OM Lite
+reads `system`/`ntp` at EVERY start and writes **0 only when it is present and not already 0** (absent already
+reads as off, so it is left absent); one log line either way. **On** writes 1 once at the switch and never touches
+the key at start. No other `system` key is opened, read or written. The decision is pure
+(`core/wifi_boot.h`, `startAction`/`switchAction`) and the NVS code is a handful of small functions in
+`main.cpp`.
+**(B)** The Nodes hint bar carries both shortcut hints again. Measured with the DEVICE's own hint face
+(`main/fonts/sans_hint11.bin`, advance sum, the preview tool's own 4/8/10 + 18/14 arithmetic): with the six page
+labels the page-key cluster starts at x=350, so the bar could only draw `<> view`, `Enter menu`, `/ search` —
+`esc back`, `f fav`, `a advert` were all dropped (only three chips could be drawn). Fallback chosen, in the
+ticket's order: **(1)** `a advert` → `a adv` (the two shortcuts are back as `f fav`, `a adv`); **(2)** the label
+words of the six page sigils are dropped **on the Nodes page only** (the sigils stay, the active one still
+gold). That moves the cluster's start to x=590 and the six action chips end at x=501, an 89 px clear gap
+before the sigils — no overlap, nothing cut.
+`drawHintBar()` grew an explicit `compact_page_keys` flag; only the Nodes list sets it, so every other page keeps
+its labels. Shot: `shots/2026-11-20-nodes-hints.png`.
+
+**Numbers:** `sh test/host/run.sh` **exit 0**; the new `wifi-boot` suite **30 checks, 0 failures**.
+`make build` **exit 0**, `application.bin` **1,752,848 B (0x1ABF10)**, **+2,032 B** over v75's recorded
+1,750,816 B; total image **1,752,448 B**; DIRAM **303,276 B used / 269,092 B free (52.99 %)** — the same as v75
+(no new static RAM: the row and its strings are constants, the helpers are code). One host test armed: deleting the
+`ntp != 0` branch gave `FAIL test/host/test_wifi_boot.cpp:82  (int)tm::wifiboot::startAction(Mode::Off, true, 1)
+== (int)NtpWrite::Zero (got 0, want 1)` and `wifi-boot: 1/21 checks FAILED` (exit 1); reverted, 30/30 exit 0.
+No SSH needed (the device is on Filip's USB; nothing installed).
+
+**Previews:** `shots/2026-11-20-nodes-hints.png` (all six chips + the six unlabelled sigils, 89 px clear) and
+`shots/2026-11-20-settings-wifi.png` (General, WI-FI focused, the full hint in the Meta face). `hint_bar` in the
+preview tool now measures with `main/fonts/sans_hint11.bin` (the device's own advance values) and mirrors the
+`compact` flag; `setrow` draws a row hint in sans at the Meta size, which is the face the panel uses.
+
+### What was read
+`main/main.cpp` (`app_main`'s `nvs_flash_init`, `clearLauncherAutostart`, the General sections, the row-handler
+dispatch, `settingsKey`/`generalToggle*`), `core/settings.h` (General, `kAppVersion`), `core/settings_model.h`
+(the hint/dim row fields), `main/settings_page.cpp` (how a row hint is drawn, with the Body label + Meta hint and
+the right-aligned value), `main/mc_link.cpp` (the `mcset`/`mcid` NVS patterns), `main/chrome.{h,cpp}`
+(`drawHintBar`'s exact spacing and the six-sigil cluster), `main/nodes_page.cpp` (the `hints_list` array),
+`tools/preview_tanmatsu.py` (`hint_bar`, `setrow`, `settings_general`, `nodes_views`), `main/fonts/*.bin` and
+`main/font.cpp` (the VLW advance field), `test/host/run.sh`, `test/host/test_volume_popup.cpp` (the house test
+shape).
+
+### The implementation
+1. **Rule** (`core/wifi_boot.h`): `Mode{Off,On}` with default Off; `modeFromStored` (only 1 is On);
+   `startAction(mode, present, ntp)` = Off + present + ntp≠0 → `Zero`, otherwise `Nothing`;
+   `switchAction(next)` = On → `One`, Off → `Zero`. The NVS names and keys are constants here so main.cpp and the
+   tests cannot disagree.
+2. **Shell** (`main/main.cpp`): `wifiBootReadStored`/`wifiBootWriteStored` (`mcset`/`wifiboot`),
+   `launcherNtpRead`/`launcherNtpWrite` (`system`/`ntp`, u8, the launcher's own access pattern),
+   `wifiBootAtStart()` right after `nvs_flash_init`, and the General row's getter/hint/handler. The handler
+   applies the launcher key first, then stores our choice, so a failed launcher write never leaves our UI
+   claiming a mode the key did not get.
+3. **Row**: new section **WI-FI** after ADVERT, one Toggle row `kSetRowWifiBoot` = 40. The hint is shown only
+   while Off (it starts with "Off:"); On shows no hint.
+4. **Host test** (`test/host/test_wifi_boot.cpp`): the ticket's five cases plus the missing-key, default and
+   stored-mapping pins; `run.sh` compiles and runs it with `-Wall -Wextra -Werror -O2`.
+
+
+**Claude's review of EST-480 (S516, 2026-11-20 22:5x):** the rule (`core/wifi_boot.h`) writes system/ntp only when it is present and 1 (Off at start), 1 once on switching On, 0 once on switching Off; our choice lives in mcset/wifiboot; no other `system` key is opened. Hints: preview checked, all six hint chips fit, the page keys are symbols-only on Nodes. Accepted. Suite exit 0, build exit 0.
 ## S516 (EST-479) message LED colour preview
 
 > Written by **DeepSeek** for ticket **EST-479**: fenced Paperclip run, no session start or end, nothing

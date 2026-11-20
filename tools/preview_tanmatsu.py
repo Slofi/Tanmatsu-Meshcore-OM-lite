@@ -39,6 +39,32 @@ FONT_SANS = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
 FONT_BOLD = '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
 FONT_MONO = '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf'
 
+# S516/EST-480: the hint bar's FIT is decided with the DEVICE's own hint face (main/fonts/sans_hint11.bin),
+# not DejaVu, because the panel drops a chip that would run under the six page keys. Drawing still uses the
+# tool's DejaVu (this is a host render); only the widths and the slot positions are the glass's numbers.
+HINT_FACE = os.path.join(ROOT, 'main', 'fonts', 'sans_hint11.bin')
+_HINT_ADV = None
+
+
+def hint_advances():
+    """{code point: advance} out of the same VLW layout main/font.cpp decodes (24 B header + 28 B/glyph)."""
+    global _HINT_ADV
+    if _HINT_ADV is None:
+        data = open(HINT_FACE, 'rb').read()
+        count = struct.unpack('>I', data[:4])[0]
+        _HINT_ADV = {}
+        for i in range(count):
+            code, _h, _w, adv, _dy, _dx, _pad = struct.unpack(
+                '>IIIIiiI', data[24 + i * 28:24 + (i + 1) * 28])
+            _HINT_ADV[code] = adv
+    return _HINT_ADV
+
+
+def htw(s):
+    """Advance sum in the device's hint face: the same number the panel's Font::textWidth returns."""
+    adv = hint_advances()
+    return sum(adv.get(ord(ch), 5) for ch in s)
+
 # --------------------------------------------------------------------------------------------- palette
 def palette():
     """Every rgb565() token in the L2 theme, as #rrggbb. Parsed, never retyped."""
@@ -403,7 +429,7 @@ def status_bar(d, clock='--:--', batt=0.97, gps=False, radio=True):
         x -= tw(fm, '868') + 22
 
 
-def hint_bar(d, page, actions, dots=()):
+def hint_bar(d, page, actions, dots=(), compact=False):
     """The key-hint bar (BRIEF § 5): what the keys do HERE, same style as the L2's tab bar.
 
     Left: this page's actions. Right: the six page keys, the page switch; the current page's key is
@@ -413,6 +439,9 @@ def hint_bar(d, page, actions, dots=()):
     face (sans 11) for key caps, labels and page names, a cap of max(30, key width + 10), the 4/8/10
     spacing, and the six-key 18/14 right-cluster gaps. A cap that would run under the page keys (or off the
     left margin) is not drawn, so a preview can never claim more room than the glass has.
+
+    S516/EST-480: the WIDTHS now come from the device's own sans_hint11.bin (htw), not DejaVu; `compact`
+    drops only the six page LABELS and keeps the sigils and the 18/14 gaps, exactly like the device's flag.
     """
     top = TM['H'] - TM['hint_h']
     d.rectangle([0, top, TM['W'], TM['H']], fill=P['Bar'])
@@ -427,8 +456,9 @@ def hint_bar(d, page, actions, dots=()):
     for kind, lab, pname in reversed(list(zip(SIGILS, labels, pages))):
         on = (pname == page)
         col = P['Acc'] if on else P['Dimmer']
-        sx -= tw(f, lab)
-        text(d, (sx, cy), lab, f, col, anchor='lm')
+        sx -= 0 if compact else htw(lab)
+        if not compact:
+            text(d, (sx, cy), lab, f, col, anchor='lm')
         sx -= 18
         sigil(d, kind, sx, cy, 7, col, width=2)
         if pname in dots:
@@ -439,8 +469,8 @@ def hint_bar(d, page, actions, dots=()):
     # left cluster: the same fit rule and spacing as the device
     hx = TM['pad']
     for keys, what in actions:
-        kw = max(30, tw(f, keys) + 10)
-        lw = tw(f, what)
+        kw = max(30, htw(keys) + 10)
+        lw = htw(what)
         item_w = kw + 4 + 8 + lw + 10
         if hx + item_w > right_start - 8:
             break
@@ -1671,7 +1701,10 @@ def setrow(d, x0, x1, y, label, value, focused=False, chevron=True, hint=None, d
     text(d, (x0 + 4, y + 9), label, fl,
          P['AccInk'] if (focused and not dim) else (P['Dimmer'] if dim else P['Ink']))
     if hint:
-        text(d, (x0 + 4 + tw(fl, label) + 12, y + 9), hint, font(FONT_MONO, TM['f_hint']), P['Dimmer'])
+        # S516/EST-480: the device draws a row hint in Face::Meta (sans_meta12), not mono; a mono stand-in is
+        # ~10 % wider and would make the ticket's Wi-Fi sentence look like it collides with the value.
+        text(d, (x0 + 4 + tw(fl, label) + 12, y + 9), hint,
+             font(FONT_SANS, TM['f_meta']), P['Dimmer'])
     fk = font(FONT_MONO, TM['f_kv'])
     vx = right - (18 if chevron else 4)
     text(d, (vx, y + 9), value, fk, P['Dimmer'] if dim else (P['Acc'] if focused else P['Dim']), anchor='ra')
@@ -1825,7 +1858,7 @@ def menu():
 
 
 # ------------------------------------------------------------------------------------- settings general
-def settings_general():
+def settings_general(save_name='2026-11-19-settings-general.png', focus_label='Name'):
     """EST-445: Settings, part 1 — the frame and the General tab.
 
     Same house style as the Chat/menu cards: the L2's status bar, the page head, the five-tab row
@@ -1878,6 +1911,10 @@ def settings_general():
         ('row', 'Advert now', 'Enter', False),
         ('sect', 'ADVERT', None, None),
         ('row', 'Automatic advert', 'Off', False),
+        # S516/EST-480: the WI-FI section sits between ADVERT and SOUND; the hint is the ticket's sentence,
+        # drawn in the SAME face the device uses (Face::Meta), so the fit in the shot is the fit on the glass.
+        ('sect', 'WI-FI', None, None),
+        ('row', 'Wi-Fi at boot', 'Off', False),
         ('sect', 'SOUND', None, None),
         ('row', 'Sound', 'On', False),
         ('row', 'Volume', '- 60 % +', False),
@@ -1913,8 +1950,10 @@ def settings_general():
             continue
         if yy + row_h > body_bot:
             break
-        setrow(d, lx0, lx1, yy, label, value, focused=focused,
-               chevron=(label == 'Name' or label in sound_rows))
+        setrow(d, lx0, lx1, yy, label, value, focused=(label == focus_label),
+               chevron=(label == 'Name' or label in sound_rows),
+               hint=('Off: the stock launcher does not connect at start; its store and updates still '
+                     'connect when opened') if label == 'Wi-Fi at boot' else None)
         yy += row_h + 2
 
     scroll_indicator(d, (lx0, body_top, W - 8, body_bot), total_h, body_bot - body_top, 0)
@@ -1922,7 +1961,13 @@ def settings_general():
     # the ticket's five keys, plus the global Settings key. The bar fits them by shortening the labels
     # (the device's chrome drops a chip that would run under the symbol keys).
     hint_bar(d, 'settings', [('Enter', 'open/change'), ('esc', 'back'), ('←→', 'tab'), ('↑↓', 'row'),])
-    return save(img, '2026-11-19-settings-general.png')
+    return save(img, save_name)
+
+
+def settings_wifi():
+    """S516/EST-480: Settings > General's new WI-FI section, with "Wi-Fi at boot" focused (Off by
+    default) and the ticket's explanation as the row's dim hint."""
+    return settings_general(save_name='2026-11-20-settings-wifi.png', focus_label='Wi-Fi at boot')
 
 
 def _settings_owner_frame(tab_index, right_text):
@@ -2906,11 +2951,11 @@ def nodes_head_unsaved():
          font(FONT_SANS, TM['f_body']), P['Dimmer'])
 
     hint_bar(d, 'nodes', [('<>', 'view'), ('Enter', 'menu'), ('/', 'search'), ('esc', 'back'),
-                          ('f', 'fav'), ('a', 'advert')], dots=('chat', 'nodes'))
+                          ('f', 'fav'), ('a', 'adv')], dots=('chat', 'nodes'), compact=True)
     return save(img, '2026-11-20-nodes-head-unsaved.png')
 
 
-def nodes_views():
+def nodes_views(name='2026-11-19-nodes-views.png'):
     """S515/EST-465: the Nodes page with the store view. All three chips in the head band (All active), the head
     right carrying the live counts, and a gold "R" on every radio row. The first row is the one with ALL THREE
     marks: radio (R), favourite (gold dot) and fresh (red dot). Rows 4-6 are archive-only and carry no R."""
@@ -2945,8 +2990,16 @@ def nodes_views():
          font(FONT_SANS, TM['f_body']), P['Dimmer'])
 
     hint_bar(d, 'nodes', [('<>', 'view'), ('Enter', 'menu'), ('/', 'search'), ('esc', 'back'),
-                          ('f', 'fav'), ('a', 'advert')], dots=('chat', 'nodes'))
-    return save(img, '2026-11-19-nodes-views.png')
+                          ('f', 'fav'), ('a', 'adv')], dots=('chat', 'nodes'), compact=True)
+    return save(img, name)
+
+
+def nodes_hints():
+    """S516/EST-480: the Nodes hint bar with the six hints back — `<> view`, `Enter menu`, `/ search`,
+    `esc back`, `f fav`, `a adv` — measured on the device's own sans_hint11 face. The page sigils keep
+    their place but drop their six labels on THIS page, which moves the cluster's start from x=350 to
+    x=590: the last chip ends at x=501, so nothing is cut and nothing touches a sigil."""
+    return nodes_views(name='2026-11-20-nodes-hints.png')
 
 
 def nodes_sd_wording():
@@ -2987,7 +3040,7 @@ def nodes_sd_wording():
          font(FONT_SANS, TM['f_body']), P['Dimmer'])
 
     hint_bar(d, 'nodes', [('<>', 'view'), ('Enter', 'menu'), ('/', 'search'), ('esc', 'back'),
-                          ('f', 'fav'), ('a', 'advert')], dots=('chat', 'nodes'))
+                          ('f', 'fav'), ('a', 'adv')], dots=('chat', 'nodes'), compact=True)
     return save(img, '2026-11-19-nodes-sd-wording.png')
 
 
@@ -3024,7 +3077,7 @@ def popup_msg():
         yy += 28
 
     hint_bar(d, 'nodes', [('<>', 'view'), ('Enter', 'menu'), ('/', 'search'), ('esc', 'back'),
-                          ('f', 'fav'), ('a', 'advert')], dots=('chat', 'nodes'))
+                          ('f', 'fav'), ('a', 'adv')], dots=('chat', 'nodes'), compact=True)
 
     # ---- the pop-up panel, centred, drawn over the page exactly like drawMessagePopup() -----------------
     pw = 560
@@ -3432,12 +3485,12 @@ def chat_msg_info():
     return save(img, '2026-11-19-chat-msg-info.png')
 
 
-RENDERERS = dict(chat_select=chat_select, chat_msg_menu=chat_msg_menu, chat_msg_info=chat_msg_info, map_nodes_z12=map_nodes_z12, map_nodes_z14=map_nodes_z14, nodes_views=nodes_views, nodes_sd_wording=nodes_sd_wording, node_menu_radio=node_menu_radio, launcher=launcher, nodes_fresh=nodes_fresh, hint_dots=hint_dots, menu=menu, nodes=nodes, nodes_search=nodes_search,
+RENDERERS = dict(chat_select=chat_select, chat_msg_menu=chat_msg_menu, chat_msg_info=chat_msg_info, map_nodes_z12=map_nodes_z12, map_nodes_z14=map_nodes_z14, nodes_views=nodes_views, nodes_hints=nodes_hints, nodes_sd_wording=nodes_sd_wording, node_menu_radio=node_menu_radio, launcher=launcher, nodes_fresh=nodes_fresh, hint_dots=hint_dots, menu=menu, nodes=nodes, nodes_search=nodes_search,
                  nodes_favourites=nodes_favourites, node_trace=node_trace, chat=chat, chat2=chat_cards,
                  chat_emoji=chat_emoji,
                  chat_dm=chat_dm_column, chat_meta=chat_meta, dm_enter=dm_enter, map=map_page, rptr=rptr, rptr_list=rptr_list, rptr_status=rptr_status, rptr_settings=rptr_settings,
                  rptr_confirm=rptr_confirm, settings=settings,
-                 settings_general=settings_general, settings_omlite=settings_omlite,
+                 settings_general=settings_general, settings_wifi=settings_wifi, settings_omlite=settings_omlite,
                  settings_opstoc=settings_opstoc, settings_chat=settings_chat,
                  settings_nodes=settings_nodes, settings_nodes_save=settings_nodes_save,
                  nodes_head_unsaved=nodes_head_unsaved, settings_map=settings_map,

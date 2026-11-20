@@ -30,7 +30,12 @@ int drawPageHead(Screen& s, const char* title, const char* right_text);
 
 // The bottom bar: this page's actions on the left, the six page keys on the right with `active` in gold.
 // S513/EST-435: it also draws the app's ONE notice, just above itself, when one is live — see noticeSet().
-void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_count);
+//
+// S516/EST-480: `compact_page_keys` drops the six page LABELS and keeps the sigils, so one page can afford
+// more action chips without touching the cluster's spacing or any other page's bar. Only the Nodes list sets
+// it: with the labels the cluster starts at x=350 and two of its hints could never be drawn.
+void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_count,
+                 bool compact_page_keys = false);
 
 // One key cap, the hint bar's own style (S514/EST-444): dark plate, 1 px outline, dim ink. The bar's chips and
 // the Chat composer's Enter cap both call this, so "the same key-cap style" is one function, not two lookalikes.

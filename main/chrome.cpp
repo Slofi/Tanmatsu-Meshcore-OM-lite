@@ -492,7 +492,8 @@ void drawEnterKeyCap(Screen& s, int x, int y, int w, int h, uint16_t ink) {
     drawText(s, Face::Hint, gx + gw + 4, textBaseline(s, Face::Hint, y, h), "Enter", ink);
 }
 
-void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_count) {
+void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_count,
+                 bool compact_page_keys) {
     const int W = kTmW, H = kTmH;
 
     // S515/EST-467: the new-message pop-up comes first and WINS over the one notice while it is up. Both are
@@ -535,9 +536,11 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
     // Where the right-hand page-key cluster begins. The LEFT hints are drawn only while they fit before it,
     // so a page's own actions can never push a chip under the sigils. Six keys need tighter gaps than the
     // old five (18 after the name, 14 after the sigil) or the cluster would eat half the bar.
+    // S516/EST-480: with the labels dropped (compact) the same 18/14 gaps are kept, so only the words go and
+    // the sigils keep their even spacing.
     int sx = W - kTmPad;
     for (int i = 5; i >= 0; i--) {
-        const int tw = (hf && hf->ready()) ? hf->textWidth(page_names[i]) : 40;
+        const int tw = (!compact_page_keys && hf && hf->ready()) ? hf->textWidth(page_names[i]) : 0;
         sx -= tw;
         sx -= 18;
         sx -= 14;
@@ -568,9 +571,11 @@ void drawHintBar(Screen& s, tm::Page active, const HintItem* hints, int hint_cou
     const uint8_t dots = g_hint_dots;
     for (int i = 5; i >= 0; i--) {
         const bool on = (static_cast<int>(active) == i);
-        const int  tw = (hf && hf->ready()) ? hf->textWidth(page_names[i]) : 40;
+        const int  tw = (!compact_page_keys && hf && hf->ready()) ? hf->textWidth(page_names[i]) : 0;
         sx -= tw;
-        drawText(s, Face::Hint, sx, bl, page_names[i], on ? (uint16_t)kAccInk : kDimmer);
+        // S516/EST-480: compact keeps the sigils (and the dot) and drops only the words.
+        if (!compact_page_keys)
+            drawText(s, Face::Hint, sx, bl, page_names[i], on ? (uint16_t)kAccInk : kDimmer);
         sx -= 18;
         drawSymbolSigil(s, i, sx, cy, 7, on ? (uint16_t)kAcc : (uint16_t)kDim, on);
         // S515/EST-461: the notification dot, at the sigil's TOP-RIGHT and clear of its gold ring (the ring's

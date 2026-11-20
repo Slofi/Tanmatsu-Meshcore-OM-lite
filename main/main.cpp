@@ -77,6 +77,7 @@ extern "C" {
 #include "audio_out.h"       // S514/EST-450: the one owner of I2S (queue-only, never blocks the UI)
 #include "message_led.h"     // S516/EST-477: the LED task + the two switches and the message colour (NVS)
 #include "message_led_rule.h"   // S516/EST-477: the pure LED rules (modes, colours, register 146, blink)
+#include "wifi_boot.h"          // S516/EST-480: the "Wi-Fi at boot" rule (mcset/wifiboot vs system/ntp)
 #include "tm_theme.h"
 #include "../../firmware/src/ui/theme.h"   // the L2 palette (kBg/kInk/kDim): one source of truth, never copied
 
@@ -148,6 +149,98 @@ static void clearLauncherAutostart() {
     }
     nvs_close(h);
     done = true;
+}
+
+// ---- S516/EST-480: "Wi-Fi at boot" (General) ------------------------------------------------------------
+// The stock launcher connects Wi-Fi at boot ONLY when NVS "system"/"ntp" (u8) is 1; a missing key reads as
+// off (tanmatsu-launcher @ 3ceac92, main/main.c:187 and main/ntp.c:22-49 — the ticket's citation; the source
+// is not mounted in this sandbox). That key is the LAUNCHER'S: we open that one namespace and touch that one
+// key, and only to make it say 0 or 1. OUR choice is "mcset"/"wifiboot" (u8), next to the other General
+// settings, and the Settings row reads THAT, never system/ntp. The decisions are core/wifi_boot.h
+// (host-tested); everything here is only the NVS plumbing and the one log line per start.
+
+bool wifiBootReadStored(tm::wifiboot::Mode* out) {
+    if (out != nullptr) *out = tm::wifiboot::kDefaultMode;
+    nvs_handle_t    h;
+    const esp_err_t o = nvs_open(tm::wifiboot::kNamespace, NVS_READONLY, &h);
+    if (o == ESP_ERR_NVS_NOT_FOUND) return true;   // no namespace = no choice stored = the default, Off
+    if (o != ESP_OK) return false;
+    uint8_t         v = 0;
+    const esp_err_t r = nvs_get_u8(h, tm::wifiboot::kKey, &v);
+    nvs_close(h);
+    if (r == ESP_ERR_NVS_NOT_FOUND) return true;   // no choice stored = the default, Off
+    if (r != ESP_OK) return false;
+    if (out != nullptr) *out = tm::wifiboot::modeFromStored(v);
+    return true;
+}
+
+bool wifiBootWriteStored(tm::wifiboot::Mode m) {
+    nvs_handle_t h;
+    if (nvs_open(tm::wifiboot::kNamespace, NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t r = nvs_set_u8(h, tm::wifiboot::kKey, tm::wifiboot::storedFromMode(m));
+    if (r == ESP_OK) r = nvs_commit(h);
+    nvs_close(h);
+    return r == ESP_OK;
+}
+
+// The launcher's key. present=false covers NOT_FOUND: the launcher already reads a missing key as off, so
+// that is a SUCCESSFUL read. A failed OPEN/read is false — "not visible", never silently "off".
+bool launcherNtpRead(bool* present, uint8_t* value) {
+    if (present != nullptr) *present = false;
+    if (value != nullptr) *value = 0;
+    nvs_handle_t    h;
+    const esp_err_t o = nvs_open(tm::wifiboot::kLauncherNamespace, NVS_READONLY, &h);
+    if (o == ESP_ERR_NVS_NOT_FOUND) return true;   // no namespace = no key = off for the launcher
+    if (o != ESP_OK) return false;
+    uint8_t         v = 0;
+    const esp_err_t r = nvs_get_u8(h, tm::wifiboot::kLauncherKey, &v);
+    nvs_close(h);
+    if (r == ESP_ERR_NVS_NOT_FOUND) return true;
+    if (r != ESP_OK) return false;
+    if (present != nullptr) *present = true;
+    if (value != nullptr) *value = v;
+    return true;
+}
+
+bool launcherNtpWrite(uint8_t v) {
+    nvs_handle_t h;
+    if (nvs_open(tm::wifiboot::kLauncherNamespace, NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t r = nvs_set_u8(h, tm::wifiboot::kLauncherKey, v);
+    if (r == ESP_OK) r = nvs_commit(h);
+    nvs_close(h);
+    return r == ESP_OK;
+}
+
+// Nothing = no write handle at all (the ticket's "write only on a difference").
+bool wifiBootApply(tm::wifiboot::NtpWrite w) {
+    if (w == tm::wifiboot::NtpWrite::Nothing) return true;
+    return launcherNtpWrite(tm::wifiboot::ntpValue(w));
+}
+
+// Called once at EVERY start of OM Lite, right after nvs_flash_init. ONE line either way; a read failure says
+// so instead of pretending the key was off.
+void wifiBootAtStart() {
+    tm::wifiboot::Mode mode = tm::wifiboot::kDefaultMode;
+    if (!wifiBootReadStored(&mode)) ESP_LOGW(TAG, "wifi-at-boot: our setting unreadable, using Off");
+    bool    present = false;
+    uint8_t ntp     = 0;
+    if (!launcherNtpRead(&present, &ntp)) {
+        ESP_LOGW(TAG, "wifi-at-boot: system/ntp unreadable, left alone");
+        return;
+    }
+    const tm::wifiboot::NtpWrite w = tm::wifiboot::startAction(mode, present, ntp);
+    if (w == tm::wifiboot::NtpWrite::Nothing) {
+        if (mode == tm::wifiboot::Mode::On)
+            ESP_LOGI(TAG, "wifi-at-boot: on; system/ntp %s", present ? "left as it is" : "absent, left absent");
+        else
+            ESP_LOGI(TAG, "wifi-at-boot: off; system/ntp %s — no write",
+                     present ? "already 0" : "absent (reads as off)");
+        return;
+    }
+    if (launcherNtpWrite(tm::wifiboot::ntpValue(w)))
+        ESP_LOGI(TAG, "wifi-at-boot: off; system/ntp was %u, wrote 0", (unsigned)ntp);
+    else
+        ESP_LOGW(TAG, "wifi-at-boot: off; writing system/ntp=0 FAILED");
 }
 
 // A fresh C6 for whoever boots next (WadaMesh variants/tanmatsu main.cpp:326-338): without this,
@@ -345,6 +438,8 @@ enum : uint16_t {
     kSetRowPowerLed = 30,
     kSetRowRadioLed,
     kSetRowMessageColour,
+    // S516/EST-480: the WI-FI section. One row: our own stored choice, never the launcher's system/ntp.
+    kSetRowWifiBoot = 40,
 };
 
 static char gset_name[32], gset_pub[32], gset_adv[8], gset_freq[24], gset_bw[16];
@@ -448,6 +543,43 @@ void generalCycleAdvert(tm::Core&, const tm::SettingRow&) {
     if (om::mc::setAdvertIntervalSeconds(tm::advertIntervalSeconds(next))) {
         ESP_LOGI(TAG, "settings: advert interval -> %s", tm::advertIntervalLabel(next));
     }
+}
+
+// ---- S516/EST-480: the WI-FI section ----------------------------------------------------------------
+// The value is OUR stored choice (mcset/wifiboot), never the launcher's key: system/ntp can still be 1
+// until a start with Off, and that must not make the row lie about what OM Lite will do.
+const char* gsetWifiAtBoot(tm::Core&) {
+    tm::wifiboot::Mode m = tm::wifiboot::kDefaultMode;
+    wifiBootReadStored(&m);
+    return tm::wifiboot::modeLabel(m);
+}
+
+// Shown only while Off: the sentence starts with "Off:" and explains what Off means. Measured on the real
+// Meta face (sans_meta12.bin): 594 px from x=119, so it ends 46 px before the right-aligned "Off".
+const char* gsetWifiAtBootHint(tm::Core&) {
+    tm::wifiboot::Mode m = tm::wifiboot::kDefaultMode;
+    wifiBootReadStored(&m);
+    return m == tm::wifiboot::Mode::Off
+               ? "Off: the stock launcher does not connect at start; its store and updates still connect when opened"
+               : "";
+}
+
+void generalToggleWifiAtBoot(tm::Core&, const tm::SettingRow&) {
+    tm::wifiboot::Mode cur = tm::wifiboot::kDefaultMode;
+    wifiBootReadStored(&cur);
+    const tm::wifiboot::Mode next = tm::wifiboot::modeToggle(cur);
+    // The launcher's key FIRST: if that write fails, our UI must not claim a mode the key did not get.
+    if (!wifiBootApply(tm::wifiboot::switchAction(next))) {
+        om::ui::noticeSet("Launcher Wi-Fi key not written", 3000);
+        ESP_LOGW(TAG, "settings: wifi-at-boot -> %s: system/ntp write FAILED", tm::wifiboot::modeLabel(next));
+        return;
+    }
+    if (!wifiBootWriteStored(next)) {
+        om::ui::noticeSet("Wi-Fi setting not saved", 3000);
+        return;
+    }
+    ESP_LOGI(TAG, "settings: wifi-at-boot -> %s; system/ntp = %u", tm::wifiboot::modeLabel(next),
+             (unsigned)tm::wifiboot::ntpValue(tm::wifiboot::switchAction(next)));
 }
 
 // S514/EST-450: the SOUND section. Every value is read from the live store (sound_store), never from a
@@ -591,6 +723,12 @@ static const tm::SettingRow kGeneralLedRows[] = {
     {tm::SettingKind::Cycle, kSetRowMessageColour, "Message LED colour", "", gsetMessageColour,
      generalCycleMessageColour},
 };
+static const tm::SettingRow kGeneralWifiRows[] = {
+    // S516/EST-480: one row, DEFAULT Off. The hint is the ticket's sentence, shown only while Off (it starts
+    // with "Off:"); On shows none. 594 px on the real Meta face, clear of the right-aligned value.
+    {tm::SettingKind::Toggle, kSetRowWifiBoot, "Wi-Fi at boot", "", gsetWifiAtBoot, generalToggleWifiAtBoot,
+     false, gsetWifiAtBootHint},
+};
 static const tm::SettingRow kGeneralRadioRows[] = {
     {tm::SettingKind::Info, 0, "Frequency", "", gsetFrequency, nullptr},
     {tm::SettingKind::Info, 0, "Bandwidth", "", gsetBandwidth, nullptr},
@@ -610,13 +748,16 @@ static const tm::SettingRow kGeneralDeviceRows[] = {
 static const tm::SettingsSection kGeneralSections[] = {
     {"NODE", kGeneralNodeRows, 3},
     {"ADVERT", kGeneralAdvertRows, 1},
+    // S516/EST-480: its own small section — Wi-Fi is not part of the mesh radio, so it must not sit under
+    // RADIO (READ ONLY) or among the sound/LED rows.
+    {"WI-FI", kGeneralWifiRows, 1},
     {"SOUND", kGeneralSoundRows,
      (int)(sizeof(kGeneralSoundRows) / sizeof(kGeneralSoundRows[0]))},
     {"LED", kGeneralLedRows, (int)(sizeof(kGeneralLedRows) / sizeof(kGeneralLedRows[0]))},
     {"RADIO (READ ONLY)", kGeneralRadioRows, 6},
     {"DEVICE (READ ONLY)", kGeneralDeviceRows, 6},
 };
-constexpr int kGeneralSectionCount = 6;
+constexpr int kGeneralSectionCount = 7;
 
 // The CORE's General tab. Not a module: the shell owns it, exactly as the L2's General does.
 const tm::SettingsSection* generalSettings(int* count) {
@@ -1363,6 +1504,9 @@ extern "C" void app_main(void) {
         if (r != ESP_OK) ESP_LOGW(TAG, "nvs_flash_init: %s", esp_err_to_name(r));
     }
     clearLauncherAutostart();   // Filip S499: no autostart, ever — every boot shows the menu
+    // S516/EST-480: our "Wi-Fi at boot" choice. Off writes system/ntp=0 ONLY on a real difference (the
+    // launcher already reads a missing key as off); On leaves the launcher's key alone. One log line either way.
+    wifiBootAtStart();
     meshcoreSelfTest();         // step 3b: the wire codec must produce the same bytes as the host/Python
 
     // ---- badge-bsp: display, input, power. This is what an AppFS app inherits; the launcher's own VFS
