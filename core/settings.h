@@ -711,6 +711,6 @@ constexpr bool advertScheduleDue(uint32_t interval_s, uint32_t elapsed_s, bool e
 }
 
 // The image's version, shown in General > DEVICE. One constant: the next ticket bumps this line.
-constexpr const char* kAppVersion = "79";   // S516 (Claude): Left/Right hint chips drawn as arrows
+constexpr const char* kAppVersion = "80";   // S516 (Claude): page keys use the stock launcher icon shapes
 
 }  // namespace tm

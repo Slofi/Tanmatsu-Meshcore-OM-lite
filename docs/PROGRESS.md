@@ -15,6 +15,10 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## S516 (Claude) v80: the page keys use the stock launcher's icon shapes
+
+Filip (23:3x): *"default launcher has a set of F-keys icons, look at those, specially the 'cloud' one, it looks better than our one.."*, then *"yes, shapes only, adjusted to our size"*. The stock icons (`tanmatsu-launcher` @ `3ceac92`, `fat/tanmatsu/icons/f1-f6.png`, 32x32, MIT) were box-filtered by their alpha to 16x16 coverage masks (`main/fkey_icons.h`, generated with Pillow, 1,536 B); `drawSymbolSigil()` blends them in our ink at the hint bar's size (r = 7, only the Launcher shows them since v78) and keeps the drawn shapes for any other size. The cloud is the stock trefoil. Suite exit 0, build exit 0.
+
 ## S516 (Claude) v79: Left/Right hint chips drawn as arrows
 
 Filip (23:3x): *"Node page has < > in the tips bar, and Chat has l/r there.. change both to arrows pls.."*. The hint face (`sans_hint11.bin`) has no U+2190/2192 (checked in its glyph table, nor U+2194/2191/2193/21B5), so `drawKeyCap()` draws a chip labelled "l/r" or "<>" as two filled triangles (5 px half-height, tips 18 px apart), like the Enter cap's drawn return arrow. Applies to every page that uses such a chip (Nodes, Chat, Launcher, RPTR, Settings). Suite exit 0, build exit 0.

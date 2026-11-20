@@ -9,6 +9,7 @@
 
 #include "launcher_page.h"   // textBaseline / drawText* — the one place the baseline math lives
 #include "chat_layout.h"     // S516: the UTF-8-safe wrapper the pop-up reuses (host-tested)
+#include "fkey_icons.h"      // S516: the stock launcher's F-key shapes, 16x16
 #include "chat_mentions.h"   // S516/EST-481: the pop-up shows the DRAWN "@Name" (brackets hidden)
 #include "nodes_fresh.h"      // S515/EST-461: the dot mask's bits (GLOBAL scope: see the note below)
 #include "volume_popup.h"    // S516/EST-478: the volume pop-up's text and placement (pure, host-tested)
@@ -365,6 +366,14 @@ void drawNodeStatusIcon(Screen& s, int cx, int cy, uint16_t c) {
 // The six page keys, drawn as vectors (BRIEF § 5; the preview tool's recipes, ported).
 // Cloud is an OUTLINE like the others (Filip, S499 "fix the cloud symbol").
 void drawSymbolSigil(Screen& s, int kind, int cx, int cy, int r, uint16_t c, bool active) {
+    // S516 (Claude): at the hint bar's size (r = 7) the six keys use the stock launcher's own icon shapes
+    // (main/fkey_icons.h, 16x16 coverage), blended in our ink; any other size keeps the drawn shapes below.
+    if (r == 7 && kind >= 0 && kind < 6) {
+        s.maskBlend(cx - kFKeyIconSize / 2, cy - kFKeyIconSize / 2, kFKeyIconSize, kFKeyIconSize,
+                    kFKeyIcons[kind], c);
+        (void)active;
+        return;
+    }
     switch (kind) {
         case 0: {  // X = the F1 key (S516/EST-478)
             const int a = r - 1;
