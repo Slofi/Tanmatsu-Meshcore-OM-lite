@@ -249,16 +249,16 @@ void test_node_by_name_ignores_a_prefix_only_row() {
 // ---- the reply prefix ---------------------------------------------------------------------------------------
 void test_reply_prefix() {
     char buf[40];
-    // The MeshCore apps' form: "@Name " with ONE space after the name (firmware/src/main.cpp:1175).
-    CHECK_EQ(om::ui::chatReplyPrefix(buf, sizeof(buf), "TEST-A1"), 9);
-    CHECK_STR(buf, "@TEST-A1 ");
+    // S516/EST-481: the MeshCore form is "@[Name] " — one space after the closing ']' (OverMesh replyToMc).
+    CHECK_EQ(om::ui::chatReplyPrefix(buf, sizeof(buf), "TEST-A1"), 11);
+    CHECK_STR(buf, "@[TEST-A1] ");
     CHECK_EQ(om::ui::chatReplyPrefix(buf, sizeof(buf), ""), 0);
-    CHECK_STR(buf, "");                         // nothing to address: no stray "@ "
+    CHECK_STR(buf, "");                         // nothing to address: no stray "@[] "
     CHECK_EQ(om::ui::chatReplyPrefix(buf, sizeof(buf), nullptr), 0);
-    // A tiny buffer is truncated with a NUL, never overrun.
+    // A tiny buffer that cannot hold the WHOLE prefix writes NOTHING (a cut name would mention the wrong node).
     char small[5];
-    CHECK_EQ(om::ui::chatReplyPrefix(small, sizeof(small), "TEST-A1"), 4);
-    CHECK_STR(small, "@TES");
+    CHECK_EQ(om::ui::chatReplyPrefix(small, sizeof(small), "TEST-A1"), 0);
+    CHECK_STR(small, "");
 }
 
 // ---- the Info sheet ----------------------------------------------------------------------------------------

@@ -15,6 +15,8 @@
 #include "chat_layout.h"   // mc::Line / kMaxLines: the wrap the view carries (S503)
 #include "chat_meta.h"     // S515/EST-462: kChatMetaCap + the head-line pixel arithmetic
 #include "chat_select.h"   // S515/EST-469: the selection, the message menu's rows and the Info sheet's lines
+#include "chat_mentions.h"      // S516/EST-481: the "@Name" drawn form and its accent spans
+#include "chat_mention_edit.h"  // S516/EST-481: the composer's mention mode and the picker's rows
 #include "mc_store.h"
 #include "screen.h"
 #include "tm_theme.h"
@@ -108,12 +110,26 @@ struct ChatView {
         uint8_t     line_count;
         bool        clipped;                  // the text did not fit: the last line is drawn with an ellipsis
         mc::Line    line[mc::kMaxLines];
+        // S516/EST-481: `text` above is the DRAWN form (an "@[Name]" token already reads "@Name"), built by
+        // core/chat_mentions.* from the stored text. These spans are byte ranges INTO `text` — the '@' plus the
+        // name — so drawMsgLine can put the accent colour on exactly them. The stored message (the ring, the card
+        // log, Info) is never touched.
+        uint8_t     mention_count;
+        MentionSpan mention[om::ui::kMentionMaxSpans];
     } msgs[kChatRows];
     // How much older history the window leaves out, for the two indicators. `hidden_below` is >0 only when the
     // user has scrolled back: the newest messages are then below the window, not shown.
     int hidden_above = 0;
     int hidden_below = 0;
     const char* composer = "";
+    // S516/EST-481: the composer's mention mode and the name picker. `mention_active` = the draft's tail is
+    // "@[typed]" and the caret sits before the auto ']'; `mention_pick` = the suggestion pop-up is up (Esc closes
+    // it without leaving the draft). The rows are COPIES taken out of the node table under StoreLock.
+    bool        mention_active = false;
+    bool        mention_pick   = false;
+    int         mention_focus  = 0;
+    int         mention_count  = 0;
+    MentionRow  mention_rows[om::ui::kMentionPickRows];
     // S513: a transient line that replaces the head's right-hand status while it is set ("radio busy, not sent").
     // It lives in the same slot as "N messages" so the composer and the message list keep their geometry.
     const char* notice = nullptr;

@@ -19,6 +19,8 @@ TXQ="$(mktemp /tmp/tm-txq.XXXXXX)"
 CARDS="$(mktemp /tmp/tm-cards.XXXXXX)"
 META="$(mktemp /tmp/tm-chat-meta.XXXXXX)"
 SELECT="$(mktemp /tmp/tm-chat-select.XXXXXX)"
+MENTIONS="$(mktemp /tmp/tm-chat-mentions.XXXXXX)"
+MENTIONSASAN="$(mktemp /tmp/tm-chat-mentions-asan.XXXXXX)"
 MENU="$(mktemp /tmp/tm-menu.XXXXXX)"
 DM="$(mktemp /tmp/tm-dm.XXXXXX)"
 ADV="$(mktemp /tmp/tm-advert.XXXXXX)"
@@ -55,7 +57,7 @@ RPTRED="$(mktemp -d /tmp/tm-rptr-ed.XXXXXX)"
 CHANORACLE="$(mktemp -d /tmp/tm-chan-oracle.XXXXXX)"
 ED="$(mktemp -d /tmp/tm-ed25519.XXXXXX)"
 EDASAN="$(mktemp -d /tmp/tm-ed25519-asan.XXXXXX)"
-trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$VOLUME" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN" "$NODEVIEW" "$NODESMAPN" "$MSGPOPUP" "$MSGLED" "$WIFIBOOT" "$SELECT"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
+trap 'rm -f "$CORE" "$MC" "$CLK" "$STORE" "$HIST" "$LAYOUT" "$MAP" "$TXQ" "$CARDS" "$META" "$MENU" "$DM" "$ADV" "$MCASAN" "$DMASAN" "$DMSEND" "$DMSENDASAN" "$CONTACT" "$SCOPE" "$GUARD" "$SET" "$CHANADMIN" "$NODESMAP" "$NODESSEARCH" "$NODEMENU" "$SOUND" "$VOLUME" "$RPTR" "$RPTRASAN" "$NODEOPS" "$NODEOPSASAN" "$EMOJI" "$NODESFRESH" "$NODESFRESHASAN" "$NODETABLE" "$NODESTORE" "$NODESTOREASAN" "$NODEVIEW" "$NODESMAPN" "$MSGPOPUP" "$MSGLED" "$WIFIBOOT" "$SELECT" "$MENTIONS" "$MENTIONSASAN"; rm -rf "$ED" "$EDASAN" "$RPTRED" "$CHANORACLE"' EXIT
 
 # -O2 and -Werror matter: the device build is stricter, so a host build must not be looser.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
@@ -210,9 +212,28 @@ g++ -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
 # "not kept after a restart" for what a restored record does not carry.
 "$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
     test_chat_select.cpp \
-    ../../core/chat_select.cpp ../../core/chat_meta.cpp ../../core/mc_store.cpp \
+    ../../core/chat_select.cpp ../../core/chat_meta.cpp ../../core/chat_mentions.cpp ../../core/mc_store.cpp \
     -o "$SELECT"
 "$SELECT"
+
+# S516/EST-481: the MeshCore "@[Name]" mentions — the reply prefix and its OverMesh cleaning, the token finder
+# under Filip's position rule (start of text or after a space, never "a@b"), the "mentions you" match in both
+# forms (exact name, ASCII case-insensitive, a name with spaces/parentheses), the drawn form (brackets hidden, the
+# spans the drawer colours, the stored text untouched), and the composer's keystroke rules + the picker's ranking.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O2 -I ../../core \
+    test_chat_mentions.cpp \
+    ../../core/chat_mentions.cpp \
+    -o "$MENTIONS"
+"$MENTIONS"
+
+# …and the same SUITE under AddressSanitizer + UBSan: these are the parsers that walk a message's bytes (unclosed
+# brackets, a UTF-8 name cut by a small buffer, the draft's tail arithmetic), so an off-by-one must be a red test.
+"$CXX" -std=c++17 -Wall -Wextra -Werror -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+    -I ../../core \
+    test_chat_mentions.cpp \
+    ../../core/chat_mentions.cpp \
+    -o "$MENTIONSASAN"
+ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 "$MENTIONSASAN"
 
 # The start menu's rules (S513/EST-432): three app cards, focus clamped at both ends, Enter on an available
 # card vs a LATER one, and s only on a running card. The panel has no second area any more (the S499 two-area

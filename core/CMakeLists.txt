@@ -24,6 +24,10 @@ idf_component_register(
          # sheet's lines. Pure, so the box's index rules (by seq) and "a name shared by two nodes names nobody" are
          # host tests rather than something the glass has to teach us.
          "chat_select.cpp"
+         # S516/EST-481: the MeshCore "@[Name]" mentions — the reply form and its OverMesh cleaning, the token
+         # finder under Filip's position rule, "mentions you", the drawn form the chat colours, and the composer's
+         # keystroke rules + the picker's ranking. Pure, so every one of those is a host test.
+         "chat_mentions.cpp"
          # S513/EST-430: the Chat list's two-column card grid — the rects, the focus moves and the scroll that keeps
          # the focused card visible. Pure arithmetic on the page's box, so the host tests pin the panel's numbers.
          "chat_cards.cpp"

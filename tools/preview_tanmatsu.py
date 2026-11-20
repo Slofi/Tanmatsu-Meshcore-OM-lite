@@ -3485,6 +3485,160 @@ def chat_msg_info():
     return save(img, '2026-11-19-chat-msg-info.png')
 
 
+
+
+# --------------------------------------------------- @[Name] mentions (S516/EST-481)
+# The device's own drawn form: the stored "@[Name]" loses its brackets and the "@Name" is drawn in the accent
+# (core/chat_mentions.cpp), so the preview shows what the panel draws, not what the frame carries.
+MENTION_THREAD = [
+    ('09:12', 'Alpha', [('@Beta', 'm'), (' can you check the north repeater?', 'i')],
+     '2 hops \u00b7 94 B'),
+    ('09:14', 'Beta', [('@TNMT (SI)', 'm'), (' yes, path 3 now instead of 4.', 'i')],
+     'direct \u00b7 87 B'),
+    ('09:16', 'you', [('Got it, thanks.', 'i')], '87 B \u00b7 repeated 2\u00d7'),
+]
+
+
+def _segments(d, x, y, segs, f, right=None):
+    """One body line, piece by piece: the mention pieces in the accent colour, the rest in ink (the same split
+    main/chat_page.cpp::drawMsgLine makes with core/chat_mentions.cpp's spans). `right` = the right edge for our
+    own lines; None = left-aligned at x."""
+    total = sum(tw(f, t) for t, _ in segs)
+    cx = (right - total) if right is not None else x
+    for t, kind in segs:
+        text(d, (cx, y), t, f, P['Acc'] if kind == 'm' else P['Ink'])
+        cx += tw(f, t)
+
+
+def _mention_page():
+    """The open channel with @[Name] mentions drawn the MeshCore way. Returns (img, d, composer_top)."""
+    W, H, pad = TM['W'], TM['H'], TM['pad']
+    img, d = new_screen()
+    status_bar(d)
+    y = TM['status_h']
+    text(d, (pad, y + TM['head_h'] // 2), 'Chat', font(FONT_SANS, TM['f_title']), P['Ink'], anchor='lm')
+    text(d, (W - pad, y + TM['head_h'] // 2), '%d messages' % len(MENTION_THREAD),
+         font(FONT_MONO, TM['f_meta']), P['Dimmer'], anchor='rm')
+    hline(d, 0, W, y + TM['head_h'], P['Line'])
+    work_top = y + TM['head_h']
+    text(d, (pad, work_top + 18), '# Test Channel', font(FONT_SANS, 20), P['Ink'])
+
+    left_x = pad + 58                # kTmChatBodyX0
+    right_x = W - pad - 46           # kTmChatBodyX1
+    fstamp = font(FONT_MONO, TM['f_meta'])
+    fname = font(FONT_SANS, TM['f_body'])
+    fmeta = font(FONT_MONO, TM['f_meta'])
+    fbody = font(FONT_SANS, TM['f_body'])
+    ages = ['12m', '10m', 'now']
+    yy = work_top + 40
+    for (stamp, who, segs, meta), age in zip(MENTION_THREAD, ages):
+        mine = (who == 'you')
+        text(d, (pad + 4, yy), stamp, fstamp, P['Dimmer'])
+        if mine:
+            text(d, (right_x, yy), 'you', fmeta, P['Dim'], anchor='ra')
+            if meta:
+                text(d, (right_x - tw(fmeta, 'you') - 10, yy), meta, fmeta, P['Dimmer'], anchor='ra')
+        else:
+            text(d, (left_x, yy), who, fname, P['Acc'])
+            if meta:
+                text(d, (left_x + tw(fname, who) + 10, yy), meta, fmeta, P['Dimmer'])
+        text(d, (W - pad, yy), age, fstamp, P['Dimmer'], anchor='ra')
+        yy += 19
+        _segments(d, left_x, yy, segs, fbody, right=right_x if mine else None)
+        yy += 19 + 7
+
+    ch = H - TM['hint_h'] - 56
+    plate(d, [pad, ch, W - pad, ch + 44], P['FieldBg'], P['Line'], r=4)
+    text(d, (pad + 12, ch + 22), 'message the channel, Enter sends', font(FONT_MONO, TM['f_meta']),
+         P['Dimmer'], anchor='lm')
+    key_cap(d, [W - pad - 84, ch + 8, W - pad - 8, ch + 36], '\u21b5 Enter', P['Dimmer'],
+            font(FONT_SANS, TM['f_hint']))
+    return img, d, ch
+
+
+def chat_mentions():
+    """S516/EST-481 shot 1: an @[Beta] and an @[TNMT (SI)] drawn as @Beta / @TNMT (SI) in the accent, and the
+    new-message pop-up saying "mentions you". The stored text keeps its brackets; only the DRAWING loses them.
+    """
+    img, d, _ = _mention_page()
+    hint_bar(d, 'chat', [('Enter', 'send'), ('esc', 'back'), ('type', 'write')])
+
+    # The chrome pop-up, drawn exactly like main/chrome.cpp::drawMessagePopup (560 px, centred, gold outline).
+    pw = 560
+    head = '#Test Channel \u00b7 Beta \u00b7 mentions you'
+    msg = '@TNMT (SI) yes, path 3 now instead of 4.'   # the pop-up draws the DRAWN form too (chrome.cpp)
+    ft = font(FONT_SANS, TM['f_title'])
+    fb = font(FONT_SANS, TM['f_body'])
+    maxw = pw - 48
+    words = msg.split(' ')
+    lines, cur = [], ''
+    for wd in words:
+        trial = wd if not cur else cur + ' ' + wd
+        if tw(fb, trial) <= maxw:
+            cur = trial
+        else:
+            if cur:
+                lines.append(cur)
+            cur = wd
+    if cur:
+        lines.append(cur)
+    ph = 20 + 26 + len(lines) * 22 + 16
+    px, py = (TM['W'] - pw) // 2, (TM['H'] - ph) // 2
+    d.rounded_rectangle([px, py, px + pw, py + ph], radius=8, fill=P['Panel2'], outline=P['Acc'], width=2)
+    text(d, (px + 24, py + 22), head, ft, P['AccInk'], anchor='lm')
+    ly = py + 40
+    for ln in lines:
+        text(d, (px + 24, ly + 10), ln, fb, P['Ink'], anchor='lm')
+        ly += 22
+    return save(img, '2026-11-20-chat-mentions.png')
+
+
+PICK_ROWS = [('Alpha', 'fav'), ('Alpha-2', 'radio'), ('ALPINE-RPT', 'radio'), ('Alpha-Sensor', '')]
+
+
+def mention_picker():
+    """S516/EST-481 shot 2: the composer in mention mode. The draft is "... @[Al]" with the caret BETWEEN the
+    brackets (the auto ']' is waiting), and the suggestion pop-up above the composer lists the nodes whose names
+    contain "Al": favourites first, then radio, then the rest, with a short tag on the right.
+    """
+    img, d, ch = _mention_page()
+    pad, W = TM['pad'], TM['W']
+    fbody = font(FONT_SANS, TM['f_body'])
+    fhint = font(FONT_SANS, TM['f_hint'])
+
+    # The composer is NOT empty in mention mode: repaint the field over the page's placeholder line first, so
+    # the preview draws what the device draws (the placeholder is only for an empty draft).
+    plate(d, [pad, ch, W - pad, ch + 44], P['FieldBg'], P['Line'], r=4)
+
+    # the draft, with the caret just before the closing ']'
+    draft = 'hello @[Al]'
+    text(d, (pad + 12, ch + 22), draft, font(FONT_MONO, TM['f_meta']), P['Ink'], anchor='lm')
+    caret_x = pad + 12 + tw(font(FONT_MONO, TM['f_meta']), 'hello @[Al') + 3
+    d.rectangle([caret_x, ch + 12, caret_x + 1, ch + 32], fill=P['Acc'])
+    key_cap(d, [W - pad - 84, ch + 8, W - pad - 8, ch + 36], '\u21b5 Enter', P['Dim'],
+            font(FONT_SANS, TM['f_hint']))
+
+    # the pop-up: 460 px, 30 px rows, just above the composer (main/chat_page.cpp::drawMentionPicker)
+    row_h, spad, pw, x0 = 30, 8, 460, pad
+    ph = 2 * spad + len(PICK_ROWS) * row_h
+    y1 = ch - 6
+    y0 = y1 - ph
+    plate(d, [x0, y0, x0 + pw, y0 + ph], P['Panel'], P['Acc'], r=0, w=2)
+    for i, (name, tag) in enumerate(PICK_ROWS):
+        ry = y0 + spad + i * row_h
+        if i == 0:
+            focus_band(d, x0 + 6, x0 + pw - 6, ry + 1, ry + row_h - 3)
+        text(d, (x0 + 16, ry + row_h // 2), name, font(FONT_SANS, TM['f_row']),
+             P['AccInk'] if i == 0 else P['Ink'], anchor='lm')
+        if tag:
+            text(d, (x0 + pw - 16, ry + row_h // 2), tag, fhint,
+                 P['AccInk'] if i == 0 else P['Dim'], anchor='rm')
+        if i + 1 < len(PICK_ROWS):
+            hline(d, x0 + 8, x0 + pw - 8, ry + row_h - 1, P['RowLine'])
+    hint_bar(d, 'chat', [('up/dn', 'choose'), ('Enter', 'pick'), ('esc', 'close')])
+    return save(img, '2026-11-20-mention-picker.png')
+
+
 RENDERERS = dict(chat_select=chat_select, chat_msg_menu=chat_msg_menu, chat_msg_info=chat_msg_info, map_nodes_z12=map_nodes_z12, map_nodes_z14=map_nodes_z14, nodes_views=nodes_views, nodes_hints=nodes_hints, nodes_sd_wording=nodes_sd_wording, node_menu_radio=node_menu_radio, launcher=launcher, nodes_fresh=nodes_fresh, hint_dots=hint_dots, menu=menu, nodes=nodes, nodes_search=nodes_search,
                  nodes_favourites=nodes_favourites, node_trace=node_trace, chat=chat, chat2=chat_cards,
                  chat_emoji=chat_emoji,
@@ -3496,7 +3650,8 @@ RENDERERS = dict(chat_select=chat_select, chat_msg_menu=chat_msg_menu, chat_msg_
                  nodes_head_unsaved=nodes_head_unsaved, settings_map=settings_map,
                  settings_sound=settings_sound, settings_led=settings_led,
                  settings_sound_picker=settings_sound_picker, popup_msg=popup_msg,
-                 hintbar_keys=hintbar_keys, volume_popup=volume_popup)
+                 hintbar_keys=hintbar_keys, volume_popup=volume_popup,
+                 chat_mentions=chat_mentions, mention_picker=mention_picker)
 
 
 def main(argv):

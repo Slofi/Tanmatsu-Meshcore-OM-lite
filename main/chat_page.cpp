@@ -49,7 +49,8 @@ void drawChatCard(Screen& s, const ChatRowView& r, const mc::CardRect& rect, boo
 // helpers take C strings. A line whose message was cut gets a plain "..." — the font subset has no ellipsis
 // glyph, and a row that ends mid-sentence with nothing after it reads like a bug.
 void drawMsgLine(Screen& s, Face face, int x, int baseline, int max_w, const char* text, const mc::Line& ln,
-                 bool cut, uint16_t colour, bool right) {
+                 bool cut, uint16_t colour, bool right, const MentionSpan* spans, int span_count,
+                 uint16_t mention_colour) {
     char   buf[mc::kTextBytes + 4];
     size_t n = ln.len;
     if (n > sizeof(buf) - 4) n = sizeof(buf) - 4;
@@ -60,11 +61,44 @@ void drawMsgLine(Screen& s, Face face, int x, int baseline, int max_w, const cha
         buf[n++] = '.';
     }
     buf[n] = '\0';
-    if (right) {
-        drawTextRightClipped(s, face, x, baseline, max_w, buf, colour);
-    } else {
-        drawTextClipped(s, face, x, baseline, max_w, buf, colour);
+
+    const Font* f = fontFor(face);
+    if (spans == nullptr || span_count <= 0 || f == nullptr || !f->ready()) {
+        if (right) {
+            drawTextRightClipped(s, face, x, baseline, max_w, buf, colour);
+        } else {
+            drawTextClipped(s, face, x, baseline, max_w, buf, colour);
+        }
+        return;
     }
+
+    // S516/EST-481: the line carries mention spans (byte ranges in the DRAWN text, which `text` already is).
+    // The pieces are drawn one after another at the font's own advance widths, so the accent starts and stops
+    // on the mention's exact bytes. The wrap is measured over this SAME drawn text (main.cpp), so the line fits
+    // exactly as measured: the hidden brackets cannot shift a break the drawing does not also have.
+    int    cx = right ? (x - f->textWidth(buf)) : x;
+    size_t at = 0;
+    auto   piece = [&](size_t a, size_t b, uint16_t ink) {
+        if (b <= a) return;
+        char seg[mc::kTextBytes + 4];
+        size_t m = b - a;
+        if (m > sizeof(seg) - 1) m = sizeof(seg) - 1;
+        memcpy(seg, buf + a, m);
+        seg[m] = '\0';
+        drawTextClipped(s, face, cx, baseline, max_w, seg, ink);
+        cx += f->textWidth(seg);
+    };
+    for (int i = 0; i < span_count; ++i) {
+        const long lo = (long)spans[i].start - (long)ln.start;
+        const long hi = lo + (long)spans[i].len;
+        if (hi <= 0 || lo >= (long)n) continue;
+        const size_t a = (size_t)(lo < 0 ? 0 : lo);
+        const size_t b = (size_t)(hi > (long)n ? (long)n : hi);
+        if (a > at) piece(at, a, colour);
+        piece(a, b, mention_colour);
+        at = b;
+    }
+    if (at < n) piece(at, n, colour);
 }
 
 // --------------------------------------------------------------------------------- the message sheets (S515/EST-469)
@@ -115,6 +149,44 @@ void drawChatSheet(Screen& s, const char* title, const char* sub, const SheetLin
                           r.dim ? (uint16_t)kDimmer : (uint16_t)kDim);
         if (i + 1 < count) s.hline(x0 + 8, x1 - 8, ry + row_h - 1, kRowLine);
         ry += row_h;
+    }
+}
+
+// --------------------------------------------------------------------- the name picker (S516/EST-481)
+// The suggestion pop-up sits just ABOVE the composer (Filip: "suggestion is a pop-up window with nodes matching
+// already typed letters"). It is NOT modal: the composer keeps the caret between the brackets and every key still
+// goes to the composer's mention mode. Each row is the name and a short tag (fav / radio); a plain SD/session row
+// carries no tag. The house focus look is the selection box's: kSelBg inside a 2 px gold ring.
+void drawMentionPicker(Screen& s, const ChatView& v, int composer_top) {
+    if (!v.mention_pick || v.mention_count <= 0) return;
+    const int row_h = 30;
+    const int pad   = 8;
+    const int pw    = 460;
+    const int x0    = kTmPad;
+    int       count = v.mention_count;
+    if (count > om::ui::kMentionPickRows) count = om::ui::kMentionPickRows;
+    const int ph = 2 * pad + count * row_h;
+    int       y1 = composer_top - 6;
+    int       y0 = y1 - ph;
+    if (y0 < kTmChatTop) y0 = kTmChatTop;   // never over the page's title line
+
+    s.fillRect(x0, y0, pw, ph, kPanel);
+    s.frame(x0, y0, pw, ph, 2, kAcc);
+    for (int i = 0; i < count; ++i) {
+        const MentionRow& r  = v.mention_rows[i];
+        const int         ry = y0 + pad + i * row_h;
+        const bool        on = (i == v.mention_focus);
+        if (on) {
+            s.fillRect(x0 + 6, ry + 1, pw - 12, row_h - 3, kSelBg);
+            s.frame(x0 + 6, ry + 1, pw - 12, row_h - 3, kTmRingW, kAcc);
+        }
+        drawTextClipped(s, Face::Row, x0 + 16, textBaseline(s, Face::Row, ry, row_h), pw - 120, r.name,
+                        on ? (uint16_t)kAccInk : (uint16_t)kInk);
+        const char* tag = r.favourite ? "fav" : (r.in_radio ? "radio" : "");
+        if (tag[0] != '\0')
+            drawTextRight(s, Face::Hint, x0 + pw - 16, textBaseline(s, Face::Hint, ry, row_h), tag,
+                          on ? (uint16_t)kAccInk : (uint16_t)kDim);
+        if (i + 1 < count) s.hline(x0 + 8, x0 + pw - 8, ry + row_h - 1, kRowLine);
     }
 }
 
@@ -278,7 +350,7 @@ void drawChat(Screen& s, const ChatView& v) {
                 const bool lastCut = m.clipped && (l == lines - 1);
                 drawMsgLine(s, Face::Body, m.outgoing ? right_x : left_x,
                             textBaseline(s, Face::Body, by, kTmChatLineH + 4), right_x - left_x, m.text, m.line[l],
-                            lastCut, kInk, m.outgoing);
+                            lastCut, kInk, m.outgoing, m.mention, m.mention_count, kAcc);
             }
             y += kTmChatHeadH + lines * kTmChatLineH + kTmChatGapH;
         }
@@ -297,16 +369,32 @@ void drawChat(Screen& s, const ChatView& v) {
         s.frame(kTmPad, cy0, W - 2 * kTmPad, kTmChatComposerH, 1, kLine);
         const int  bl    = textBaseline(s, Face::Body, cy0, kTmChatComposerH);
         const bool empty = (v.composer == nullptr || v.composer[0] == '\0');
+        // S516 (Claude, review of EST-481): in mention mode the draft ends in the auto ']' and the caret sits
+        // just before it. Drawn as three parts (text before the caret, the caret, then the ']' moved 4 px right)
+        // because a caret drawn over the text covered the bracket's thin stroke: "@[Al" read as if the ']'
+        // were missing.
+        const Font*  f       = fontFor(Face::Body);
+        const size_t clen    = empty ? 0 : strlen(v.composer);
+        const bool   split   = !empty && v.mention_active && clen > 0 && v.composer[clen - 1] == ']';
+        static char  before[256];
+        if (split) {
+            const size_t k = (clen - 1 < sizeof(before) - 1) ? clen - 1 : sizeof(before) - 1;
+            memcpy(before, v.composer, k);
+            before[k] = '\0';
+        }
         drawText(s, Face::Body, kTmPad + 12, bl,
                  empty ? (v.dm_open ? "message this contact, Enter sends" : "message the channel, Enter sends")
-                       : v.composer,
+                       : (split ? before : v.composer),
                  empty ? (uint16_t)kDimmer : (uint16_t)kInk);
         if (!empty) {
-            const Font* f = fontFor(Face::Body);
-            const int   tw = (f && f->ready()) ? f->textWidth(v.composer) : 0;
-            const int   cx = kTmPad + 12 + tw + 3;
+            const int tw = (f && f->ready()) ? f->textWidth(split ? before : v.composer) : 0;
+            const int cx = kTmPad + 12 + tw + (split ? 2 : 3);
             s.fillRect(cx, cy0 + 12, 2, kTmChatComposerH - 24, kAcc);   // caret
+            if (split) drawText(s, Face::Body, cx + 4, bl, "]", kInk);
         }
+        // S516/EST-481: the suggestion pop-up sits just above the composer, so the pick and the draft are read
+        // together. Drawn before the key caps so the caps stay on top of nothing important.
+        drawMentionPicker(s, v, cy0);
         // S514/EST-444 (Filip): no filled "Send" button — the physical key is named in the hint bar's own cap
         // style, "↵ Enter". Empty draft = dim, text = normal ink; Enter sends exactly as before.
         const int bw = 76, bh = 26;
@@ -347,6 +435,9 @@ void drawChat(Screen& s, const ChatView& v) {
     static const HintItem hints_sel[]  = {{"up/dn", "move"}, {"Enter", "menu"}, {"esc", "type"}};
     static const HintItem hints_menu[] = {{"up/dn", "move"}, {"Enter", "choose"}, {"esc", "close"}};
     static const HintItem hints_info[] = {{"esc", "close"}};
+    // S516/EST-481: mention mode has its own keys (and they are the ones that actually work: Enter picks, it
+    // does NOT send). Three chips, the same count as the normal composer's bar, so nothing is squeezed.
+    static const HintItem hints_mention[] = {{"up/dn", "choose"}, {"Enter", "pick"}, {"esc", "close"}};
     // A DM thread types and sends exactly like a channel (EST-439), so the two open states share one hint bar.
     if (!v.open)
         drawHintBar(s, tm::Page::Chat, hints_list, 4);
@@ -356,6 +447,8 @@ void drawChat(Screen& s, const ChatView& v) {
         drawHintBar(s, tm::Page::Chat, hints_menu, 3);
     else if (v.sel >= 0)
         drawHintBar(s, tm::Page::Chat, hints_sel, 3);
+    else if (v.mention_active)
+        drawHintBar(s, tm::Page::Chat, hints_mention, 3);
     else
         drawHintBar(s, tm::Page::Chat, hints_open, 3);
 }

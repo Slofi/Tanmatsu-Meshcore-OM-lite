@@ -9,6 +9,8 @@
 
 #include "launcher_page.h"   // textBaseline / drawText* — the one place the baseline math lives
 #include "chat_layout.h"     // S516: the UTF-8-safe wrapper the pop-up reuses (host-tested)
+#include "chat_mentions.h"   // S516/EST-481: the pop-up shows the DRAWN "@Name" (brackets hidden)
+#include "nodes_fresh.h"      // S515/EST-461: the dot mask's bits (GLOBAL scope: see the note below)
 #include "volume_popup.h"    // S516/EST-478: the volume pop-up's text and placement (pure, host-tested)
 #include "tm_theme.h"
 #include "../../firmware/src/ui/theme.h"   // the L2 palette: one source of truth, never copied
@@ -201,9 +203,13 @@ bool noticeNeedsRepaint() {
 void msgPopupOffer(const char* head, const char* text, PopupChat chat, uint8_t channel,
                    const uint8_t peer[32]) {
     if (head == nullptr || text == nullptr || text[0] == '\0') return;
+    // S516/EST-481: the pop-up draws the same "@Name" form the chat does (brackets hidden), so one message
+    // cannot read two ways on one screen. This is a DISPLAY copy; the ring and the card log keep the stored bytes.
+    char drawn[192];
+    om::ui::mentionDrawn(text, drawn, sizeof(drawn), nullptr, 0);
     taskENTER_CRITICAL(&g_popup_mux);
     snprintf(g_pending_popup.head, sizeof(g_pending_popup.head), "%s", head);
-    snprintf(g_pending_popup.text, sizeof(g_pending_popup.text), "%s", text);
+    snprintf(g_pending_popup.text, sizeof(g_pending_popup.text), "%s", drawn);
     g_pending_popup.chat    = chat;
     g_pending_popup.channel = channel;
     if (peer != nullptr)
@@ -276,7 +282,10 @@ bool msgPopupNeedsRepaint() {
     return true;
 }
 
-#include "nodes_fresh.h"   // S515/EST-461: the dot mask's bits, pinned against the constants below
+// S516/EST-481: this include used to sit HERE, inside namespace om::ui. That only compiled because
+// nodes_fresh.h's own #include "mc_store.h" had not been seen yet, so mc_store was nested into
+// om::ui::om::mc along with it; once any earlier header included mc_store.h globally (chat_mentions.h does),
+// the nested copy vanished and the file would not compile. It belongs at global scope with the other includes.
 
 // ---- S515/EST-461: the hint bar's dots -------------------------------------------------------------------------
 // The main task both writes and reads this (the radio task never decides a dot: it changes the store, and the

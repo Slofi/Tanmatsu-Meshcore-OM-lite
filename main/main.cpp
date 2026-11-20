@@ -43,6 +43,7 @@ extern "C" {
 #include "emoji_blob.h"
 #include "launcher_page.h"
 #include "chat_page.h"           // step 4: the Chat page
+#include "chat_mentions.h"       // S516/EST-481: the drawn "@Name" form (the page, the composer)
 #include "chrome.h"               // status bar, page head, hint bar: one home
 #include "nodes_page.h"          // step 4: the Nodes page
 #include "nodes_search.h"        // S514/EST-449: the Nodes search (matcher, count, focus rules)
@@ -1751,6 +1752,16 @@ extern "C" void app_main(void) {
     static bool     chat_info_open  = false;
     char   composer[120] = {0};
     size_t composer_len  = 0;
+    // S516/EST-481: the composer's mention mode and its name picker. `static` for the same reason as the rest of
+    // the chat state: the module's own-key hook (a captureless lambda) resets it when it closes the chat.
+    // `chat_mention` = the draft ends in an OPEN "@[typed]"; `chat_mention_pick` = the suggestion pop-up is up
+    // (Esc closes the pop-up only). The rows are COPIES: the node table is read under StoreLock for at most the
+    // duration of the copy, and nothing here ever points into it after that lock is released.
+    static bool             chat_mention      = false;
+    static bool             chat_mention_pick = false;
+    static int              chat_mention_focus = 0;
+    static int              chat_mention_count = 0;
+    static om::ui::MentionRow chat_mention_rows[om::ui::kMentionPickRows];
     // S513: a short-lived line for the one thing the composer cannot say by itself — that a send was REFUSED
     // because the radio's queue is full, or because a DM's peer has no key yet. The text stays in the composer;
     // this says why nothing left. `chat_notice_buf` holds the one message that has to name the peer (EST-441).
@@ -2452,6 +2463,56 @@ extern "C" void app_main(void) {
         chat_info_open  = false;
     };
 
+    // ---- S516/EST-481: the composer's mention mode and its name picker --------------------------------------
+    // The RULES are core/chat_mention_edit.h (host-tested). This lambda only reaches the node table: ONE lock,
+    // names COPIED out into chat_mention_rows, and nothing that points into the table survives the release (the
+    // S516 round 1 class). Called after every keystroke that changes the typed letters.
+    auto mentionPickRefresh = [&]() {
+        chat_mention_count = 0;
+        chat_mention_focus = 0;
+        if (!chat_mention) {
+            chat_mention_pick = false;
+            return;
+        }
+        char query[om::mc::kNameBytes];
+        om::ui::mentionQuery(composer, composer_len, query, sizeof(query));
+        {
+            om::mc::StoreLock     l;
+            om::mc::ContactStore& cs = om::mc::contacts();
+            for (size_t i = 0; i < cs.count && i < om::mc::kMaxNodes; ++i) {
+                const om::mc::Contact& c = cs.c[i];
+                if (c.name[0] == '\0') continue;
+                if (om::mc::contactKeyIncomplete(c.pub)) continue;   // a prefix-only row is not a node
+                if (!om::ui::mentionMatches(c.name, query)) continue;
+                om::ui::MentionRow r;
+                snprintf(r.name, sizeof(r.name), "%s", c.name);   // the COPY (never `c.name`)
+                r.favourite = c.favourite;
+                r.in_radio  = c.in_radio;
+                r.heard_at  = c.heard_at;
+                om::ui::mentionInsert(chat_mention_rows, &chat_mention_count, om::ui::kMentionPickRows, r);
+            }
+        }
+        chat_mention_pick = chat_mention_count > 0;
+    };
+
+    // Leaving the open chat: one implementation for Esc in the composer and for the module's own key, so the
+    // mention mode and its pop-up cannot outlive the chat they belong to. The DRAFT is kept, as before.
+    auto chatLeaveOpen = [&]() {
+        if (chat_dm_open) {
+            om::mc::noteDmRead(chat_dm_pub);
+            chat_dm_open = false;
+        } else {
+            om::mc::noteChannelRead((uint8_t)chat_focus);
+        }
+        chat_open         = false;
+        chat_scroll       = 0;
+        chat_mention      = false;
+        chat_mention_pick = false;
+        chat_mention_focus = 0;
+        chat_mention_count = 0;
+        chatCloseSelection();
+    };
+
     // How many messages the open chat holds (0 for a channel with nothing on it yet).
     auto chatMsgCount = [&]() -> int {
         om::mc::StoreLock l;
@@ -2679,6 +2740,12 @@ extern "C" void app_main(void) {
         cv.scroll[0]     = chat_card_scroll[0];
         cv.scroll[1]     = chat_card_scroll[1];
         cv.composer      = composer;
+        // S516/EST-481: the mention mode + the picker rows the page draws (rows are already copies).
+        cv.mention_active = chat_mention;
+        cv.mention_pick   = chat_mention_pick;
+        cv.mention_focus  = chat_mention_focus;
+        cv.mention_count  = chat_mention_count;
+        for (int i = 0; i < om::ui::kMentionPickRows; ++i) cv.mention_rows[i] = chat_mention_rows[i];
         // S513: the notice is only in the view while it is live, so the page needs no clock of its own.
         cv.notice        = (chat_notice != nullptr && esp_timer_get_time() < chat_notice_until_us) ? chat_notice : nullptr;
         const int chans  = (int)om::mc::channelCount();
@@ -2816,12 +2883,15 @@ extern "C" void app_main(void) {
 
                 // How many lines every message takes. Wrapping is core logic (chat_layout) measured with the real
                 // body font; chatWindow then decides which messages fit in the space above the composer.
+                // S516/EST-481: it wraps the DRAWN form ("@[Name]" already reads "@Name"), and measures THAT text,
+                // so the hidden brackets cannot make the measured width disagree with what drawMsgLine draws.
                 static int             line_counts[om::mc::kMaxDms];
                 static om::mc::Wrapped wraps[om::mc::kMaxDms];
                 const om::ui::Font*    body = om::ui::fontFor(Face::Body);
+                char                   drawn[om::mc::kTextBytes];
                 for (size_t i = 0; i < n; i++) {
-                    wraps[i] = om::mc::wrapText(srcs[i].text != nullptr ? srcs[i].text : "", om::ui::kTmChatBodyW,
-                                                measureBody, (void*)body);
+                    om::ui::mentionDrawn(srcs[i].text != nullptr ? srcs[i].text : "", drawn, sizeof(drawn), nullptr, 0);
+                    wraps[i] = om::mc::wrapText(drawn, om::ui::kTmChatBodyW, measureBody, (void*)body);
                     line_counts[i] = 1 + (int)(wraps[i].count ? wraps[i].count : 1);
                 }
                 // chatWindow clamps the scroll to the topmost FULL window (a plain Up must never hide the newest
@@ -2843,7 +2913,13 @@ extern "C" void app_main(void) {
                     om::ui::ChatView::Msg& mv = cv.msgs[cv.msg_count++];
                     om::time_source::hhmmOf(s.local_ts ? s.local_ts : s.ts, mv.hhmm, sizeof(mv.hhmm));
                     snprintf(mv.sender, sizeof(mv.sender), "%s", s.sender != nullptr ? s.sender : "");
-                    snprintf(mv.text, sizeof(mv.text), "%s", s.text != nullptr ? s.text : "");
+                    // S516/EST-481: the DRAWN form goes into the view (the ring keeps the stored bytes). The spans
+                    // are byte ranges in `mv.text`, which is exactly what drawMsgLine colours; the wrap above used
+                    // the same transform, so the line breaks and the widths agree.
+                    const om::ui::MentionDrawn md =
+                        om::ui::mentionDrawn(s.text != nullptr ? s.text : "", mv.text, sizeof(mv.text), mv.mention,
+                                             om::ui::kMentionMaxSpans);
+                    mv.mention_count = (uint8_t)md.spans;
                     om::mc::formatAge(now, s.local_ts ? s.local_ts : s.ts, mv.age, sizeof(mv.age));
                     mv.outgoing   = s.outgoing;
                     // S513/EST-439: the state after the time, in words (the font has no check glyph). "sending"
@@ -3054,6 +3130,12 @@ extern "C" void app_main(void) {
                 chat_menu_open  = false;
                 chat_menu_focus = 0;
                 chat_info_open  = false;
+                // S516/EST-481: and the mention mode with its picker, so an abandoned "@[…" cannot come back
+                // when the chat is opened again. The draft itself is kept, as it always was.
+                chat_mention       = false;
+                chat_mention_pick  = false;
+                chat_mention_focus = 0;
+                chat_mention_count = 0;
             }
             return closed;
         }
@@ -3383,8 +3465,8 @@ extern "C" void app_main(void) {
                             switch (rows[chat_menu_focus].action) {
                                 case om::ui::ChatMsgAction::Reply: {
                                     // Back to the composer. On a CHANNEL the reply IS the MeshCore mention
-                                    // "@Name " in front of the draft (firmware/src/main.cpp:1175); a DM thread
-                                    // already says who it is for, so it adds no bytes at all.
+                                    // "@[Name] " in front of the draft (S516/EST-481; OverMesh's replyToMc);
+                                    // a DM thread already says who it is for, so it adds no bytes at all.
                                     if (!chat_dm_open) {
                                         char         prefix[40];
                                         const size_t plen =
@@ -3439,17 +3521,68 @@ extern "C" void app_main(void) {
                             }
                         }
                         // every other key falls out of here swallowed: typing is off while selecting
+                    } else if (chat_mention && k == tm::Key::Esc && chat_mention_pick) {
+                        // S516/EST-481: Esc closes the suggestion pop-up ONLY; the draft and the mention mode
+                        // stay. A second Esc (now with no pop-up) does what Esc does in the composer today.
+                        handled           = true;
+                        dirty             = true;
+                        chat_mention_pick = false;
+                    } else if (chat_mention) {
+                        // ---- the mention mode owns the composer's keys (core/chat_mention_edit.h). Enter PICKS,
+                        // it never sends; Up/Down move the pop-up's highlight and do NOT open the message box.
+                        handled = true;
+                        dirty   = true;
+                        if (k == tm::Key::Esc) {
+                            chatLeaveOpen();   // no pop-up left to close: today's Esc
+                        } else if (k == tm::Key::Up || k == tm::Key::Down) {
+                            if (chat_mention_count > 0) {
+                                chat_mention_focus += (k == tm::Key::Up ? -1 : 1);
+                                if (chat_mention_focus < 0) chat_mention_focus = 0;
+                                if (chat_mention_focus >= chat_mention_count)
+                                    chat_mention_focus = chat_mention_count - 1;
+                            }
+                        } else if (k == tm::Key::Enter) {
+                            if (chat_mention_count > 0) {
+                                int focus = chat_mention_focus;
+                                if (focus < 0) focus = 0;
+                                if (focus >= chat_mention_count) focus = chat_mention_count - 1;
+                                char picked[om::mc::kNameBytes];
+                                snprintf(picked, sizeof(picked), "%s", chat_mention_rows[focus].name);
+                                if (om::ui::mentionPick(composer, &composer_len, sizeof(composer), &chat_mention,
+                                                        picked) == om::ui::MentionPick::Picked) {
+                                    chat_mention_pick  = false;
+                                    chat_mention_count = 0;
+                                    chat_mention_focus = 0;
+                                } else {
+                                    // Refused rather than cut: a half name would mention the wrong node.
+                                    chat_notice          = "no room for that name";
+                                    chat_notice_until_us = esp_timer_get_time() + 3 * 1000 * 1000;
+                                }
+                            } else {
+                                om::ui::mentionLeave(&chat_mention);   // no suggestion = Right arrow
+                                chat_mention_pick = false;
+                            }
+                        } else if (k == tm::Key::Right) {
+                            om::ui::mentionLeave(&chat_mention);
+                            chat_mention_pick = false;
+                        } else if (k == tm::Key::Backspace) {
+                            om::ui::mentionBackspace(composer, &composer_len, &chat_mention);
+                            if (chat_mention)
+                                mentionPickRefresh();
+                            else
+                                chat_mention_pick = false;
+                        } else if (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD) {
+                            const char c = (char)ev.args_keyboard.ascii;
+                            const om::ui::MentionType r =
+                                om::ui::mentionTypeChar(composer, &composer_len, sizeof(composer), &chat_mention, c);
+                            if (r == om::ui::MentionType::Inserted)
+                                mentionPickRefresh();
+                            else if (r == om::ui::MentionType::SteppedOver)
+                                chat_mention_pick = false;
+                        }
                     } else if (k == tm::Key::Esc) {
                         // A DM thread and a channel leave the same way; each marks itself read on the way up.
-                        if (chat_dm_open) {
-                            om::mc::noteDmRead(chat_dm_pub);
-                            chat_dm_open = false;
-                        } else {
-                            om::mc::noteChannelRead((uint8_t)chat_focus);
-                        }
-                        chat_open       = false;
-                        chat_scroll     = 0;
-                        chatCloseSelection();
+                        chatLeaveOpen();
                         // What you were looking at is READ — in the store AND on the card (the seen point), so it
                         // is still read after a restart. Without this a message that arrived while the channel
                         // was open came back as a badge the moment you went up a level (Filip, S502).
@@ -3508,8 +3641,19 @@ extern "C" void app_main(void) {
                         composer[composer_len] = '\0';
                         handled                = true;
                     } else if (k == tm::Key::Char && ev.type == INPUT_EVENT_TYPE_KEYBOARD) {
-                        if (composer_len + 1 < sizeof(composer)) {
-                            composer[composer_len++] = (char)ev.args_keyboard.ascii;
+                        const char ch = (char)ev.args_keyboard.ascii;
+                        if (ch == '@') {
+                            // S516/EST-481: '@' at the position rule opens "@[]" and the picker (with nothing
+                            // typed yet: the most recently heard). Mid-word, or with no room for the brackets,
+                            // core/chat_mention_edit.h leaves a plain '@' and the mode stays off.
+                            const om::ui::MentionAt at =
+                                om::ui::mentionTypeAt(composer, &composer_len, sizeof(composer), &chat_mention);
+                            if (at == om::ui::MentionAt::Opened) {
+                                chat_mention_focus = 0;
+                                mentionPickRefresh();
+                            }
+                        } else if (composer_len + 1 < sizeof(composer)) {
+                            composer[composer_len++] = ch;
                             composer[composer_len]   = '\0';
                         }
                         handled = true;

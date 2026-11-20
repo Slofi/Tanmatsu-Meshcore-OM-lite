@@ -15,6 +15,107 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## S516 (EST-481) @[Name] mentions
+
+> Written by **DeepSeek** for ticket **EST-481**: fenced Paperclip run, no session start or end, nothing
+> installed, flashed, pushed or committed (`.git` read only; Claude reviews and commits). Starting point
+> **v76 `0b6efb8`**, tree clean, **not installed** (v75 runs on the device). **RESULT: version 77; nothing
+> installed, flashed, pushed or committed.**
+
+Mentions in the MeshCore form. **The evidence is Claude's, 2026-11-20:** of 4,811 MeshCore messages stored by
+OverMesh on gandalf, **1,044 contain `@[Name]`** and **15 a plain `@Name`**; OverMesh's own reply writes
+`@[${name}] ` with `[` `]` CR LF removed and the result trimmed. Our reply used to write `@Name ` (the L2's older
+plain form). **That file was NOT readable from this sandbox:** reading `~/overmesh/static/js/app.js` on gandalf
+as `ds-ro` answers *No such file or directory*, so the cleaning rule below follows the ticket's quotation, not
+a re-read of OverMesh. The L2's plain-form separator rule WAS re-read
+(`firmware/src/mesh_link.cpp:650-690`, read-only, allowed).
+
+**What it does**
+1. **Reply** (channel only; a DM's reply adds no prefix): `chatReplyPrefix` now writes **`@[Name] `** through
+   `core/chat_mentions.cpp::mentionReplyPrefix`: `[` `]` CR LF are removed, the result is trimmed, and a name that
+   cleans to nothing writes **nothing** (never `@[] `). A buffer that cannot hold the whole prefix writes nothing
+   either — a cut name would mention the wrong node.
+2. **Drawing a message**: a valid `@[Name]` token (at byte 0 or after a space) is drawn as **`@Name`** in the
+   accent colour. The stored text is NEVER changed: the chat view builds a separate DRAWN copy and carries the
+   token's byte spans; the ring, the card log and Info keep the exact bytes. **Widths stay right because the wrap
+   measures the DRAWN copy** (`main.cpp` transforms, then `core/chat_layout::wrapText` measures that text), and
+   `drawMsgLine` draws the same bytes in pieces at the font's own advances.
+3. **"mentions you"**: `mentionsUs` accepts `@[<our name>]` (exact, ASCII case-insensitive) and the plain
+   `@<our name>` followed by end/space/`,.!?:;` (the L2 rule), both only at the position rule. The new-message
+   pop-up's 64-byte head gains ` · mentions you` (1+20+4+20+16+NUL = 62, so it fits). Our own sends never pop
+   (the seen ring already drops our echo). **Sound: NOT changed.** `core/sound_events.h` has six events and no
+   Mention (Boot, Message, Dm, Sent, Error, NewNode). The L2's shared synth does have
+   `om::sound::Event::Mention` (default Chime Bright), but this app's event set, its 9-byte settings blob and its
+   Settings rows do not; adding one would be a new event + a settings-format change, which the ticket forbids
+   here. The message/DM sound plays as before.
+4. **Typing + name picker** (channel AND DM composers; not Nodes search/name/RPTR fields):
+   `core/chat_mention_edit.h` owns every keystroke. A typed `@` at the position rule becomes `@[]` with the caret
+   between the brackets; mid-word it is a plain `@`. Letters go before the auto `]`; `]` steps over it (never
+   `]]`); Right arrow (or Enter with no suggestion) leaves the mode keeping what was typed; Esc closes the
+   pop-up only, a second Esc does today's Esc. **Enter takes the highlighted name** and never sends while the mode
+   is on. Backspace on an EMPTY `@[]` removes both brackets and leaves a plain `@` (mode ends). The picker shows
+   up to **5** names matching the typed letters (case-insensitive substring; nothing typed = the list), ordered
+   **favourites, then radio, then SD/session rows**, most recently heard inside a group; each row shows `fav` /
+   `radio`. **Overflow:** a picked name that does not fit is **REFUSED** with the 3 s notice *"no room for that
+   name"* (not cut — a half name would mention the wrong node); `@[]` is never opened when it would not fit (the
+   `@` stays plain). **The cursor:** the composer was append-only, so the minimum is one bool `chat_mention` with
+   the invariant that while it is true the draft's TAIL is `@[typed]` and the caret sits before the auto `]`;
+   otherwise the caret is at the end. There is no arbitrary editing and no second cursor.
+5. **Pure + tested:** `test/host/test_chat_mentions.cpp` — **147 checks** over the prefix and its cleaning, the
+   finder (start/after space/mid-word, unclosed, nested, empty, UTF-8), `mentionsUs` (both forms, case,
+   separators, `TNMT (SI)` with spaces and parentheses, a longer name NOT us), the drawn form and its spans, the
+   keystroke rules, the byte limit, and the ranking (substring, case, favourites, max 5, duplicates). `run.sh`
+   runs it plain **and under ASan/UBSan**. `test_chat_select.cpp`'s reply-prefix case is updated to the bracket
+   form.
+
+**The lock rule:** the suggestion scan holds `StoreLock` and copies `name`/`favourite`/`in_radio`/`heard_at` into
+`MentionRow`; nothing that points into the node table survives the unlock (the S516 round 1 class).
+
+**One pre-existing defect this ticket HAD to fix to build:** `main/chrome.cpp` included `core/nodes_fresh.h`
+*inside* `namespace om::ui`. That only compiled because `nodes_fresh.h`'s own `#include "mc_store.h"` had not been
+seen yet, so `mc_store` was nested into `om::ui::om::mc` with it; once an earlier include pulls `mc_store.h`
+globally (this ticket's `chat_mentions.h` does), the nested copy disappears and the file fails with
+`'om::ui::om::mc' has not been declared`. The include is moved to the file's global include block; chrome.cpp only
+uses the two `kHintDot*` constants from it, so nothing else changes.
+
+**Numbers:** `sh test/host/run.sh` **exit 0**; the new suite **147/147** in both the plain and the ASan stage.
+`make build` **exit 0**, `application.bin` **1,758,160 B (0x1AD3B0)**, **+5,312 B** over v76's recorded
+1,752,848 B; total image **1,757,752 B**; DIRAM **303,884 B used / 268,484 B free (53.09 %)** — **+608 B** over
+v76 (the ChatView's per-message mention spans and the picker's five copied rows; the 8-message view is static).
+**Two arms**, each reverted:
+* boundary check removed from the finder →
+  `FAIL test/host/test_chat_mentions.cpp:101  !om::ui::mentionFind("a@[b]", 0, &t)`
+  `FAIL test/host/test_chat_mentions.cpp:184  "a@b c" != "a@[b] c"` (`128 checks, 2 failure(s)`, exit 1);
+* the favourite flag ignored by the ranking →
+  `FAIL test/host/test_chat_mentions.cpp:380  "Radio-new" != "New-fav"` (`134 checks, 1 failure(s)`, exit 1).
+Restored: 147/147, exit 0.
+
+**Previews:** `shots/2026-11-20-chat-mentions.png` (a message with `@Beta` in the accent, one mentioning us as
+`@TNMT (SI)`, and the pop-up saying *mentions you*) and `shots/2026-11-20-mention-picker.png` (the composer in
+mention mode — `hello @[Al]`, caret before the `]` — with the suggestion pop-up above it). The pop-up's own text
+is drawn in the same `@Name` form (a display copy in `msgPopupOffer`), so one message cannot read two ways on one
+screen.
+
+### What was read
+`core/chat_select.{h,cpp}`, `core/chat_layout.{h,cpp}`, `core/chat_page.h`, `main/chat_page.cpp`,
+`core/msg_popup.h`, `main/chrome.{h,cpp}`, `core/sound_events.h` and `firmware/src/sound_synth.{h,cpp}`,
+`main/mc_link.cpp` (the channel/DM RX paths and the pop-up offers), `main/main.cpp` (the chat state, the view
+build, the composer key branch, the module's onTop hook), `core/mc_store.h`, `core/node_table.h`,
+`firmware/src/mesh_link.cpp:650-690` (the L2's plain mention rule), `test/host/run.sh`,
+`test/host/test_chat_select.cpp`, `tools/preview_tanmatsu.py`.
+
+### What was NOT checked (honest list)
+* **Nothing is on glass.** The picker geometry, the caret between the brackets, the mention accent on the real
+  panel and the pop-up's width are host renders only (v75 still runs on the device).
+* The 1,044 / 15 / 4,811 counts are Claude's read-only count; **the OverMesh source is not visible from this
+  sandbox as `ds-ro`** (empty answer, quoted above), so the cleaning rule is the ticket's quotation.
+* The suggestion scan is O(nodes) with a 5-slot insertion; 2,000 rows were not timed here (the node-table sort
+  timing from EST-463 is the only nearby number).
+* The `mentions you` head fits 64 bytes by arithmetic (62 with both names cut to 20 bytes), not by a glass
+  measurement; the pop-up uses the existing `Face::Title` fit.
+
+
+**Claude's review of EST-481 (S516, 2026-11-20 23:1x):** accepted: reply `@[Name] `, the drawn copy + spans (wrap measures the drawn text, stored bytes untouched), `mentionsUs` with the position rule, the picker (StoreLock + copied rows, Enter never sends, Right/`]` step over, Backspace on empty `@[]`), and the include fix in chrome.cpp. Stack checked: `ChatView` is now 5,280 B but static since v71; the largest frames are unchanged (`app_main` 2,224, `chatInfoRows` 1,936). **One drawing fix by Claude:** the mention caret was drawn 3 px after the text before the auto `]`, on top of the bracket's thin stroke, so the preview read `hello @[Al|` as if the `]` were missing; the composer now draws text-before, caret, then `]` 4 px right. The picker's tag sits 8 px inside the highlight frame on the device (the preview tool draws it differently). No mention SOUND (this app's sound events have none; noted for the sound-levels work). Suite exit 0, build exit 0.
 ## S516 (EST-480) Wi-Fi toggle + Nodes hints back
 
 > Written by **DeepSeek** for ticket **EST-480**: fenced Paperclip run, no session start or end, nothing

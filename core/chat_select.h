@@ -101,10 +101,11 @@ ChatSelMove chatSelMove(int index, int delta, int count);
 int chatSelScroll(int index, int count);
 
 // --------------------------------------------------------------------------------------------- reply
-// "@<sender> " — the MeshCore apps' reply form. A channel text has no reply field on the wire, so the mention IS
-// the reply (firmware/src/ui/message_sheet.h:26 "the \"@Name text\" draft, as REPLY did", and the frame built in
-// firmware/src/main.cpp:1175 `snprintf(wire, sizeof(wire), "@%s %s", g_replyName, g_kbText);`). A DM has one
-// reader, so its reply adds no prefix at all. Returns the bytes written; an empty sender writes nothing.
+// "@[<sender>] " — the MeshCore apps' reply form (S516/EST-481; OverMesh's replyToMc writes exactly this, and
+// 1,044 of the 4,811 messages it stored carry it). A channel text has no reply field on the wire, so the mention
+// IS the reply. The name is cleaned as OverMesh cleans it ([ ] CR LF removed, trimmed) and a name that cleans to
+// nothing writes nothing; the implementation is core/chat_mentions.cpp::mentionReplyPrefix, host-tested there.
+// A DM has one reader, so its reply adds no prefix at all. Returns the bytes written.
 size_t chatReplyPrefix(char* out, size_t cap, const char* sender);
 
 // -------------------------------------------------------------------------------------------- Info sheet

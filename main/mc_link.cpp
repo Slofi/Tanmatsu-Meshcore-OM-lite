@@ -42,6 +42,7 @@
 #include "settings.h"     // EST-445: the name rule and the advert-interval mapping (pure, host-tested)
 #include "sd_history.h"   // step 5: the chat history on the card
 #include "chat_layout.h"  // step 5 / S503: historyReadCount, the read-prefix rule for the seen point
+#include "chat_mentions.h" // S516/EST-481: does this text mention US? (the pop-up says so)
 #include "time_source.h"
 #include "clock.h"
 
@@ -1813,12 +1814,17 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
         }
         // S514/EST-450: a DM to us, after the seen-ring check above dropped our own echo and a
         // duplicate flood copy. Played before the ACK reply is queued so the sound never delays it.
+        // S516/EST-481: the sound stays the DM sound. core/sound_events.h has NO mention event (the L2's shared
+        // synth has one, but this app's event set and its settings blob do not), so per the ticket no mention
+        // sound is added here.
         om::audioout::playEvent(tm::soundcfg::Event::Dm);
         // S515/EST-467: the same message as a chrome pop-up. The READER (main task) applies "not while this
         // same chat is open" and "not while the screen is off"; our own echo never got here (seen ring).
+        // S516/EST-481: a message that mentions US says so (the "@[<us>]" form or the plain L2 form).
         {
-            char head[64];
-            snprintf(head, sizeof(head), "DM \xc2\xb7 %s", peer_name);
+            const bool mentions_me = om::ui::mentionsUs(dm.text, nodeName());
+            char       head[64];
+            snprintf(head, sizeof(head), "DM \xc2\xb7 %s%s", peer_name, mentions_me ? " \xc2\xb7 mentions you" : "");
             om::ui::msgPopupOffer(head, dm.text, om::ui::PopupChat::Dm, 0, peer_pub);
         }
 
@@ -1995,9 +2001,13 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
     om::audioout::playEvent(tm::soundcfg::Event::Message);
     // S515/EST-467: the pop-up's first line is the channel and the sender, then the text. The main task
     // decides whether this same chat is already on screen; the radio task knows nothing of pages.
+    // S516/EST-481: a text that mentions US says "mentions you" on that line, in the same 64-byte buffer: the two
+    // names are cut to 20 bytes each, so " · mentions you" still fits with the NUL (1+20+4+20+16+1 = 62).
     {
-        char head[64];
-        snprintf(head, sizeof(head), "#%.20s \xc2\xb7 %.20s", g_set.ch[idx].name, sender);
+        const bool mentions_me = om::ui::mentionsUs(text, nodeName());
+        char       head[64];
+        snprintf(head, sizeof(head), "#%.20s \xc2\xb7 %.20s%s", g_set.ch[idx].name, sender,
+                 mentions_me ? " \xc2\xb7 mentions you" : "");
         om::ui::msgPopupOffer(head, text, om::ui::PopupChat::Channel, (uint8_t)idx, nullptr);
     }
 }

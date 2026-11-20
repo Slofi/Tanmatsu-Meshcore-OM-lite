@@ -4,7 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "chat_meta.h"   // pathHopLabel: a hop's hash -> a name only when exactly one node matches
+#include "chat_meta.h"       // pathHopLabel: a hop's hash -> a name only when exactly one node matches
+#include "chat_mentions.h"   // S516/EST-481: the MeshCore "@[Name] " reply form (cleaning lives there)
 
 namespace om {
 namespace ui {
@@ -120,12 +121,10 @@ int chatSelScroll(int index, int count) {
 }
 
 size_t chatReplyPrefix(char* out, size_t cap, const char* sender) {
-    if (out == nullptr || cap == 0) return 0;
-    out[0] = '\0';
-    if (sender == nullptr || sender[0] == '\0') return 0;
-    const int w = snprintf(out, cap, "@%s ", sender);
-    if (w <= 0) return 0;
-    return (size_t)w < cap ? (size_t)w : cap - 1;
+    // S516/EST-481: the MeshCore form "@[Name] " (not the L2's older "@Name "): OverMesh's own reply writes it,
+    // and 1,044 of the 4,811 messages it stored carry it. The cleaning ([ ] CR LF removed, trimmed) and the
+    // "empty after cleaning writes nothing" rule live in core/chat_mentions.cpp with their host tests.
+    return mentionReplyPrefix(out, cap, sender);
 }
 
 void chatInfoHead(const ChatInfo& in, char* title, size_t title_cap, char* sub, size_t sub_cap) {
