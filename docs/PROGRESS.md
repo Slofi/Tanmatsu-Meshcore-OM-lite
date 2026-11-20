@@ -15,6 +15,258 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## 2026-11-20 · S516 (EST-472) bug sweep of v57-v65
+
+> Written by **DeepSeek** for ticket **EST-472**: fenced Paperclip run, no session start or end, nothing installed,
+> flashed, pushed or committed. Starting point **v65 `c81fb4c`** (the tree Claude installed on the device on
+> 2026-11-19). Sweep of the nine versions v57 → v65 (`22a1e86..c81fb4c`). **Version: 66 only if the code changes.**
+> This entry is written FIRST and filled in as the sweep goes (the ticket's rule): an item is done not because its
+> code looks plausible, but because its CALL SITES were read and, where a defect was found, a host test was armed.
+>
+> **RESULT:** version **66** (`core/settings.h`). `sh test/host/run.sh` **exit 0**, suites summed
+> **33,084 → 33,244** (+160 checks; the ASan/UBSan stages included; the only sanitizer noise is the vendored
+> Ed25519's pre-existing `left shift of negative value` in `fe.c`, unchanged). `make build` **exit 0**,
+> `application.bin` **1,741,328 B (0x1A9210)**, 1,700 KiB = **53 % of 3,200 KiB**, 17 % of the 2 MiB app
+> partition free. Nine defects found and fixed: **four have an armed host test** (five FAIL lines — item 6 has two
+> tests), **five are device glue** with no host test and say so. Item 8 added evidence, not a defect. Nothing was
+> installed or seen on glass.
+
+### The ten-item checklist (one line each, filled in as the sweep goes)
+
+1. LOCKING — every node-table access site and whether it holds `om::mc::StoreLock`.
+2. PERSISTENCE + POWER CUT — `writeFileAtomic` / `readNodeFileOrTemp`, every cut point; write frequency.
+3. EXIT PATHS — Esc per page, key-lock, pop-up, manual LED, backlights, final writes, `/int`, panic reset.
+4. KEY-LOCK + POP-UP + LED interplay.
+5. RPTR CLI answers — no pop-up, no Chat dot, no unread, no DM thread.
+6. NO `/int` — "Radio full" and the headers use the cap of the store actually in use.
+7. PARSERS + BOUNDS — advert app_data, CLI answers, time-row path, pop-up text, node file load; ASan stage.
+8. MEMORY — internal RAM after the larger rings; FatFs-writing tasks' stack high-water.
+9. KNOWN FIX A — a deleted node's DM thread stays listed, named from the log or the short key.
+10. KNOWN FIX B — `initNodeTable()` one init, one log line.
+
+### The ten-item checklist — one line each
+
+1. **defect (fixed, no host test possible — a cross-task race):** `main.cpp:4108` (old) took
+   `&contacts().c[idx]` with **no StoreLock** and kept the POINTER into the 2,000-row table for the Node menu's
+   Map action. Every other access site holds the lock (the full list is in § 1 below); the fix copies lat/lon under
+   the lock. Severity: **mislead/crash** (a row can move under a delete; a torn read is UB).
+2. **defect (fixed, test armed):** `readNodeFileOrTemp()` renamed a power-cut temp file into place **before any
+   CRC check** (`mc_link.cpp:667` old) and `writeFileAtomic()` ignored `fflush`/`fsync`/`fclose` failures and then
+   removed the old file (`mc_link.cpp:611` old). Both now refuse; the CRC check is `nodeFileCheck()`
+   (`core/node_store.cpp:90`). Severity: **lose data** (the radio list silently falls back to the 32-row NVS copy).
+3. **defect (fixed, no host test possible — device glue):** `nodeStorageShutdown()` forced the archive and the ack
+   but **not the radio file** (`mc_link.cpp:946` old), and the 10 s retry floor could swallow the last attempt.
+   Now a structural pass + cleared retry floor, with the signature check still preventing a needless write.
+   Esc per page, key-lock, pop-up, manual LED, backlights and `/int` were read and are correct; the panic case is
+   **not fixable in-process** and is written down in § 3. Severity: **lose data** (last radio change).
+4. **defect (fixed, no host test possible — device ordering):** a message that arrived while the screen was LOCKED
+   and had not been polled yet popped up **on wake**, because the power press `continue`s past the 250 ms poll
+   (`main.cpp:3043` old). The wake path now discards the pending pop-up with `screen_off` still true. The
+   dismissal rule itself (any key swallows, Esc/Enter/arrows included) was already right. Severity: **mislead**.
+5. **defect (fixed, test armed):** the logged-in repeater's CLI answer was handled by `rptr_link`, but a CLI-typed
+   TXT_MSG that missed it (not logged in, a late answer, a repeater that is also a contact) fell into the DM path:
+   thread + pop-up + unread dot (`mc_link.cpp:1655` old). A second door now drops it (`isRepeaterCliText`).
+   Severity: **mislead** (repeater admin text presented as a person's DM).
+6. **defect (fixed, test armed):** the cap of the store in use. Without `/int` the writer keeps **32** rows while
+   the rule marked up to **300** and the sentence said "Radio full (300 / 300)" (`node_table.cpp:74`,
+   `node_menu.h:169`, `node_view.h:74/85` old): a node shown as "in the radio" was gone after a reboot. The cap is
+   now passed in (`radioCapFor(int_mounted)`) and every sentence/header uses it. Severity: **lose data/mislead**.
+7. **defect (fixed, no separate device test):** the pop-up's own byte-by-byte wrapper could end a 95-byte line
+   **inside a UTF-8 sequence** (`chrome.cpp:58` old). It now reuses `mc::wrapText`, the host-tested UTF-8-safe
+   wrapper the chat page already draws with. Advert app_data, CLI answers, the time-row path, and the node-file
+   count/record-size fields were read at their call sites and are bounds-checked (`§ 7`). Severity: **cosmetic**.
+8. **defect (fixed, no host test possible — device glue):** the two FatFs writers had no measured stack line, and
+   the boot log had no internal-RAM figure. Added: one heap line at boot + one stack low-water line per writer
+   task (`mc_link.cpp:819`). Measured headroom is in § 8: **DIRAM 297,196 used / 275,172 free**. Severity: evidence.
+9. **defect (fixed, test armed):** a deleted node's thread **was** already listed by `dmThreadSummaries()` (the
+   "leaves the chat list" part of the note is NOT in the model — see § 9), but when its own message carried no
+   name the core returned `name = ""` (`mc_store.cpp:424` old). It now names it from the short key. Severity:
+   **mislead** (a thread with no label).
+10. **defect (fixed, no host test possible — device log):** `initNodeTable()`'s banner printed on all three calls
+    ("node table: 2000 rows" ×3). One static, one line (`mc_link.cpp:190`). Severity: **cosmetic**.
+
+### 1. LOCKING — every access site and its lock
+
+`main/mc_link.h:257` `StoreLock` is a recursive mutex created in `begin()`; the radio task writes the table
+(`advertInArchive`, PATH routes, DM cursors, archive merges at boot), the main task reads it. Sites:
+
+| site | lock? |
+|---|---|
+| `main.cpp:392` Settings › General "contacts" row | yes (`:390`) |
+| `main.cpp:944` `buildNodesSubRows` (whole function) | yes (`:943`) |
+| `main.cpp:1182` `chatMetaFor()` → `pathHopLabel` (time row "via <name>") | yes — called at `:2544`/`:2557` inside `drawChatPage`'s lock |
+| `main.cpp:1885` `nodesSubAction` name/key copy | yes |
+| `main.cpp:1911` `raiseClearContacts` count | yes |
+| `main.cpp:1952` `nodeMenuPub` key copy | yes |
+| `main.cpp:1963` `nodesOrderForPage` | yes |
+| `main.cpp:1978` `nodesApplyFilters` (contract: caller holds) | yes at its two callers (`drawNodesPage`, `nodesShownCount`) |
+| `main.cpp:1987` `nodesViewCount` | yes |
+| `main.cpp:2001–2043` `drawNodesPage` (store pointer + order + counts) | yes, whole fill AND draw; released before the confirm sheet |
+| `main.cpp:2092` `nodesShownOrder` | yes |
+| `main.cpp:2121` `toggleFavourite` read | yes |
+| `main.cpp:2151` `openDmThread` key/name copy | yes |
+| `main.cpp:2174` `raiseRemoveContactConfirm` | yes |
+| `main.cpp:2196` `refocusAfterDelete` re-find by key | yes |
+| `main.cpp:2204` `nodeMenuRowCount` | yes |
+| `main.cpp:2235–2316` `chatMsgCount`, `chatSeqAtFromNewest`, `chatSelStep`, `chatSelLoad` | yes (each takes the lock) |
+| `main.cpp:2344–2389` `chatMenuBuild`, `chatInfoBuild` | yes |
+| `main.cpp:2456–2557` `drawChatPage` (messages, read state, DM ring, summaries) | yes |
+| `main.cpp:2712` `drawMapPage` store pointer | the pointer is taken outside, but `main/map_page.cpp:270` takes `StoreLock` around **every** row read (`drawMapNodes`; the tile compose never holds it) |
+| `main.cpp:3291` Enter on a DM card (`dmThreadSummaries`) | yes |
+| `main.cpp:4125` Node menu → Map (S516 fix) | yes, now: lookup + lat/lon copied under the lock |
+| `main.cpp:4555–4558` hint dots (`unreadTotals`, `contactsFreshCount`) | yes |
+| `main.cpp:4581` Nodes entry re-sort | yes |
+| `main/rptr_link.cpp:188` `mergeContacts` | yes |
+| `main/rptr_link.cpp:229` `contactForKey` in `loginStart` | yes (all three callers wrap it) |
+| `main/rptr_link.cpp:338/461` `contactForKey` in scan/login | yes |
+| `main/mc_link.cpp:1737` message pop-up head | **no table read at all**: the DM head is the message's own `peer_name` (captured on RX), the channel head the channel name, so nothing is pointed at |
+
+No UI keeps a `Contact*`/reference after its lock is released, and no page holds the lock across a panel blit.
+The only violation was the Map action (item 1's fix). Severity: a data race is **UB/crash** on a delete; the
+symptom would be a wrong marker or a torn name.
+
+### 2. PERSISTENCE + POWER CUT
+
+`writeFileAtomic(path,tmp)`: write temp → `fflush`/`fsync`/`fclose` → remove old → rename. Cut points and what
+the next boot loads:
+
+| cut | next boot |
+|---|---|
+| during the temp write | `path` (old file) intact → old bytes; the partial `*.tmp` is ignored (stat of `path` succeeds) |
+| after the old file is removed, before the rename | `path` absent, `*.tmp` complete + fsynced → `readNodeFileOrTemp` CRC-checks it (`nodeFileCheck`), renames it, loads it. **Before S516 it renamed first and trusted afterwards** |
+| during the rename | FAT's directory entry is the atomic step: either the old/new name resolves; the CRC still decides |
+| temp corrupt (bad medium) | old file already gone → the temp is **removed**, the log says which check failed, and the radio list falls back to NVS (max 32) / the archive is skipped. Nothing half-fills the table (`nodeFileDecode`'s checks all precede its first write) |
+| write reported short, or `fflush`/`fsync`/`fclose` failed | **old file kept**, temp removed (S516). Before, the old file was removed even when the data may not have been durable |
+
+`nodes.bin` on the SD is written the same way; the NVS fallback is one `nvs_set_blob` + `commit` (atomic in NVS).
+Write frequency: a **new/renamed/route-changed advert** raises the structural flag and the radio file is encoded on
+the next main-loop pass, but written only if the **signature** changed — an archive-only new node costs no internal
+flash write. **Repeat adverts** (last-heard/SNR) wait the 10-minute soft floor. The **SD archive** is written at
+most once per 30 s while anything is dirty (a busy mesh therefore rewrites `nodes.bin` on a steady 30 s cadence,
+not per packet), plus forced by a user action (add/move/delete/clear radio) and on leaving Nodes/Esc. **No path
+writes per received packet.** Per key press: only a deliberate favourite toggle (structural, immediate) and a
+"new dot" ack (5 s floor, forced on leaving) — both user actions, both stated in the confirm/log lines. Severity
+of the CRC gap: **lose data**; of the fsync gap: **lose data**.
+
+### 3. EXIT PATHS
+
+- **Esc to the Launcher** from every page: Chat closes Info → menu → selection → the open chat → the list, then the
+  shared `core.handleKey(Esc)` (`main.cpp:4382`) goes to the Launcher; Nodes closes trace result → confirm/menu →
+  list; Map/RPTR/Settings do the same. Only Launcher-Esc calls `leaveToLauncher()` (`main.cpp:4307`).
+- **Key-lock:** while `g_screen_power.off`, every navigation/keyboard/scancode event is swallowed
+  (`main.cpp:3052`), Esc included; the power button is the only wake. Correct: keys in a pocket do nothing.
+- **Pop-up up:** the pop-up check is before every page branch and sets `k = None` (`main.cpp:3071`), so Esc/Enter/
+  arrows only dismiss. The power button is handled as an ACTION before that (it turns the screen off and the
+  screen-off poll drops the pop-up — no stale pop-up on wake).
+- **Message LED in manual mode:** `leaveToLauncher()` calls `om::led::restoreAutomatic()` **first**
+  (`main.cpp:217`): all six pixels dark, the remembered system brightness restored, `bsp_led_set_mode(true)`, and
+  the LED task stopped. The system's own indicators 0–1 come back. The manual-mode `applyFrame` re-checks `s_stop`
+  under the output mutex, so a frame in flight cannot re-darken them after the handover.
+- **Backlights:** if the screen was off on exit, `screenLightsOn()` restores display and keyboard brightness.
+- **Final writes:** `nodeStorageShutdown()` now forces **radio.bin + the archive + the ack** past their floors and
+  clears the retry floor (S516); the signature check means an unchanged radio list is not rewritten. `/int` is
+  unmounted after the writes (`unmountInt`, `mc_link.cpp:701`). The SD card is **not** unmounted (the BSP keeps the
+  card handle; documented since S503; every history record is opened/written/closed per record).
+- **After a panic reset:** no code of ours runs, so the CH32 can be left in **manual LED mode** (all pixels dark,
+  including the system indicators) and any node/radio write in flight is lost at the write's cut point (the temp
+  rules above bound that loss). `/int` is released by the reset itself (the mount lives in RAM), so the launcher
+  mounts `locfd` normally; our `message_led::begin()` restores automatic mode the next time OM Lite starts. This
+  is **not fixable in-process**; it is the price of owning the LEDs while the screen is dark.
+
+### 4. KEY-LOCK + POP-UP + LED
+
+- A message while locked: no pop-up (the poll discards it, and the consume is now also done on wake), no
+  backlight, no panel; the sound plays (`audioout::playEvent` runs on the radio task) and the LED rule sees
+  `screen_off && unread > 0` and blinks three times, then every 20 s.
+- A message that arrives while locked but **before** the 250 ms poll is consumed on the wake press with
+  `screen_off=true` (S516 fix) — it is not queued for later.
+- Pop-up dismissal swallows the key (Esc included) before any page branch; Enter and arrows do nothing else.
+- Power while a pop-up is up: the screen goes off and the pop-up is dropped with it; nothing is shown on wake.
+- The LED stops the moment the screen is on, the unread count is 0, or the choice returns to Off.
+
+### 5. RPTR CLI ANSWERS
+
+Path: `mc_link::onPacket` TXT_MSG branch → `rptrlink::onCliAnswer` **before** the DM code. It only accepts
+`TXT_TYPE_CLI_DATA`, only the login target's key, and only while logged in (`rptr_link.cpp:619`); it returns
+before `dmPush`, so no thread, no pop-up, no Chat dot, no unread. A **plain** text from the same repeater still
+falls through. The second door added in S516 (`mc_link.cpp:1659`) drops a CLI-typed text that missed the first
+one, so it can never become a DM either. Host test: `test_dm.cpp:184` (the classifier over a real CLI frame).
+
+### 6. NO `/int`
+
+`radioCapacity()` (`mc_link.cpp:1047`) returns `radioCapFor(g_int_mounted)`: 300 over `/int`, **32** on the NVS
+fallback. It is passed to `addToRadio`, to `advertInArchive`'s automatic-add test, to `nodeRadioFullNotice`, to
+`nodeStoreCountsText`/`nodeStoreInfoText` (Nodes head + Settings' Stored nodes row) and to the `NodesView`
+(`radio_cap`). A full radio refuses and changes nothing; the sentence names the real cap. Tests:
+`test_node_table.cpp:296`, `test_node_view.cpp:221/290–295`.
+
+### 7. PARSERS + BOUNDS
+
+- **Advert app_data** (`core/mc_identity.cpp:94`): `app_len` clamped to `kMaxAdvertData` before the copy and the
+  verify; `flags = app[0]` is safe because the length check guarantees ≥1 app byte; lat/lon only when 8 bytes are
+  present; feat1/feat2 skipped only when present; the name is copied with `name_size-1` and always NUL-terminated.
+  ASan: `test_mc` (junk lengths included) — suite totals below.
+- **CLI answers** (`core/rptr_wire.cpp:221/237`): dest/src hash checked, `plain_len >= 6`, the text stops at the
+  first NUL within `len-5`, clamped to `kMaxText` (buffer is `kMaxText+1`). ASan: `test_rptr` ASan stage.
+- **Time-row path** (`main/mc_link.cpp:1450`): `hash_size` 1..3 and `bytes <= kMaxPath` before the copy; the row
+  only resolves when `path_bytes >= hash_size` (`main.cpp:1178`); `pathHopLabel` refuses `len > 3`.
+- **Message pop-up text:** the UTF-8 cut is fixed (item 7) by using `mc::wrapText`; `msgPopupOffer` copies 191
+  bytes into a 192-byte slot with `snprintf`.
+- **Node file load** (`core/node_store.cpp:90`): magic, version, record width, `count > kMaxNodes`, exact length
+  (`len < need` truncated / `len > need` bad size), CRC over header+records, and `count > out.cap`; all before the
+  first write to the table. ASan: `test_node_store` ASan stage.
+
+### 8. MEMORY
+
+`g_messages = 0x490C = 18,700 B` and `g_dms = 0x510C = 20,748 B` (`nm` on `build/tanmatsu/*.elf`) — **39,448 B**
+of internal `.bss` for the rings, plus `ReadState` 32 B. After the build, `idf.py size`:
+**DIRAM 297,196 B used, 275,172 B remain (51.92 % of 572,368)**; flash image 1,630,712 B, `application.bin`
+**1,741,328 B** (0x1A9210; the 32 B over the first S516 build are the wake-path pop-up discard). The app now
+logs that headroom once at boot
+(`heap: … internal free, largest internal block …`) and logs each FatFs-writing task's low-water mark once, after
+its first write (main task: radio.bin/nodes.bin; radio task: dm-*.log).
+
+### 9. KNOWN FIX A — the deleted node's DM thread
+
+The "leaves the chat list" part **could not be reproduced in the model**: `dmThreadSummaries()` already lists a
+thread whose key is not in the contact table (`tests` pass on the old code for the "listed" check). What WAS wrong
+at the model level: `dmSummaryForPeer()` returned `name = ""` when the last message carried no name and the
+contact was gone. Fixed: the summary owns an 8-hex short-key fallback (`mc_store.h:276`, `mc_store.cpp:428`).
+`sums[0]` is still named from its own message when it has one. No DM/card history is deleted by
+`deleteEverywhere` — the confirm sentence stays true. Test: `test_store.cpp:266–289`.
+
+### 10. KNOWN FIX B
+
+`initNodeTable()` is called from `begin()`, `nodeStorageBegin()` and `restoreContacts()`. The allocations were
+already idempotent; the banner now has a one-shot static, so the boot log prints `node table: 2000 rows, …` once
+(`mc_link.cpp:189–209`).
+
+### Armed tests (revert the fix → the FAIL line, then restored)
+
+| fix | armed line | FAIL observed |
+|---|---|---|
+| item 2 CRC before trust | `test_node_store.cpp:170` | `FAIL test_node_store.cpp:170 om::mc::nodeFileCheck(buf, one_record) == Truncated (got 0, want 2)` |
+| item 5 CLI second door | `test_dm.cpp:184` | `FAIL test_dm.cpp:184 meshcore::isRepeaterCliText(m.txt_type)` (and `:186` for CLI_COMMAND) |
+| item 6 cap of the store | `test_node_table.cpp:296` | `FAIL test_node_table.cpp:296 addToRadio(..., radioCapFor(false)) == RadioFull (got 0, want 2)` |
+| item 6 "Radio full" sentence | `test_node_view.cpp:221` | `FAIL test_node_view.cpp:221 "Radio full (32 / 32)…"` |
+| item 9 short-key name | `test_store.cpp:289` | `FAIL test_store.cpp:289 "" != "88000000"` |
+
+The device-glue fixes (1, 3, 4, 7, 8, 10) have no host test: they change ordering/syscalls in `main/`, which the
+host suite does not build. They are marked as such above rather than given a test that would not fail.
+
+### Honest limits of this run
+
+- Nothing was installed, flashed or seen on glass: the live-device claims in this entry are from reading the code
+  and the model-level tests, not from a running Tanmatsu.
+- The 30 s archive cadence under a continuously chatty mesh is stated, not changed (it is a wear/data-loss
+  trade-off; a 10-minute floor would widen the power-cut window).
+- After a panic, manual LED mode is not recoverable in-process (§ 3).
+- `~/Projects` and the servers were not needed; no SSH was made for this ticket.
+
+---
+
+
+**Claude's review of EST-472 (S516, 2026-11-20 19:3x):** read the whole code diff (21 files) against the call sites. Accepted: the Map-action copy under the lock, the CRC check before a temp file is trusted, flush/fsync/fclose checked before the old file goes, the radio file forced at exit (signature-gated), the wake-path discard, the cap of the store in use, the UTF-8-safe pop-up wrap (its ellipsis trim drops whole characters), the one-shot banner. **Two defects found in this round and fixed by Claude:** (1) `kTxtTypeCliCommand` was **2**, which is `TXT_TYPE_SIGNED_PLAIN` (a room server's message; `helpers/TxtDataHelpers.h:6-9`: PLAIN 0, CLI_DATA 1, SIGNED_PLAIN 2, CLI_COMMAND 3), and the test asserted 3 = SIGNED_PLAIN. Unused before, so harmless until item 5's new filter, which would have dropped every signed message as repeater traffic. Fixed (+ `kTxtTypeSignedPlain`), test armed: 3 FAIL lines on the old constant (`test_dm.cpp:187/190/191`). (2) Item 9's short-key name made `DmSummary::name` point into the summary's own `short_name`, but summaries are returned by value and copied (`out[n++] = dmSummaryForPeer(...)`), so the copy pointed into a dead temporary (the test passed on luck: the stack was not reused yet). Fixed with a copy constructor + assignment that re-point `name`; test armed (`test_store.cpp:299` `"XXXXXXXX" != "88000000"` without them). Suite exit 0, build exit 0 (1,741,392 B; the `unused variable 'order'` warning at `main.cpp:1997` was already in v65's build). Not seen on the device yet.
 ## 2026-11-19 · S515 (EST-470) RPTR part 2a: the safe settings
 
 > Written by **DeepSeek** for ticket **EST-470** (re-filed from EST-458): fenced Paperclip run, no session start or

@@ -33,6 +33,9 @@ struct NodesView {
     size_t   radio_count = 0;
     size_t   archive_count = 0;
     bool     sd_mounted  = true;
+    // S516/EST-472 item 6: the cap of the store the radio list actually uses (300 over /int, 32 on the NVS
+    // fallback). The head's "Radio N / C" reads this, never a fixed 300.
+    size_t   radio_cap = om::mc::kMaxRadio;
 
     // S514/EST-449: the search bar is the list's top row. `query` is the live filter text (null/empty =
     // all nodes) and `search_focused` means the BAR owns the keys, so no row is drawn as selected.

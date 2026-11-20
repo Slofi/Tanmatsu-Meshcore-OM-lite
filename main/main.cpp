@@ -626,7 +626,8 @@ const char* nodesStoresValue(tm::Core&) {
     static char buf[80];
     size_t radio = 0, sd = 0;
     om::mc::nodeStoreCounts(&radio, &sd);
-    om::ui::nodeStoreInfoText(buf, sizeof(buf), radio, sd, g_sd_mounted);
+    // S516/EST-472 item 6: the cap is the store in use (300 over /int, 32 on NVS).
+    om::ui::nodeStoreInfoText(buf, sizeof(buf), radio, sd, g_sd_mounted, om::mc::radioCapacity());
     return buf;
 }
 
@@ -2008,6 +2009,7 @@ extern "C" void app_main(void) {
             // rows NOT in the radio for the "SD only" chip).
             nv.archive_count = om::mc::contacts().count;
             nv.sd_mounted  = g_sd_mounted;
+            nv.radio_cap   = om::mc::radioCapacity();   // S516: 300 over /int, 32 on the NVS fallback
             if (nodes_focus >= nv.order_count) nodes_focus = nv.order_count > 0 ? nv.order_count - 1 : 0;
             if (nodes_focus < 0) nodes_focus = 0;
             // S514/EST-455: the menu belongs to a STORE row; after a toggle (or an advert) the focus follows it,
@@ -3039,6 +3041,12 @@ extern "C" void app_main(void) {
                                                    om::ui::PopupChat::None, 0, nullptr);
                         ESP_LOGI(TAG, "[screen] off");
                     } else if (act == om::ui::ScreenAct::OnByPower) {
+                        // S516 (EST-472 item 4): a message that arrived while the screen was locked may not have
+                        // been polled yet (the poll is 250 ms later, and this key press `continue`s past it). The
+                        // OFF rule says such a message is NOT kept for later, so discard the pending one HERE,
+                        // with screen_off still true, before the panel lights: otherwise it pops up on wake.
+                        (void)om::ui::msgPopupPoll((uint32_t)(esp_timer_get_time() / 1000), true, false,
+                                                   om::ui::PopupChat::None, 0, nullptr);
                         om::led::setScreenOff(false);
                         screenLightsOn();
                         ESP_LOGI(TAG, "[screen] on (by power)");
@@ -4105,13 +4113,27 @@ extern "C" void app_main(void) {
                                     // reason, and this is what its Enter answers.
                                     uint8_t pub[32];
                                     if (nodeMenuPub(pub)) {
-                                        const int idx = om::mc::contactsFind(om::mc::contacts(), pub);
-                                        const om::mc::Contact* c =
-                                            (idx >= 0) ? &om::mc::contacts().c[idx] : nullptr;
+                                        // S516 (EST-472 item 1): the lookup and the read of lat/lon happen
+                                        // UNDER the store lock, and only the two int32s are copied out. The
+                                        // old code took `&contacts().c[idx]` with no lock and kept the POINTER:
+                                        // the radio task writes that table, and a row can move on a delete
+                                        // (core/node_table.h says so). Copied, not pointed at.
+                                        int32_t lat_e6 = 0, lon_e6 = 0;
+                                        bool    have_position = false;
+                                        {
+                                            om::mc::StoreLock      l;
+                                            om::mc::ContactStore&  cs = om::mc::contacts();
+                                            const int              idx = om::mc::contactsFind(cs, pub);
+                                            if (idx >= 0) {
+                                                lat_e6        = cs.c[idx].lat_e6;
+                                                lon_e6        = cs.c[idx].lon_e6;
+                                                have_position = true;
+                                            }
+                                        }
                                         int     nz = 15;
                                         int64_t nwx = 0, nwy = 0;
-                                        if (c != nullptr &&
-                                            om::map::centreOnNode(c->lat_e6, c->lon_e6, 15, om::ui::kMapAreaW,
+                                        if (have_position &&
+                                            om::map::centreOnNode(lat_e6, lon_e6, 15, om::ui::kMapAreaW,
                                                                   om::ui::kMapAreaH, &nz, &nwx, &nwy)) {
                                             map_z = nz;
                                             map_wx = nwx;
@@ -4138,7 +4160,8 @@ extern "C" void app_main(void) {
                                             om::ui::noticeSet(om::ui::nodeAddedToRadioNotice(), 3000);
                                         } else if (r == om::mc::RadioResult::RadioFull) {
                                             char text[80];
-                                            om::ui::nodeRadioFullNotice(text, sizeof(text));
+                                            // S516/EST-472 item 6: the numbers are the store in use's cap.
+                                            om::ui::nodeRadioFullNotice(text, sizeof(text), om::mc::radioCapacity());
                                             om::ui::noticeSet(text, 4000);
                                         } else if (r == om::mc::RadioResult::AlreadyIn) {
                                             om::ui::noticeSet("Already in the radio", 2500);

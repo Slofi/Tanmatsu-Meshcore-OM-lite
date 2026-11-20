@@ -164,11 +164,12 @@ inline int nodeMenuFocusFollow(const int* shown, int shown_count, int store_inde
 
 // ---------------------------------------------------------------- S515/EST-465: the store actions' words
 // "Radio full (300 / 300): move a node to the SD card first" — Filip's rule 2, in the sheet's exact words.
-// The numbers come from kMaxRadio, so the sentence cannot drift from the cap.
-inline void nodeRadioFullNotice(char* out, size_t cap) {
+// S516/EST-472 item 6: the numbers are the CAP OF THE STORE IN USE (radioCapFor(int_mounted)): 300 over /int,
+// 32 on the NVS fallback. The caller passes it, so the sentence still cannot drift from the rule.
+inline void nodeRadioFullNotice(char* out, size_t cap, size_t radio_cap = om::mc::kMaxRadio) {
     if (out == nullptr || cap == 0) return;
-    snprintf(out, cap, "Radio full (%u / %u): move a node to the SD card first",
-             (unsigned)om::mc::kMaxRadio, (unsigned)om::mc::kMaxRadio);
+    snprintf(out, cap, "Radio full (%u / %u): move a node to the SD card first", (unsigned)radio_cap,
+             (unsigned)radio_cap);
 }
 
 inline const char* nodeAddedToRadioNotice() { return "Added to the radio"; }

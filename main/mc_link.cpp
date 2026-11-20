@@ -187,6 +187,10 @@ HeardToRadio  g_heard_to_radio = kHeardToRadioDefault;
 uint8_t*      g_node_file_buf = nullptr;  // the /int and SD files' encode/decode buffer (PSRAM)
 
 void initNodeTable() {
+    // S516 (EST-472 item 10): this is called from begin(), nodeStorageBegin() and restoreContacts(), and the
+    // device log showed "node table: 2000 rows" three times. The ALLOCATIONS were already idempotent; the LOG
+    // was not. One init, one line — the banner belongs to the first call that actually got the table.
+    static bool s_reported = false;
     if (g_contacts.c == nullptr) {
         ESP_LOGE(TAG, "node table: allocation of %u B FAILED; every store starts empty and full",
                  (unsigned)contactsTableBytes());
@@ -200,6 +204,8 @@ void initNodeTable() {
         g_node_file_buf = static_cast<uint8_t*>(nodeTableAlloc(kNodeFileMaxBytes));
         if (g_node_file_buf == nullptr) ESP_LOGE(TAG, "node storage: file buffer allocation FAILED");
     }
+    if (s_reported) return;
+    s_reported = true;
     ESP_LOGI(TAG, "node table: %u rows, %u B in PSRAM (%u B/row)", (unsigned)kMaxNodes,
              (unsigned)contactsTableBytes(), (unsigned)sizeof(Contact));
 }
@@ -609,11 +615,20 @@ bool writeFileAtomic(const char* path, const char* tmp, const uint8_t* data, siz
         return false;
     }
     const size_t wrote = fwrite(data, 1, len, f);
-    fflush(f);
-    fsync(fileno(f));
-    fclose(f);
+    const int    flushed = fflush(f);
+    const int    synced  = fsync(fileno(f));
+    const int    closed  = fclose(f);
+    // S516 (EST-472 item 2): a write is finished only when EVERY step said so. Before, only `wrote` was checked, so
+    // a failed flush/fsync/fclose still went on to remove the old file: the old bytes were gone and the new ones
+    // might never have reached the card/flash. Now the temp is removed and the old file stays.
     if (wrote != len) {
         ESP_LOGW(TAG, "node storage: short write to %s (%u of %u B)", tmp, (unsigned)wrote, (unsigned)len);
+        remove(tmp);
+        return false;
+    }
+    if (flushed != 0 || synced != 0 || closed != 0) {
+        ESP_LOGW(TAG, "node storage: %s not durable (fflush %d, fsync %d, fclose %d, errno %d); old file kept",
+                 tmp, flushed, synced, closed, errno);
         remove(tmp);
         return false;
     }
@@ -653,13 +668,23 @@ bool readNodeFile(const char* path, size_t* out_len) {
 }
 
 // S515 (Claude, review): the file, or, when it is absent, the temp file a power cut between writeFileAtomic()'s
-// remove and its rename left behind (the decoder's CRC still decides whether those bytes are used). The temp file
-// is then renamed into place so the next boot finds the real name again.
+// remove and its rename left behind. S516 (EST-472 item 2): the temp file is CRC-CHECKED BEFORE it is trusted —
+// it is renamed into place only when every byte the header claims is there and the CRC agrees. A torn temp is
+// removed instead (its only other copy, the old file, was already removed by writeFileAtomic), the caller falls
+// back to the NVS store, and a corrupt radio.bin is not left behind for every later boot to reject.
 bool readNodeFileOrTemp(const char* path, const char* tmp, size_t* out_len) {
     if (readNodeFile(path, out_len)) return true;
     struct stat st;
     if (stat(path, &st) == 0) return false;     // the file is there but unreadable: not a recovery case
     if (!readNodeFile(tmp, out_len)) return false;
+    const NodeFileResult checked = nodeFileCheck(g_node_file_buf, *out_len);
+    if (checked != NodeFileResult::Ok) {
+        ESP_LOGW(TAG, "node storage: %s is not usable (%s); removed, the store falls back", tmp,
+                 nodeFileResultText(checked));
+        remove(tmp);
+        *out_len = 0;
+        return false;
+    }
     ESP_LOGW(TAG, "node storage: %s missing, loading %s (an interrupted write)", path, tmp);
     if (rename(tmp, path) != 0) ESP_LOGW(TAG, "node storage: rename %s -> %s failed (errno %d)", tmp, path, errno);
     return true;
@@ -781,8 +806,30 @@ size_t nodeStorageBegin(bool sd_mounted) {
     }
     ESP_LOGI(TAG, "node table: %u rows in PSRAM (%u B), %u in the radio",
              (unsigned)g_contacts.count, (unsigned)contactsTableBytes(), (unsigned)radioCount(g_contacts));
+    // S516/EST-472 item 8: internal RAM after the two message rings (g_messages 18,700 B + g_dms 20,748 B, `nm`
+    // on the built ELF) and the PSRAM allocations above. One line, at boot, with the number the Settings ›
+    // General heap row shows.
+    ESP_LOGI(TAG, "heap: %u B internal free, largest internal block %u B, PSRAM free %u B",
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
     if (radio_loaded) logNvsStats("after the node files (boot)");   // restoreContacts() logged its own pair
     return g_contacts.count;
+}
+
+// S516/EST-472 item 8: evidence, not a guess. The MAIN task now writes radio.bin/nodes.bin and the radio task
+// writes dm-*.log; this is logged ONCE PER TASK, after that task's first FatFs write, so the low-water mark
+// includes the FatFs call rather than only the boot path. Two writers exist, so two lines are the whole budget.
+void logFatfsWriterStackOnce() {
+    static TaskHandle_t seen[2] = {nullptr, nullptr};
+    const TaskHandle_t  me      = xTaskGetCurrentTaskHandle();
+    for (int i = 0; i < 2; ++i)
+        if (seen[i] == me) return;
+    int slot = (seen[0] == nullptr) ? 0 : (seen[1] == nullptr ? 1 : -1);
+    if (slot < 0) return;
+    seen[slot] = me;
+    ESP_LOGI(TAG, "stack: %u B free at the low-water mark (this task, after a FatFs write)",
+             (unsigned)(uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)));
 }
 
 // S513/EST-437 + S515/EST-464: the MAIN task's writer. The radio task only raises a flag. The radio list goes to
@@ -840,8 +887,11 @@ void contactsPersistTick() {
         bool ok = false;
         if (g_int_mounted) {
             ok = writeFileAtomic(kRadioFilePath, kRadioTempPath, g_node_file_buf, radio_bytes);
-            if (ok) ESP_LOGI(TAG, "radio: %u written to %s (%u B)", (unsigned)radio_rows, kRadioFilePath,
-                             (unsigned)radio_bytes);
+            if (ok) {
+                ESP_LOGI(TAG, "radio: %u written to %s (%u B)", (unsigned)radio_rows, kRadioFilePath,
+                         (unsigned)radio_bytes);
+                logFatfsWriterStackOnce();
+            }
         } else {
             nvs_handle_t h;
             esp_err_t    r = nvs_open(kContactsNvsNamespace, NVS_READWRITE, &h);
@@ -908,6 +958,7 @@ void contactsPersistTick() {
         g_archive_write_failed  = false;
         ESP_LOGI(TAG, "archive: %u written to %s (%u B, %u ms)", (unsigned)archive_rows, kArchiveFilePath,
                  (unsigned)archive_bytes, ms);
+        logFatfsWriterStackOnce();
     } else {
         g_archive_write_failed = true;
         StoreLock l;
@@ -918,12 +969,19 @@ void contactsPersistTick() {
 
 // S515/EST-464: Esc to the launcher. Flush both stores past their floors, then unmount /int so the launcher can
 // mount it again. Called before the "Back to the menu" frame, while the app still owns the partition.
+// S516 (EST-472 item 3): the RADIO file is forced too. Before, only the archive and the ack were forced, so a
+// structural change that had not reached the main loop's writer (or whose last attempt failed) was simply lost on
+// exit. `structural` makes this pass encode the radio list now; the signature check means an unchanged list is
+// still NOT rewritten (no flash wear), and a failed attempt is retried once here instead of never.
 void nodeStorageShutdown() {
     {
         StoreLock l;
-        g_contacts_ack_force = true;
-        g_archive_force      = true;
-        g_archive_dirty      = true;
+        g_contacts_dirty_struct = true;
+        g_contacts_ack_force    = true;
+        g_archive_force         = true;
+        g_archive_dirty         = true;
+        // The retry floor must not swallow the LAST write of the session.
+        g_contacts_last_attempt_ms = 0;
     }
     contactsPersistTick();
     unmountInt();
@@ -1022,21 +1080,26 @@ void nodeStoreCounts(size_t* radio, size_t* sd) {
     if (sd != nullptr) *sd = g_contacts.count;
 }
 
+// S516/EST-472 item 6: the cap of the store in use. /int mounted -> radio.bin -> kMaxRadio; no /int -> the old
+// NVS blob -> kMaxRadioNvs. Read by the rule (addToRadio / advertInArchive), the "Radio full" sentence and both
+// headers. `g_int_mounted` is written once at boot (mountInt) and once at exit (unmountInt), never per packet.
+size_t radioCapacity() { return radioCapFor(g_int_mounted); }
+
 // S515 (Claude, review): the four user actions below FORCE the archive write. A structural change already writes
 // radio.bin on the next pass, but the SD archive waited its 30 s floor, so a power-off inside that window brought a
 // deleted node back from the card on the next boot (the merge adds archive rows). They are rare and deliberate.
 om::mc::RadioResult nodeAddToRadio(const uint8_t pub[32]) {
     if (g_store_mutex == nullptr) return om::mc::RadioResult::NotFound;
     StoreLock l;
-    const om::mc::RadioResult r = addToRadio(g_contacts, pub);
+    const size_t           cap = radioCapacity();
+    const om::mc::RadioResult r = addToRadio(g_contacts, pub, cap);
     if (r == om::mc::RadioResult::Ok) {
         markContactsDirty(true);
         g_archive_force = true;   // a user action: the SD copy follows at once (Claude, S515 review)
-        ESP_LOGI(TAG, "nodes: added to the radio (%u / %u)", (unsigned)radioCount(g_contacts),
-                 (unsigned)kMaxRadio);
+        ESP_LOGI(TAG, "nodes: added to the radio (%u / %u)", (unsigned)radioCount(g_contacts), (unsigned)cap);
     } else if (r == om::mc::RadioResult::RadioFull) {
         ESP_LOGW(TAG, "nodes: radio full (%u / %u); nothing changed", (unsigned)radioCount(g_contacts),
-                 (unsigned)kMaxRadio);
+                 (unsigned)cap);
     }
     return r;
 }
@@ -1615,6 +1678,16 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
         // flood copy, for every type — before the MAC was even tried, which is what stops our own DM opening as
         // "from" a peer whose pub_key[0] happens to equal ours (ECDH is symmetric, so it DOES open).
 
+        // S516/EST-472 item 5: rptr_link handles the LOGGED-IN repeater's CLI answers above. This is the second
+        // door: a CLI-typed TXT_MSG that still reached the DM path (a late answer, a repeater that is also a
+        // contact, a login that has ended) is repeater traffic, not a person's message. Without this it became a
+        // DM thread with a pop-up and an unread dot.
+        if (meshcore::isRepeaterCliText(dm.txt_type)) {
+            ESP_LOGI(TAG, "rx %u B TXT_MSG of CLI type %u (repeater traffic, not a DM), dropped", (unsigned)len,
+                     (unsigned)dm.txt_type);
+            return;
+        }
+
         const uint8_t* peer_pub = &peer_pubs[(size_t)dm.peer * meshcore::kPubKeyBytes];
         char           peer_name[kNameBytes];
         snprintf(peer_name, sizeof(peer_name), "%s", &peer_names[(size_t)dm.peer * kNameBytes]);
@@ -1649,6 +1722,7 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
             if (sdhistory::appendDm(peer_pub, m, next)) {
                 m.log_id = next;
                 if (ci >= 0) g_contacts.c[ci].dm_log_next = next + 1;
+                logFatfsWriterStackOnce();   // S516 item 8: the radio task's own FatFs writer, measured once
             }
             (void)dmPush(g_dms, m);
         }
@@ -1759,7 +1833,7 @@ void onPacket(const uint8_t* buf, size_t len, int rssi_dbm, int snr_db) {
             // automatically. The rule also keeps a hand-chosen radio node in the radio on a refresh.
             const int      idx =
                 advertInArchive(g_contacts, g_heard_to_radio, pub, name, type, v.path_bytes, ts, heard, rssi_dbm,
-                                snr_db * 10, pos.has_position, pos.lat_e6, pos.lon_e6);
+                                snr_db * 10, pos.has_position, pos.lat_e6, pos.lon_e6, radioCapacity());
             if (idx >= 0) {
                 // Add / rename / route change is worth an immediate write; a repeat advert that only moves
                 // last-heard and SNR waits for the 10-minute floor. The radio file's signature check means an

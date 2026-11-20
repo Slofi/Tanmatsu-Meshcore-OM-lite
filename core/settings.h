@@ -709,6 +709,6 @@ constexpr bool advertScheduleDue(uint32_t interval_s, uint32_t elapsed_s, bool e
 }
 
 // The image's version, shown in General > DEVICE. One constant: the next ticket bumps this line.
-constexpr const char* kAppVersion = "65";   // S515/EST-470: RPTR part 2a, the safe settings
+constexpr const char* kAppVersion = "66";   // S516/EST-472: bug sweep of v57-v65 (locking, power cut, cap, exit)
 
 }  // namespace tm

@@ -273,6 +273,53 @@ void testUnreadTotalsArchiveOnlyPeer() {
   CHECK_EQ(ch, 0);
 }
 
+// ---- 3. S516/EST-472 item 6: the cap of the store in use ----------------------------------------------
+// Without /int the radio list is the old NVS blob, which holds 32 rows, not 300. Before this the rule marked up
+// to 300 and the writer silently kept the first 32 — so a node shown as "in the radio" was gone after a reboot.
+void testRadioCapOfStoreInUse() {
+  CHECK_EQ(om::mc::radioCapFor(true), om::mc::kMaxRadio);
+  CHECK_EQ(om::mc::radioCapFor(false), om::mc::kMaxRadioNvs);
+  CHECK_EQ(om::mc::kMaxRadioNvs, 32);   // the NVS blob's own cap (node_store.h aliases it)
+
+  // A device WITHOUT /int: 32 can be marked, the 33rd is refused and nothing moves.
+  om::mc::ContactStore s;
+  for (size_t i = 0; i < om::mc::kMaxRadioNvs; i++)
+    CHECK(addNode(s, (uint32_t)(i + 1), 1, 1000) >= 0);
+  for (size_t i = 0; i < om::mc::kMaxRadioNvs; i++)
+    CHECK_EQ(om::mc::addToRadio(s, s.c[i].pub, om::mc::radioCapFor(false)), om::mc::RadioResult::Ok);
+  CHECK_EQ(om::mc::radioCount(s), om::mc::kMaxRadioNvs);
+
+  const int extra = addNode(s, 5000, 1, 5000);
+  CHECK(extra >= 0);
+  const size_t count_before = s.count;
+  const bool   fresh_before = s.c[extra].fresh;
+  CHECK_EQ(om::mc::addToRadio(s, s.c[extra].pub, om::mc::radioCapFor(false)), om::mc::RadioResult::RadioFull);
+  CHECK_EQ(s.count, count_before);
+  CHECK_EQ(om::mc::radioCount(s), om::mc::kMaxRadioNvs);
+  CHECK(!s.c[extra].in_radio);
+  CHECK_EQ(s.c[extra].fresh, fresh_before);   // a refused add changes no field of any row
+
+  // The SAME table with /int has room: the 33rd succeeds.
+  CHECK_EQ(om::mc::addToRadio(s, s.c[extra].pub, om::mc::radioCapFor(true)), om::mc::RadioResult::Ok);
+  CHECK_EQ(om::mc::radioCount(s), om::mc::kMaxRadioNvs + 1);
+
+  // "Add heard nodes to the radio: Clients/All" must respect the same cap: with 32 already marked, a NEW advert
+  // is kept in the archive and not marked (the writer would have dropped the mark).
+  om::mc::ContactStore auto32;
+  uint8_t pub[32];
+  for (size_t i = 0; i < om::mc::kMaxRadioNvs; i++) {
+    keyFor(pub, (uint32_t)(600 + i));
+    CHECK(om::mc::advertInArchive(auto32, om::mc::HeardToRadio::Clients, pub, "chat", 1, 0, 100, 100, 0, 0,
+                                  false, 0, 0, om::mc::radioCapFor(false)) >= 0);
+  }
+  CHECK_EQ(om::mc::radioCount(auto32), om::mc::kMaxRadioNvs);
+  keyFor(pub, 900);
+  CHECK(om::mc::advertInArchive(auto32, om::mc::HeardToRadio::Clients, pub, "chat", 1, 0, 100, 100, 0, 0, false,
+                                0, 0, om::mc::radioCapFor(false)) >= 0);
+  CHECK_EQ(auto32.count, om::mc::kMaxRadioNvs + 1);
+  CHECK_EQ(om::mc::radioCount(auto32), om::mc::kMaxRadioNvs);   // archive-only, honestly
+}
+
 }  // namespace
 
 int main() {
@@ -285,6 +332,7 @@ int main() {
   testFavouriteIndependent();
   testOrderingAt2000();
   testUnreadTotalsArchiveOnlyPeer();
+  testRadioCapOfStoreInUse();
   printf("%d checks, %d failure(s)\n", g_checks, g_failures);
   return g_failures == 0 ? 0 : 1;
 }

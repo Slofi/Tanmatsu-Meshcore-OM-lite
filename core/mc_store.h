@@ -11,6 +11,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>   // memcpy in DmSummary's copy (S516)
 
 #include "mc_wire.h"   // meshcore::kMaxPath: MeshCore's own limit on a stored route
 // The L2's delivery states (firmware/src/ui/dm_delivery.h): Sending / Delivered / NotConfirmed / Failed, with
@@ -26,7 +27,12 @@ namespace mc {
 // 16 KB partition shared with channels, scopes, sounds and the name. The table now lives in PSRAM and only the
 // `in_radio` rows persist to internal flash (/int/om-lite/radio.bin), so the old cap moves to kMaxRadio.
 constexpr size_t kMaxNodes     = 2000;  // every node, archive + radio, one table
-constexpr size_t kMaxRadio     = 300;   // how many of them may be marked in_radio at once
+constexpr size_t kMaxRadio     = 300;   // how many of them may be marked in_radio at once (the /int file)
+// S516/EST-472 item 6: with NO /int mount the radio list is the old NVS blob, which cannot carry more than the
+// 32 rows it always held. That is a DIFFERENT cap, and the rule and every sentence must use the cap of the store
+// actually in use (see radioCapFor() below) — before this, "Radio full (300 / 300)" was shown on a device whose
+// radio stopped taking nodes at 32.
+constexpr size_t kMaxRadioNvs  = 32;
 // Kept as an alias so every existing user of kMaxContacts keeps working at the new capacity; the name is what
 // the pages and the codecs were written against, and renaming 30 call sites would only add diff noise.
 constexpr size_t kMaxContacts  = kMaxNodes;
@@ -265,14 +271,41 @@ struct DmSummary {
     int         contact = -1;
     uint8_t     pub[32] = {0};   // the thread's key (prefix-only for a restored thread not yet rebound)
     const char* name = "";
+    // S516/EST-472 item 9: where `name` points when the thread has NO name of its own. A deleted node's thread
+    // must still be listed and NAMED — from its own last message, else from the short key. The buffer lives here,
+    // in the summary, so the pointer is valid as long as the summary is (never into the ring or the table).
+    char        short_name[9] = {0};
     const char* text = "";
     uint32_t    ts = 0;
     uint32_t    unread = 0;
+
+    // S516 (Claude, review of EST-472): a summary is RETURNED BY VALUE and COPIED into arrays
+    // (`out[n++] = dmSummaryForPeer(...)`). A memberwise copy would leave `name` pointing at the SOURCE's
+    // short_name, i.e. at a dead temporary. These two re-point it at the copy's own buffer.
+    DmSummary() = default;
+    DmSummary(const DmSummary& o) { copyFrom(o); }
+    DmSummary& operator=(const DmSummary& o) {
+        if (this != &o) copyFrom(o);
+        return *this;
+    }
+
+private:
+    void copyFrom(const DmSummary& o) {
+        has     = o.has;
+        contact = o.contact;
+        memcpy(pub, o.pub, sizeof(pub));
+        memcpy(short_name, o.short_name, sizeof(short_name));
+        name    = (o.name == o.short_name) ? short_name : o.name;
+        text    = o.text;
+        ts      = o.ts;
+        unread  = o.unread;
+    }
 };
 DmSummary dmSummaryForPeer(const DmRing& r, const ContactStore& s, const uint8_t pub[32]);
 
 // The DM column's order: threads that have messages, newest first. Writes one summary per thread (up to
-// `max_out`) and returns how many; a thread with no contact row still appears, named by its 8-hex prefix later.
+// `max_out`) and returns how many; a thread with no contact row still appears, named from its own message or the
+// 8-hex short key (S516/EST-472 item 9: "Delete everywhere" removes the node, never the thread).
 size_t dmThreadSummaries(const DmRing& r, const ContactStore& s, DmSummary* out, size_t max_out);
 
 

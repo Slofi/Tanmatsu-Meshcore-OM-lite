@@ -35,8 +35,19 @@ constexpr uint8_t kTypePath     = 0x08;
 constexpr uint8_t kRouteDirect   = 0x02;
 
 // helpers/BaseChatMesh: txt types live in the top 6 bits of the flags byte.
-constexpr uint8_t kTxtTypeCliData    = 1;
-constexpr uint8_t kTxtTypeCliCommand = 2;
+// helpers/TxtDataHelpers.h:6-9: PLAIN 0, CLI_DATA 1, SIGNED_PLAIN 2, CLI_COMMAND 3. (S516, Claude review: CLI_COMMAND
+// was 2 here, which is SIGNED_PLAIN, a room server's message; it was unused until EST-472's classifier.)
+constexpr uint8_t kTxtTypeCliData     = 1;
+constexpr uint8_t kTxtTypeSignedPlain = 2;
+constexpr uint8_t kTxtTypeCliCommand  = 3;
+
+// S516/EST-472 item 5: a TXT_MSG of a CLI type is REPEATER TRAFFIC, never a person's DM. rptr_link consumes the
+// logged-in repeater's answers before this code; this classifier is the second door: if such a text still reaches
+// the DM path (not logged in, a late answer, a contact repeater), it must be dropped, not shown — otherwise it
+// raises a DM thread, a new-message pop-up and an unread dot for what is a CLI answer.
+inline bool isRepeaterCliText(uint8_t txt_type) {
+    return txt_type == kTxtTypeCliData || txt_type == kTxtTypeCliCommand;
+}
 
 constexpr size_t kAckBytes     = 6;   // BaseChatMesh.cpp:244-248
 constexpr size_t kPathHashSize = 1;   // PATH_HASH_SIZE (MeshCore.h:18), the dest/src hashes in the payload

@@ -179,6 +179,16 @@ void testNonPlainIsNotAcked() {
     CHECK(m.txt_type == meshcore::kTxtTypeCliData);
     CHECK(!m.ack_valid);
     CHECK(m.ack[0] == 0 && m.ack[5] == 0);
+    // S516/EST-472 item 5: a frame that OPENS as a DM but is CLI-typed is repeater traffic. The classifier is
+    // what main/mc_link.cpp now checks before dmPush, so a late/unsolicited CLI answer cannot become a thread.
+    CHECK(meshcore::isRepeaterCliText(m.txt_type));
+    CHECK(!meshcore::isRepeaterCliText(meshcore::kTxtTypePlain));
+    CHECK(meshcore::isRepeaterCliText(meshcore::kTxtTypeCliCommand));
+    CHECK(meshcore::isRepeaterCliText(3));    // TXT_TYPE_CLI_COMMAND (TxtDataHelpers.h:9)
+    // TXT_TYPE_SIGNED_PLAIN (TxtDataHelpers.h:8) is a person's message (room servers sign theirs): never dropped as
+    // repeater traffic. S516 Claude review: the constant said 2 = CLI_COMMAND and this line said 3 = SIGNED_PLAIN.
+    CHECK(!meshcore::isRepeaterCliText(meshcore::kTxtTypeSignedPlain));
+    CHECK(!meshcore::isRepeaterCliText(2));
 }
 
 void testAckBuilders() {

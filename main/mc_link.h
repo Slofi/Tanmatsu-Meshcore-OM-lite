@@ -193,6 +193,11 @@ om::mc::RadioResult nodeRemoveFromRadio(const uint8_t pub[32]);
 bool                nodeDeleteEverywhere(const uint8_t pub[32]);   // false: no row with that key
 size_t              nodeClearRadio();   // clears in_radio on every row; the archive keeps them all
 
+// S516/EST-472 item 6: the cap of the store the radio list is actually persisted to — kMaxRadio (300) while
+// /int is mounted, kMaxRadioNvs (32) on the NVS fallback. "Radio full", the Nodes head and Settings' Stored
+// nodes row all ask this, so a device without /int can never say 300 / 300 when the real limit is 32.
+size_t radioCapacity();
+
 // The live counts the Nodes head and the Settings info row show. One pass each, under the lock. `sd` is EVERY
 // node saved on the SD card (the radio's rows included: one table, one file).
 void nodeStoreCounts(size_t* radio, size_t* sd);

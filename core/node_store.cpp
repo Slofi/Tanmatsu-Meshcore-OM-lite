@@ -87,11 +87,8 @@ size_t nodeFileEncode(const ContactStore& s, bool radio_only, size_t max_rows, u
     return need;
 }
 
-NodeFileResult nodeFileDecode(const uint8_t* in, size_t len, ContactStore& out) {
-    if (len == 0) {
-        out.count = 0;
-        return NodeFileResult::Empty;
-    }
+NodeFileResult nodeFileCheck(const uint8_t* in, size_t len) {
+    if (len == 0) return NodeFileResult::Empty;
     if (in == nullptr || len < kNodeFileHeaderBytes) return NodeFileResult::Truncated;
     if (get32(in + 0) != kNodeFileMagic) return NodeFileResult::BadMagic;
     if (get16(in + 4) != kNodeFileVersion) return NodeFileResult::BadVersion;
@@ -103,6 +100,17 @@ NodeFileResult nodeFileDecode(const uint8_t* in, size_t len, ContactStore& out) 
     if (len > need) return NodeFileResult::BadSize;
     const size_t body = kNodeFileHeaderBytes + count * kContactBlobRecordBytes;
     if (get32(in + body) != nodeFileCrc32(in, body)) return NodeFileResult::BadCrc;
+    return NodeFileResult::Ok;
+}
+
+NodeFileResult nodeFileDecode(const uint8_t* in, size_t len, ContactStore& out) {
+    const NodeFileResult checked = nodeFileCheck(in, len);
+    if (checked == NodeFileResult::Empty) {
+        out.count = 0;
+        return NodeFileResult::Empty;
+    }
+    if (checked != NodeFileResult::Ok) return checked;
+    const size_t count = get16(in + 8);
     if (out.c == nullptr || count > out.cap) return NodeFileResult::BadCount;
 
     // Every check is above this line: a wrong file leaves the table alone.

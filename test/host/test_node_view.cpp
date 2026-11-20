@@ -216,6 +216,9 @@ void testRadioFullPath() {
   char text[80];
   om::ui::nodeRadioFullNotice(text, sizeof(text));
   CHECK(strcmp(text, "Radio full (300 / 300): move a node to the SD card first") == 0);
+  // S516/EST-472 item 6: without /int the sentence names the cap that is actually refusing (32).
+  om::ui::nodeRadioFullNotice(text, sizeof(text), om::mc::radioCapFor(false));
+  CHECK(strcmp(text, "Radio full (32 / 32): move a node to the SD card first") == 0);
   CHECK(strcmp(om::ui::nodeAddedToRadioNotice(), "Added to the radio") == 0);
   CHECK(strcmp(om::ui::nodeMovedToArchiveNotice(), "Removed from the radio, kept on the SD card") == 0);
 }
@@ -286,6 +289,13 @@ void testSettingsValues() {
   // S515/EST-468: no card = "SD -", never a number that implies the nodes survive a restart.
   om::ui::nodeStoreCountsText(head, sizeof(head), 3, 7, false);
   CHECK(strcmp(head, "Radio 3 / 300 \xc2\xb7 SD -") == 0);
+  // S516/EST-472 item 6: with NO /int the cap is 32, not 300 — the head and Settings must say so.
+  om::ui::nodeStoreCountsText(head, sizeof(head), 30, 412, true, om::mc::kMaxRadioNvs);
+  CHECK(strcmp(head, "Radio 30 / 32 \xc2\xb7 SD 412") == 0);
+  om::ui::nodeStoreInfoText(info, sizeof(info), 30, 412, true, om::mc::kMaxRadioNvs);
+  CHECK(strcmp(info, "Radio 30 / 32 \xc2\xb7 SD 412 \xc2\xb7 SD ok") == 0);
+  om::ui::nodeStoreCountsText(head, sizeof(head), 32, 500, true, om::mc::radioCapFor(false));
+  CHECK(strcmp(head, "Radio 32 / 32 \xc2\xb7 SD 500") == 0);
 
   // The Settings list is the RADIO list: of the five fixture rows only the three in the radio are offered.
   Fixture f;

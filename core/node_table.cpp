@@ -43,7 +43,7 @@ const char* radioResultText(RadioResult r) {
 
 int advertInArchive(ContactStore& s, HeardToRadio setting, const uint8_t pub[32], const char* name, uint8_t type,
                     uint8_t path_len, uint32_t remote_ts, uint32_t heard_at, int rssi, int snr_x10,
-                    bool has_position, int32_t lat_e6, int32_t lon_e6) {
+                    bool has_position, int32_t lat_e6, int32_t lon_e6, size_t radio_cap) {
     if (pub == nullptr) return -1;
     const bool is_new = contactsFind(s, pub) < 0;
     // The insert branch (fresh, in_radio = false, no inherited route) lives in contactsUpsert, and it is the ONLY
@@ -53,7 +53,8 @@ int advertInArchive(ContactStore& s, HeardToRadio setting, const uint8_t pub[32]
     const int idx = contactsUpsert(s, pub, name, type, path_len, remote_ts, heard_at, rssi, snr_x10, has_position,
                                    lat_e6, lon_e6);
     if (idx < 0) return -1;   // table full: the row is dropped, exactly as before
-    if (is_new && heardToRadioAllows(setting, type) && radioCount(s) < kMaxRadio) s.c[idx].in_radio = true;
+    // S516 (EST-472 item 6): `radio_cap` is the store in use (/int 300, NVS 32), never a fixed 300.
+    if (is_new && heardToRadioAllows(setting, type) && radioCount(s) < radio_cap) s.c[idx].in_radio = true;
     return idx;
 }
 
@@ -64,12 +65,13 @@ size_t radioCount(const ContactStore& s) {
     return n;
 }
 
-RadioResult addToRadio(ContactStore& s, const uint8_t pub[32]) {
+RadioResult addToRadio(ContactStore& s, const uint8_t pub[32], size_t radio_cap) {
     const int idx = contactsFind(s, pub);
     if (idx < 0) return RadioResult::NotFound;
     if (s.c[idx].in_radio) return RadioResult::AlreadyIn;
     // Filip's rule 2: a full radio REFUSES. Nothing is marked, nothing is evicted, no field of any row moves.
-    if (radioCount(s) >= kMaxRadio) return RadioResult::RadioFull;
+    // S516 (EST-472 item 6): full means full for the store in use, not for /int's cap on a device without /int.
+    if (radioCount(s) >= radio_cap) return RadioResult::RadioFull;
     s.c[idx].in_radio = true;
     return RadioResult::Ok;
 }

@@ -108,7 +108,7 @@ void drawNodes(Screen& s, const NodesView& v) {
     // (radio ones included) and "SD -" without a card. The three chips are drawn in the SAME band (where "N
     // nodes heard" used to be), on the title's right, so the filter is never off screen.
     char head_right[64];
-    nodeStoreCountsText(head_right, sizeof(head_right), v.radio_count, v.archive_count, v.sd_mounted);
+    nodeStoreCountsText(head_right, sizeof(head_right), v.radio_count, v.archive_count, v.sd_mounted, v.radio_cap);
     const int head_bot = drawPageHead(s, "Nodes", head_right);
     {
         const Font* hf       = fontFor(Face::Hint);

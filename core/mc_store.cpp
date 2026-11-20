@@ -422,6 +422,13 @@ DmSummary dmSummaryForPeer(const DmRing& r, const ContactStore& s, const uint8_t
         out.has     = true;
         out.contact = idx;
         out.name    = (idx >= 0 && s.c[idx].name[0] != '\0') ? s.c[idx].name : m->peer_name;
+        // S516 (EST-472 item 9): the node is gone AND its last message carried no name (an outgoing-only thread,
+        // or a restored one). The thread is still real, so name it from the short key — the same 8 hex the DM
+        // log's file name carries — instead of returning an empty name that reads as "which chat?".
+        if (out.name == nullptr || out.name[0] == '\0') {
+            snprintf(out.short_name, sizeof(out.short_name), "%02x%02x%02x%02x", pub[0], pub[1], pub[2], pub[3]);
+            out.name = out.short_name;
+        }
         out.text    = m->text;
         out.ts      = m->local_ts ? m->local_ts : m->ts;
         break;

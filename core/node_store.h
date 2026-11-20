@@ -28,8 +28,10 @@ constexpr size_t   kNodeFileCrcBytes    = 4;
 constexpr size_t   kNodeFileMaxBytes =
     kNodeFileHeaderBytes + kMaxNodes * kContactBlobRecordBytes + kNodeFileCrcBytes;
 
-// The old NVS budget: the fallback blob may carry no more than this many radio rows (EST-463 item 0).
-constexpr size_t kNodeNvsRadioCap = 32;
+// The old NVS budget: the fallback blob may carry no more than this many radio rows (EST-463 item 0). S516:
+// one constant, in mc_store.h, because the node rule (core/node_table.h) and the headers use the same number.
+constexpr size_t kNodeNvsRadioCap = kMaxRadioNvs;
+static_assert(kNodeNvsRadioCap == 32, "the NVS radio cap is the one the old blob held");
 
 enum class NodeFileResult : uint8_t {
     Ok = 0,
@@ -60,6 +62,12 @@ size_t nodeFileEncode(const ContactStore& s, bool radio_only, size_t max_rows, u
 
 // Decode a whole file. `out` is untouched unless the answer is Ok (or Empty, which clears it).
 NodeFileResult nodeFileDecode(const uint8_t* in, size_t len, ContactStore& out);
+
+// S516/EST-472 item 2: is this WHOLE file trustworthy, without a store to decode into? Same checks as
+// nodeFileDecode (magic, version, record width, count, exact length, CRC-32 over every byte before it) but it only
+// reads. `readNodeFileOrTemp()` uses it BEFORE it renames a power-cut temp file into place: a torn temp must never
+// become the real name (the ticket's rule: the temp file is CRC-checked before it is trusted).
+NodeFileResult nodeFileCheck(const uint8_t* in, size_t len);
 
 // Mark every row in_radio, up to `cap` (a radio file is by definition the radio list; a migrated v1-v3 NVS blob
 // had no flag at all). Returns how many were marked.

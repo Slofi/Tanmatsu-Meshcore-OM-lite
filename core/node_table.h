@@ -51,6 +51,11 @@ enum class RadioResult : uint8_t {
 
 const char* radioResultText(RadioResult r);
 
+// S516/EST-472 item 6: the cap of the store the radio list actually persists to. /int's radio.bin holds
+// kMaxRadio rows; without /int the old NVS blob holds kMaxRadioNvs. The caller (main/mc_link.cpp) knows which
+// store is mounted, so every rule below takes the cap as an argument instead of assuming 300.
+constexpr size_t radioCapFor(bool int_mounted) { return int_mounted ? kMaxRadio : kMaxRadioNvs; }
+
 // An advert from the air, already signature-verified by the caller (mc_link). Insert or refresh by key:
 //   * an INSERT sets fresh = true (the S515/EST-461 new-node dot) and in_radio = heardToRadioAllows(setting, type);
 //     with the default Off that is false, which is Filip's rule 1.
@@ -59,15 +64,17 @@ const char* radioResultText(RadioResult r);
 // Returns the store index, or -1 when the table is full and the key is new (the row is dropped, as before).
 int advertInArchive(ContactStore& s, HeardToRadio setting, const uint8_t pub[32], const char* name, uint8_t type,
                     uint8_t path_len, uint32_t remote_ts, uint32_t heard_at, int rssi, int snr_x10,
-                    bool has_position = false, int32_t lat_e6 = 0, int32_t lon_e6 = 0);
+                    bool has_position = false, int32_t lat_e6 = 0, int32_t lon_e6 = 0,
+                    size_t radio_cap = kMaxRadio);
 
 // How many rows are marked in_radio. O(n), and n is 2,000 — one pass, no counter to keep in sync (a counter
 // would be one more thing a restore could get wrong).
 size_t radioCount(const ContactStore& s);
 
-// Mark a row in_radio. NEVER evicts: at kMaxRadio the answer is RadioFull and the table is untouched, including
+// Mark a row in_radio. NEVER evicts: at `radio_cap` the answer is RadioFull and the table is untouched, including
 // `fresh` and the row's other fields. A node already in the radio answers AlreadyIn (idempotent, no write).
-RadioResult addToRadio(ContactStore& s, const uint8_t pub[32]);
+// `radio_cap` is radioCapFor(int_mounted): kMaxRadio over /int, kMaxRadioNvs without it.
+RadioResult addToRadio(ContactStore& s, const uint8_t pub[32], size_t radio_cap = kMaxRadio);
 
 // Clear in_radio. The row STAYS in the table and stays fully usable (DMs decrypt, ping/trace work); only its
 // persistence store changes. NotFound when the key is not in the table.

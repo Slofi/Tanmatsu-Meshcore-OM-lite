@@ -69,26 +69,28 @@ inline int nodeViewFilter(const om::mc::ContactStore& s, const int* order, int o
 
 // The page head's right-hand text: "Radio 10 / 300 · SD 412". `sd` is EVERY node saved on the SD card
 // (the radio's rows included; one table, one row per node). No card = "SD -", never a number that implies
-// the nodes survive a restart.
-inline void nodeStoreCountsText(char* out, size_t cap, size_t radio, size_t sd, bool sd_mounted) {
+// the nodes survive a restart. S516/EST-472 item 6: `radio_cap` is the cap of the store in use
+// (radioCapFor(int_mounted)) — 300 over /int, 32 on the NVS fallback — never a hard-coded 300.
+inline void nodeStoreCountsText(char* out, size_t cap, size_t radio, size_t sd, bool sd_mounted,
+                                size_t radio_cap = om::mc::kMaxRadio) {
     if (out == nullptr || cap == 0) return;
     if (sd_mounted)
-        snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD %u", (unsigned)radio, (unsigned)om::mc::kMaxRadio,
-                 (unsigned)sd);
+        snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD %u", (unsigned)radio, (unsigned)radio_cap, (unsigned)sd);
     else
-        snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD -", (unsigned)radio, (unsigned)om::mc::kMaxRadio);
+        snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD -", (unsigned)radio, (unsigned)radio_cap);
 }
 
 // Settings › OM Lite › NODES, the info row: the same counts plus the card. A missing card is not a failure
 // (the radio list still works), but the SD copy does not survive a restart without it, so it says so.
-inline void nodeStoreInfoText(char* out, size_t cap, size_t radio, size_t sd, bool sd_mounted) {
+inline void nodeStoreInfoText(char* out, size_t cap, size_t radio, size_t sd, bool sd_mounted,
+                              size_t radio_cap = om::mc::kMaxRadio) {
     if (out == nullptr || cap == 0) return;
     if (sd_mounted)
-        snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD %u \xc2\xb7 %s", (unsigned)radio,
-                 (unsigned)om::mc::kMaxRadio, (unsigned)sd, "SD ok");
+        snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD %u \xc2\xb7 %s", (unsigned)radio, (unsigned)radio_cap,
+                 (unsigned)sd, "SD ok");
     else
-        snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD - \xc2\xb7 %s", (unsigned)radio,
-                 (unsigned)om::mc::kMaxRadio, "no SD card");
+        snprintf(out, cap, "Radio %u / %u \xc2\xb7 SD - \xc2\xb7 %s", (unsigned)radio, (unsigned)radio_cap,
+                 "no SD card");
 }
 
 // Settings › OM Lite › NODES, "Add heard nodes to the radio": the row's value.

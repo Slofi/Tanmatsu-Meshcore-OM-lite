@@ -8,6 +8,7 @@
 #include "freertos/FreeRTOS.h"   // taskENTER_CRITICAL: the radio task publishes, the main task draws
 
 #include "launcher_page.h"   // textBaseline / drawText* — the one place the baseline math lives
+#include "chat_layout.h"     // S516: the UTF-8-safe wrapper the pop-up reuses (host-tested)
 #include "tm_theme.h"
 #include "../../firmware/src/ui/theme.h"   // the L2 palette: one source of truth, never copied
 
@@ -55,35 +56,32 @@ char         g_popup_text_copy[192] = {0};
 
 // Greedy word wrap for the pop-up's body, at most three lines. The font is the device's own face; "..." is
 // ASCII on purpose (the generated font carries Latin-1 + Latin Extended-A, not U+2026).
+// S516/EST-472 item 7: this used to be a byte-by-byte greedy wrap, so a full 95-byte line could end INSIDE a
+// multi-byte character (a Slovenian "č" became two bytes of garbage on the plate). It now reuses
+// om::mc::wrapText — the SAME wrapper the chat page draws with, whose "a multi-byte sequence is never cut" rule is
+// host-tested (test_layout, also in the ASan stage). The pop-up is capped at three lines, so a fourth or a clipped
+// tail becomes "...".
+int measurePopup(void* ctx, const char* ptr, int len) {
+    const Font* f = (const Font*)ctx;
+    return (f != nullptr && f->ready()) ? f->textWidthRange(ptr, len) : 0;
+}
+
 int wrapPopupLines(const Font* f, const char* text, int maxw, char out[3][96]) {
-    int         n = 0;
-    const char* p = text != nullptr ? text : "";
-    while (*p != '\0' && n < 3) {
-        char line[96] = {0};
-        int  len = 0, last_space = -1;
-        while (p[len] != '\0' && len < (int)sizeof(line) - 1) {
-            line[len]     = p[len];
-            line[len + 1] = '\0';
-            if (f != nullptr && f->ready() && f->textWidth(line) > maxw && len > 0) {
-                if (last_space > 0) {
-                    line[last_space] = '\0';
-                    len              = last_space;
-                } else {
-                    line[len] = '\0';
-                }
-                break;
-            }
-            if (p[len] == ' ') last_space = len;
-            ++len;
-        }
-        snprintf(out[n], 96, "%s", line);
-        p += len;
-        while (*p == ' ') ++p;
-        ++n;
+    const char* src = text != nullptr ? text : "";
+    const om::mc::Wrapped w = om::mc::wrapText(src, maxw, measurePopup, (void*)f);
+    int        n    = w.count < 3 ? (int)w.count : 3;
+    const bool more = w.clipped || w.count > 3;
+    if (n == 0) {
+        out[0][0] = '\0';
+        return 0;
     }
-    const bool clipped = (*p != '\0');
-    if (clipped && n > 0) {
-        // Make room for "..." on the last line so the ellipsis cannot leave the plate.
+    for (int i = 0; i < n; ++i) {
+        int len = (int)w.line[i].len;
+        if (len > 95) len = 95;   // wrapText never splits a sequence, and its lines fit the width
+        memcpy(out[i], src + w.line[i].start, (size_t)len);
+        out[i][len] = '\0';
+    }
+    if (more) {
         char* last = out[n - 1];
         while (last[0] != '\0' && f != nullptr && f->ready() &&
                f->textWidth(last) + f->textWidth("...") > maxw) {

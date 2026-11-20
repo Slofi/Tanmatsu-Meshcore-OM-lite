@@ -148,6 +148,42 @@ void testCodecRefusals() {
   CHECK_EQ(om::mc::nodeFileDecode(copy, n, back), om::mc::NodeFileResult::BadCrc);
 }
 
+// S516/EST-472 item 2: the temp file a power cut leaves behind must be CRC-checked BEFORE readNodeFileOrTemp()
+// renames it over the real name. That check lives in core as nodeFileCheck(), and this pins that it answers for
+// the same bytes nodeFileDecode does — including the torn temp (a short file with a good header).
+void testFileCheckBeforeTrust() {
+  om::mc::ContactStore s;
+  addContact(s, makeNode(30, true, 100));
+  addContact(s, makeNode(31, true, 200));
+  static uint8_t buf[om::mc::kNodeFileMaxBytes];
+  const size_t n = om::mc::nodeFileEncode(s, true, 0, buf, sizeof(buf));
+  CHECK(n > (size_t)om::mc::kNodeFileCrcBytes);
+
+  CHECK_EQ(om::mc::nodeFileCheck(buf, n), om::mc::NodeFileResult::Ok);
+  CHECK_EQ(om::mc::nodeFileCheck(buf, 0), om::mc::NodeFileResult::Empty);
+  CHECK_EQ(om::mc::nodeFileCheck(nullptr, 0), om::mc::NodeFileResult::Empty);
+
+  // A TEMP WRITE CUT SHORT: the header is intact and claims two records, the file holds one. This is exactly
+  // what the old readNodeFileOrTemp() renamed into place; the check must refuse it.
+  const size_t one_record = om::mc::kNodeFileHeaderBytes + om::mc::kContactBlobRecordBytes;
+  CHECK(one_record < n - om::mc::kNodeFileCrcBytes);
+  CHECK_EQ(om::mc::nodeFileCheck(buf, one_record), om::mc::NodeFileResult::Truncated);
+
+  static uint8_t copy[om::mc::kNodeFileMaxBytes];
+  memcpy(copy, buf, n);
+  copy[n - 1] ^= 0xFF;   // the trailing CRC, torn
+  CHECK_EQ(om::mc::nodeFileCheck(copy, n), om::mc::NodeFileResult::BadCrc);
+  memcpy(copy, buf, n);
+  copy[8] = 0xFF;        // count 0x7FFF: more rows than the table holds
+  copy[9] = 0x7F;
+  CHECK_EQ(om::mc::nodeFileCheck(copy, n), om::mc::NodeFileResult::BadCount);
+  memcpy(copy, buf, n);
+  copy[0] ^= 0xFF;
+  CHECK_EQ(om::mc::nodeFileCheck(copy, n), om::mc::NodeFileResult::BadMagic);
+  // The same answer nodeFileDecode gives, so the two can never disagree about the temp.
+  CHECK_EQ((int)om::mc::nodeFileCheck(buf, n), (int)om::mc::nodeFileDecode(buf, n, s));
+}
+
 // ---- 2. the step-0 NVS fallback encoder ----------------------------------------------------------
 void testNvsEncoderOnlyRadioAndCapped() {
   om::mc::ContactStore s;
@@ -294,6 +330,7 @@ int main() {
   testRadioFileRoundTrip();
   testArchiveFileRoundTrip();
   testCodecRefusals();
+  testFileCheckBeforeTrust();
   testNvsEncoderOnlyRadioAndCapped();
   testMergeRules();
   testMigrationFromLegacyBlobs();

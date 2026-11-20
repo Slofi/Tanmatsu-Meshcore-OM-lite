@@ -242,6 +242,65 @@ void test_ages() {
     CHECK_EQ(strlen(out) < 4, true);
 }
 
+// S516/EST-472 item 9 (known fix A): "Delete everywhere" removes the NODE, never the thread. The store after the
+// delete has no row for the peer, while the ring still holds its messages — the chat list must keep the thread and
+// name it from its own last message, or from the short key when the message carries no name.
+void test_orphan_dm_thread_stays_listed() {
+    om::mc::ContactStore s;
+    uint8_t             a[32];
+    pubOf(a, 0x21);
+    CHECK(om::mc::contactsUpsert(s, a, "Alpha", 1, 0, 0, 100, -70, 30) == 0);
+
+    om::mc::DmRing r;
+    uint8_t        gone[32];
+    pubOf(gone, 0x7A);
+    om::mc::DmMessage m;
+    memcpy(m.peer_pub, gone, 32);
+    snprintf(m.peer_name, sizeof(m.peer_name), "Gamma");
+    snprintf(m.text, sizeof(m.text), "still here");
+    m.local_ts = 500;
+    m.log_id   = 3;
+    om::mc::dmPush(r, m);
+
+    // The node is GONE from the table (this is the post-"Delete everywhere" state).
+    CHECK(om::mc::contactsFind(s, gone) < 0);
+    om::mc::DmSummary sums[4];
+    CHECK_EQ(om::mc::dmThreadSummaries(r, s, sums, 4), 1);   // the thread is STILL LISTED
+    CHECK(sums[0].has);
+    CHECK_EQ(sums[0].contact, -1);
+    CHECK_STR(sums[0].name, "Gamma");                        // named from its own last message
+    CHECK_STR(sums[0].text, "still here");
+    CHECK_EQ(sums[0].ts, 500u);
+    // …and the summary's own struct owns that name, not the ring: a later ring change cannot dangle it.
+    CHECK(sums[0].name != m.peer_name || strcmp(sums[0].name, "Gamma") == 0);
+
+    // A thread whose message carries NO name (an outgoing-only restored thread, or a peer deleted before its
+    // advert): the short key — the same 8 hex the dm-<8hex>.log file name carries — is the honest label.
+    om::mc::DmRing r2;
+    uint8_t        anon[32];
+    pubOf(anon, 0x88);
+    om::mc::DmMessage n;
+    memcpy(n.peer_pub, anon, 32);
+    n.peer_name[0] = '\0';
+    snprintf(n.text, sizeof(n.text), "hi");
+    om::mc::dmPush(r2, n);
+    om::mc::DmSummary s2[2];
+    CHECK_EQ(om::mc::dmThreadSummaries(r2, s, s2, 2), 1);
+    CHECK_STR(s2[0].name, "88000000");   // pub[0..3] of pubOf(0x88): 88 00 00 00
+    CHECK_EQ(s2[0].contact, -1);
+    // S516 (Claude, review): a COPY of a short-key summary owns its name. Copy it, overwrite the source's buffer:
+    // the copy must still read the key (a memberwise copy pointed `name` into the source, a dead temporary in
+    // dmThreadSummaries' `out[n++] = dmSummaryForPeer(...)`).
+    om::mc::DmSummary src = om::mc::dmSummaryForPeer(r2, s, anon);
+    om::mc::DmSummary cp(src);
+    om::mc::DmSummary as;
+    as = src;
+    memset(src.short_name, 'X', sizeof(src.short_name) - 1);
+    CHECK_STR(cp.name, "88000000");
+    CHECK_STR(as.name, "88000000");
+    CHECK(cp.name == cp.short_name);
+}
+
 // S513/EST-434: per-contact DM threads. The ring is shared, the threads are views, and unread is counted from
 // each contact's own seen point — marking one thread read must not clear another.
 void test_dm_threads_and_unread() {
@@ -316,6 +375,7 @@ int main() {
     test_message_ring_drops_the_oldest();
     test_per_channel_and_unread();
     test_dm_threads_and_unread();
+    test_orphan_dm_thread_stays_listed();
     test_ages();
 
     printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
