@@ -94,7 +94,7 @@ void testSettingValues() {
   // The locked blink (S515) keeps its exact schedule; only the colour is now a choice.
   CHECK_EQ(om::ui::kMessageLedOnMs, 120);
   CHECK_EQ(om::ui::kMessageLedOffMs, 180);
-  CHECK_EQ(om::ui::kMessageLedGroupMs, 20000);
+  CHECK_EQ(om::ui::kMessageLedGroupMs, 10000);   // S516: Filip, "change the LED3 pause to 10s"
   CHECK_EQ(om::ui::kMessageLedBurstMs, 900);
   CHECK_EQ(om::ui::kMessageLedFadeStepMs, 200);   // 5 fade frames/s at most
   CHECK_EQ(om::ui::kMessageLedFadeSteps, 8);
@@ -254,7 +254,7 @@ void testManualEmulation() {
 void testManualFade() {
   // S516 (Claude; Filip: "LED3 flashes constantly on new MSG, not just 3-times than nothing for 20s"): the
   // manual (unlocked) unread pattern is the SAME burst as the locked one: 3 x (120 ms on, 180 ms off), then
-  // dark until the next 20 s group. It replaced a continuous 8-step breath.
+  // dark until the next 10 s group. It replaced a continuous 8-step breath.
   const om::ui::LedIn i = in(false, false, true, 1, om::ui::LedColour::White);
   const uint8_t L = om::ui::kMessageLedBlinkLevel;
   om::ui::LedRule rule;
@@ -269,14 +269,14 @@ void testManualFade() {
   CHECK(pixel(rule.step(600, i), 2, L, L, L));
   CHECK(pixel(rule.step(720, i), 2, 0, 0, 0));
   CHECK(pixel(rule.step(900, i), 2, 0, 0, 0));      // three blinks only
-  CHECK(pixel(rule.step(19999, i), 2, 0, 0, 0));    // dark for the rest of the 20 s
-  CHECK(pixel(rule.step(20000, i), 2, L, L, L));    // the next group
+  CHECK(pixel(rule.step(9999, i), 2, 0, 0, 0));     // dark for the rest of the 10 s
+  CHECK(pixel(rule.step(10000, i), 2, L, L, L));    // the next group
 
-  // At the task's 25 ms poll: exactly 6 changed frames per 20 s group (3 on + 3 off), nothing else.
+  // At the task's 25 ms poll: exactly 6 changed frames per 10 s group (3 on + 3 off), nothing else.
   om::ui::LedRule polled;
   CHECK(polled.step(0, i).changed);   // the mode change itself (lit)
   int changes = 0;
-  for (uint32_t t = 25; t < 20000; t += 25) {
+  for (uint32_t t = 25; t < 10000; t += 25) {
     if (polled.step(t, i).changed) ++changes;
   }
   CHECK_EQ(changes, 5);   // off, on, off, on, off (the first "on" was the mode change)
@@ -305,13 +305,13 @@ void testLockedBlink() {
   CHECK(pixel(rule.step(720, i), 2, 0, 0, 0));
 
   // The long dark gap: no change, so the shell writes nothing.
-  const uint32_t gap[] = {900, 1000, 5000, 12345, 19999};
+  const uint32_t gap[] = {900, 1000, 5000, 7345, 9999};
   for (uint32_t t : gap) CHECK(!rule.step(t, i).changed);
 
-  // 20 s after the first burst started: the next burst, at once.
-  CHECK(pixel(rule.step(20000, i), 2, 0, 51, 51));
-  CHECK(rule.step(20000, i).changed == false);   // same second step must not write again
-  CHECK(pixel(rule.step(20300, i), 2, 0, 51, 51));
+  // 10 s after the first burst started: the next burst, at once.
+  CHECK(pixel(rule.step(10000, i), 2, 0, 51, 51));
+  CHECK(rule.step(10000, i).changed == false);   // same second step must not write again
+  CHECK(pixel(rule.step(10300, i), 2, 0, 51, 51));
 
   // The chosen colour reaches the blink.
   om::ui::LedRule red;

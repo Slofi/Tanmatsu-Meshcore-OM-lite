@@ -23,7 +23,7 @@
 //      The app writes all six: the Off ones dark, an On one EMULATES the coprocessor colour from the same state
 //      (power: our battery/charging state -> green / yellow / magenta for no battery; radio: green while our C6
 //      link is up, off otherwise), index 2 is the message LED, indices 3-5 off.
-//   3. Locked (screen off): MANUAL, all off, index 2 blinks three times every 20 s in the chosen colour while
+//   3. Locked (screen off): MANUAL, all off, index 2 blinks three times every 10 s in the chosen colour while
 //      unread > 0 (Filip, S515).
 //   4. Exit to the launcher: AUTOMATIC back and the message register cleared, so no stale message fade is left
 //      for the launcher (restore()).
@@ -156,7 +156,7 @@ constexpr uint32_t kMessageLedOnMs    = 120;
 constexpr uint32_t kMessageLedOffMs   = 180;
 constexpr uint32_t kMessageLedCycleMs = kMessageLedOnMs + kMessageLedOffMs;          // one blink
 constexpr uint32_t kMessageLedBurstMs = kMessageLedBlinks * kMessageLedCycleMs;      // three blinks
-constexpr uint32_t kMessageLedGroupMs = 20000;                                       // then every 20 s
+constexpr uint32_t kMessageLedGroupMs = 10000;   // then every 10 s (Filip, S516 2026-11-20: "change the LED3 pause to 10s"; was 20 s)
 // The locked blink keeps S515's gentle look: 20 % of the chosen colour (v71 used a 15 % global brightness over
 // full cyan; this is the same "soft, not a torch at night" intent, now for every colour).
 constexpr uint8_t kMessageLedBlinkLevel = 51;
@@ -221,7 +221,7 @@ class LedRule {
         // Rule 5: the Settings preview, only while unlocked. It overrides unread-off and unread-fade.
         const bool    preview   = !in.locked && ledPreviewActive(now_ms, in.preview_until_ms);
         // S516 (Claude; Filip: "LED3 flashes constantly on new MSG, not just 3-times than nothing for 20s"):
-        // the unread pattern is the 3-blink burst every 20 s in EVERY mode (it was a continuous fade while
+        // the unread pattern is the 3-blink burst every 10 s in EVERY mode (it was a continuous fade while
         // unlocked, which was Claude's spec, not his). One timer for all modes; the preview pauses it.
         bool burst_on = false;
         if (in.unread > 0 && !preview) {
@@ -262,7 +262,7 @@ class LedRule {
         }
 
         if (!automatic && in.locked) {
-            // Rule 3: all off; index 2 blinks three times every 20 s in the chosen colour.
+            // Rule 3: all off; index 2 blinks three times every 10 s in the chosen colour.
             if (burst_on) setScaled(&f.rgb[kMessageLedIndex][0], colour, kMessageLedBlinkLevel);
         }
 

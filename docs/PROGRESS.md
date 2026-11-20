@@ -15,6 +15,10 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## S516 (Claude) v82: LED 3's burst every 10 s
+
+Filip (2026-11-21 00:0x): *"one small tweak, hopefully last one today.. change the LED3 pause to 10s.."*. `kMessageLedGroupMs` 20,000 → 10,000 ms (3 x 120/180 ms blinks, then dark until the next 10 s group), in every mode; the tests that pinned 20 s now pin 10 s. Suite exit 0, build exit 0.
+
 ## S516 (Claude) v81: own messages never unread; LED 3 blinks 3x per 20 s in every mode; "Save to SD"
 
 Filip on v80 (23:4x): *"when I send a MSG, the 'new MSG' icon and the LED3 are triggered if I switch the page right after I send it.. Also, LED3 flashes constantly on new MSG, not just 3-times than nothing for 20s.."*, then *"when both save to radio and save to SD are off, the new nodes/RPTRs need a function in Nodes page, node info to add them to SD too; there is only add to radio command now"*.
