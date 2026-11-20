@@ -15,6 +15,10 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## S516 (Claude) v83: one Backspace press deletes one character
+
+Filip (2026-11-21 00:1x): *"when I press backspace, it deletes two characters, not just one. And I tried multiple times, making sure it is a short ONE press"*. The console shows every Backspace press as a PAIR: `nav key=16 state=1` (BSP_INPUT_NAVIGATION_KEY_BACKSPACE) and `kbd ascii=8` (v74 1/1, v80 4/4, v82 3/3), and `mapKey()` turned both into Key::Backspace (since the first version, `ac04147`). The navigation copy now maps to None; the keyboard event stays. Checked the same way: Esc arrives only as navigation (0 keyboard ESC events) and Enter only as navigation, so neither doubles. Suite exit 0, build exit 0.
+
 ## S516 (Claude) v82: LED 3's burst every 10 s
 
 Filip (2026-11-21 00:0x): *"one small tweak, hopefully last one today.. change the LED3 pause to 10s.."*. `kMessageLedGroupMs` 20,000 → 10,000 ms (3 x 120/180 ms blinks, then dark until the next 10 s group), in every mode; the tests that pinned 20 s now pin 10 s. Suite exit 0, build exit 0.

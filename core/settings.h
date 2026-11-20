@@ -711,6 +711,6 @@ constexpr bool advertScheduleDue(uint32_t interval_s, uint32_t elapsed_s, bool e
 }
 
 // The image's version, shown in General > DEVICE. One constant: the next ticket bumps this line.
-constexpr const char* kAppVersion = "82";   // S516 (Claude): LED 3 burst every 10 s (Filip)
+constexpr const char* kAppVersion = "83";   // S516 (Claude): one Backspace press deletes one character
 
 }  // namespace tm

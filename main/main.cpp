@@ -1362,7 +1362,11 @@ tm::Key mapKey(const bsp_input_event_t& ev) {
         case BSP_INPUT_NAVIGATION_KEY_RETURN: return tm::Key::Enter;
         case BSP_INPUT_NAVIGATION_KEY_ESC:
         case BSP_INPUT_NAVIGATION_KEY_HOME: return tm::Key::Esc;
-        case BSP_INPUT_NAVIGATION_KEY_BACKSPACE: return tm::Key::Backspace;
+        // S516 (Claude; Filip: "when I press backspace, it deletes two characters, not just one"): ONE press of
+        // Backspace sends BOTH a navigation event (key 16) and a keyboard event (ASCII 8) — every press in the
+        // v74/v80/v82 console logs came as that exact pair — and both were mapped to Backspace. The keyboard
+        // event (the typing path, like every letter) is the one we keep; the navigation copy is ignored.
+        case BSP_INPUT_NAVIGATION_KEY_BACKSPACE: return tm::Key::None;
         default:
             // Everything else goes through the ONE key table, which now holds the codes read off this
             // board's glass (S499): the five symbol keys are nav keys 21..25. An unlogged code resolves
