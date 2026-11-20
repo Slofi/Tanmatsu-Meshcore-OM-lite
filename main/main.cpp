@@ -554,6 +554,8 @@ void generalCycleMessageColour(tm::Core&, const tm::SettingRow&) {
         om::ui::noticeSet("Message LED colour not saved", 3000);
         return;
     }
+    // S516/EST-479: show the NEW colour at once — LED 3 steady for 3 s, restarted by each further step.
+    om::led::previewColour();
     ESP_LOGI(TAG, "settings: message LED colour -> %s", om::ui::ledColourLabel(next));
 }
 
@@ -4760,9 +4762,10 @@ extern "C" void app_main(void) {
             om::ui::hintDotsSet(mask);
             // S515/EST-468 / S516/EST-477: the LED rule reads the SAME unread total as the Chat dot, plus the
             // battery facts the power LED emulates and whether our C6 link is up. The task polls these every
-            // 25 ms, so the main loop never does an LED write itself.
-            om::led::publish(g_screen_power.off, unread_all, g_batt.battery_available, g_batt.battery_charging,
-                             om::radio::started());
+            // 25 ms, so the main loop never does an LED write itself. S516/EST-479: the Settings page flag ends a
+            // running colour preview the moment the user leaves Settings, by any key or route.
+            om::led::publish(g_screen_power.off, core.router().current() == tm::Page::Settings, unread_all,
+                             g_batt.battery_available, g_batt.battery_charging, om::radio::started());
             // A message arriving while the Map (or any page) is on screen raises this with no key press behind
             // it, so the dot appears at the next 250 ms pass.
             if (om::ui::hintDotsNeedsRepaint()) dirty = true;

@@ -36,9 +36,16 @@ bool setRadioOn(bool on);
 ui::LedColour colour();
 bool         setColour(ui::LedColour colour);
 
-// Main loop, once per pass: the screen state (core/screen_power.h), the hint bar's unread total, the battery
-// facts the power LED emulates, and whether our C6 link is up (om::radio::started()).
-void publish(bool screen_off, uint32_t unread, bool battery_available, bool charging, bool radio_up);
+// S516/EST-479: Settings › General › LED › Message LED colour was stepped. Start (or restart) the 3 s preview of
+// the LIVE colour: the task holds LED 3 steady in it and then hands it back to the normal rule. The deadline is
+// cleared by publish() when the Settings page is not current and by restoreAutomatic() on exit.
+void previewColour();
+
+// Main loop, once per pass: the screen state (core/screen_power.h), whether the Settings page is current (leaving
+// it ends a running colour preview), the hint bar's unread total, the battery facts the power LED emulates, and
+// whether our C6 link is up (om::radio::started()).
+void publish(bool screen_off, bool settings_open, uint32_t unread, bool battery_available, bool charging,
+             bool radio_up);
 void setScreenOff(bool off);   // the power button's own edge, for an immediate stop/wake
 
 // Esc to the launcher: all pixels dark, register 146 cleared (all false), then automatic mode back, BEFORE the

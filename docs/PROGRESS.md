@@ -15,6 +15,53 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## S516 (EST-479) message LED colour preview
+
+> Written by **DeepSeek** for ticket **EST-479**: fenced Paperclip run, no session start or end, nothing
+> installed, flashed, pushed or committed (`.git` read only; Claude reviews and commits). Starting point
+> **v74 `ef99625`**, tree clean and INSTALLED. **RESULT: version 75; nothing installed, flashed, pushed or
+> committed.**
+
+Filip (22:2x, on v74): *"when changing the new MSG LED colour, it should 'demo' the colour for a few seconds on
+change/'scroll'"*. Every step of Settings › General › LED › **Message LED colour** now holds LED 3 (index 2)
+**steady in the NEW colour for 3 s**, then hands it back to whatever the normal rule says (off, or the unread
+fade). A further step restarts the 3 s. Both modes: automatic writes register 146 with the new colour A and **no
+fade bit**; manual lights the app pixel at full brightness. Locked has no Settings, so the rule ignores the
+deadline while locked; leaving Settings clears it in `publish()`; `restoreAutomatic()` clears it on exit. Power
+LED / Radio LED already show their On→Off→On effect on the next 25 ms step (automatic ↔ manual, emulated pixel),
+so no change was needed there.
+
+**Numbers:** `sh test/host/run.sh` **exit 0**; `message-led` **351 checks, 0 failures** (the new section 10 is the
+preview). `make build` **exit 0**, `application.bin` **1,750,816 B (0x1AB720)**, **+1,856 B** over v73's
+recorded 1,748,960 B (v74's own bin size was not recorded); total image **1,750,408 B**; DIRAM **303,276 B used /
+269,092 B free (52.99 %)**. One host test armed: taking the preview out of the automatic register branch gave
+`FAIL test_message_led.cpp:407  f.message == 0x01 (got 0, want 1)` and `message-led: 1/290 checks FAILED`
+(exit 1); reverted, suite re-run exit 0. No SSH needed (the device is on Filip's USB).
+
+### What was read
+`core/message_led_rule.h` (the whole rule, the register-146 bits and the manual fade), `main/message_led.h/.cpp`
+(the NVS setters, the 25 ms task and `restoreAutomatic()`), `main/main.cpp` (`generalCycleMessageColour`, the
+Settings key branch, the `LeaveSettings` event, `openSettings`, `leaveToLauncher` and the 250 ms `publish()`
+call), `core/settings.h` (`kAppVersion`), `test/host/test_message_led.cpp`, `test/host/run.sh`.
+
+### The implementation
+1. **The pure rule** (`core/message_led_rule.h`): `kMessageLedPreviewMs = 3000`; `ledPreviewActive(now,
+   preview_until_ms)` is a wrap-safe `int32_t` difference; `LedIn::preview_until_ms` (0 = none);
+   `messageRegisterSteady(c)` = colour A bits only; the step lights the preview when it is active and the screen
+   is NOT locked, overriding unread-off and unread-fade in automatic mode and overriding the breath in manual;
+   the manual preview is full 255, and the breath is reset so the normal fade starts fresh afterwards.
+2. **The shell** (`main/message_led.h/.cpp`): `previewColour()` sets one deadline (`esp_timer now + 3000 ms`);
+   the task publishes it in `LedIn`; `publish()` clears it whenever the Settings page is not current, so any way
+   out of Settings ends it; `setScreenOff(true)` and `restoreAutomatic()` clear it as well.
+3. **The row** (`main/main.cpp::generalCycleMessageColour`): after a successful `setColour(next)` it calls
+   `om::led::previewColour()`; a failure still shows the "not saved" notice and starts no preview. The main-loop
+   `publish()` now also passes whether the current page is Settings.
+4. **Host tests** (`test/host/test_message_led.cpp`): the steady register bytes, preview over unread-off and
+   over unread-fade (automatic), preview over the manual fade and over manual-off, restart on a second step,
+   the exact 3 s end, locked (blink, never the steady preview) and `restore()` ending it.
+
+
+**Claude's review of EST-479 (S516, 2026-11-20 22:3x):** accepted (steady colour A without the fade bit in automatic mode, full pixel in manual, deadline restarted on each step, cleared on leaving Settings, on lock and at exit). **One defect fixed by Claude:** `ledPreviewActive()` read the "no preview" value 0 as a deadline AHEAD once the ms clock passed 2^31 (24.8 days up), so LED 3 would have lit steady for no reason; 0 is now explicit. Test armed: `FAIL test_message_led.cpp:519 !om::ui::ledPreviewActive(0x80000010u, 0)` without the fix. Suite exit 0, build exit 0.
 ## S516 (Claude) v74: Esc on our Launcher asks before leaving
 
 Filip (21:4x): *"ESC on our launcher restarts Tanmatsu.. So pls add confirmation pop-up when pressing ESC on the Launcher page.."*, then *"no, this time 'OK' can be default"*. Esc on the Launcher now opens the shared confirm sheet (`drawConfirmSheet`, a 96 B SettingsView on the stack) "Leave OM Lite?" with **Leave focused** (the one sheet that does not start on Cancel); Left/Right move, Enter answers, a second Esc cancels, every other key is swallowed while the sheet is up, and the sheet closes on any page change (a page key). `leaveToLauncher()` itself is unchanged. Suite exit 0, build exit 0.

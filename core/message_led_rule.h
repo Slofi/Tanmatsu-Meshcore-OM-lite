@@ -27,6 +27,10 @@
 //      unread > 0 (Filip, S515).
 //   4. Exit to the launcher: AUTOMATIC back and the message register cleared, so no stale message fade is left
 //      for the launcher (restore()).
+//   5. Settings › General › LED › Message LED colour (S516/EST-479): while the shell's preview deadline is ahead
+//      AND the screen is unlocked, LED 3 is STEADY in the chosen (new) colour — register 146 with the colour and
+//      NO fade bit in automatic mode, the full-brightness pixel in manual mode. 3 s, restarted by each further
+//      step; afterwards rule 1/2 takes over again. Locked and any exit never preview.
 //
 // The app-driven fade is a plain 0..255 ramp in 8 steps of 200 ms, so at most FIVE I2C frames per second while
 // the message LED is breathing and NONE at rest: this header says nothing CHANGED between steps.
@@ -107,11 +111,20 @@ inline void ledColourRgb(LedColour c, uint8_t* r, uint8_t* g, uint8_t* b) {
 
 // Register 146: bits 0-2 colour A, bit 3 fade, bits 4-6 colour B, bit 7 fade hold. The breathing message is
 // colour A = the chosen colour, B = off, fade = on, hold = off.
-inline uint8_t messageRegister(LedColour c) {
+inline uint8_t messageColourBits(LedColour c) {
     uint8_t r = 0, g = 0, b = 0;
     ledColourRgb(c, &r, &g, &b);
-    const uint8_t a = (uint8_t)((r != 0 ? 1u : 0u) | (g != 0 ? 2u : 0u) | (b != 0 ? 4u : 0u));
-    return (uint8_t)(a | (1u << 3));   // fade on, colour B off, hold off
+    return (uint8_t)((r != 0 ? 1u : 0u) | (g != 0 ? 2u : 0u) | (b != 0 ? 4u : 0u));
+}
+
+inline uint8_t messageRegister(LedColour c) {
+    return (uint8_t)(messageColourBits(c) | (1u << 3));   // fade on, colour B off, hold off
+}
+
+// S516/EST-479: the Settings preview is STEADY: colour A only, no fade, no colour B, no hold, so the colour is
+// easy to judge for the 3 s.
+inline uint8_t messageRegisterSteady(LedColour c) {
+    return messageColourBits(c);
 }
 
 // ---- the power state we can SEE (main.c:715-732) -----------------------------------------------------------
@@ -159,6 +172,22 @@ inline uint8_t messageFadeLevel(uint32_t elapsed_ms) {
     return kLevels[(elapsed_ms / kMessageLedFadeStepMs) % kMessageLedFadeSteps];
 }
 
+// ---- the Settings colour preview (S516/EST-479) -------------------------------------------------------------
+// Filip: *"when changing the new MSG LED colour, it should 'demo' the colour for a few seconds on
+// change/'scroll'"*. Each step of the row's cycle holds LED 3 STEADY in the NEW colour for 3 s, then the normal
+// rule takes over again; a further step restarts the 3 s. The shell owns ONE deadline (now + 3 s on each
+// change); the rule only reads whether it is still ahead. Steady = no fade bit in register 146 and full
+// brightness in the app's pixel, so the colour is easy to judge. Locked has no Settings: the rule ignores the
+// deadline while locked, so the locked blink is unchanged.
+constexpr uint32_t kMessageLedPreviewMs = 3000;
+
+// Wrap-safe: a deadline in the future is a positive int32 difference; 0 (or past) means no preview.
+inline bool ledPreviewActive(uint32_t now_ms, uint32_t preview_until_ms) {
+    // S516 (Claude, review): 0 is "no preview" EXPLICITLY. The wrap-safe compare alone reads 0 as a deadline
+    // ahead once the ms clock passes 2^31 (24.8 days up), which would light LED 3 steady for no reason.
+    return preview_until_ms != 0 && (int32_t)(preview_until_ms - now_ms) > 0;
+}
+
 // What the shell publishes to the rule each tick.
 struct LedIn {
     bool       locked              = false;   // key-lock / screen off (core/screen_power.h)
@@ -169,6 +198,7 @@ struct LedIn {
     PowerState power               = PowerState::Battery;
     bool       radio_up            = false;   // our C6 link is up (the C6 application is running)
     bool       message_register_ok = true;    // false = older coprocessor firmware, no register 146
+    uint32_t   preview_until_ms    = 0;       // Settings colour preview deadline; 0 / past = none
 };
 
 // One step's answer. `changed` is the only gate the shell needs: apply ONLY when true, so there is no I2C
@@ -188,7 +218,11 @@ class LedRule {
     LedFrame step(uint32_t now_ms, const LedIn& in) {
         const LedColour colour = ledColourValid((uint8_t)in.colour) ? in.colour : kMessageColourDefault;
         const bool    automatic = !in.locked && in.power_on && in.radio_on && in.message_register_ok;
-        const uint8_t message   = automatic && in.unread > 0 ? messageRegister(colour) : 0;
+        // Rule 5: the Settings preview, only while unlocked. It overrides unread-off and unread-fade.
+        const bool    preview   = !in.locked && ledPreviewActive(now_ms, in.preview_until_ms);
+        const uint8_t message   = automatic ? (preview ? messageRegisterSteady(colour)
+                                                       : (in.unread > 0 ? messageRegister(colour) : 0))
+                                            : 0;
 
         LedFrame f;
         f.automatic = automatic;
@@ -204,13 +238,19 @@ class LedRule {
             if (in.radio_on && in.radio_up) {
                 f.rgb[kRadioLedIndex][1] = 255;   // green, the C6 application's own colour
             }
-            if (in.unread > 0) {
+            if (preview) {
+                // Rule 5: full brightness, steady, whatever unread says. The breath restarts after the preview.
+                setScaled(&f.rgb[kMessageLedIndex][0], colour, 255);
+                breath_active_ = false;
+            } else if (in.unread > 0) {
                 if (!breath_active_) {
                     breath_active_ = true;
                     breath_start_  = now_ms;
                 }
                 setScaled(&f.rgb[kMessageLedIndex][0], colour,
                           messageFadeLevel((uint32_t)(now_ms - breath_start_)));
+            } else {
+                breath_active_ = false;
             }
         } else {
             breath_active_ = false;

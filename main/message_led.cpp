@@ -37,6 +37,9 @@ bool         s_power_on = ui::kPowerLedDefault;
 bool         s_radio_on = ui::kRadioLedDefault;
 ui::LedColour s_colour  = ui::kMessageColourDefault;
 
+// S516/EST-479: the one Settings colour-preview deadline (monotonic ms). 0 / past = no preview.
+uint32_t s_preview_until = 0;
+
 bool     s_screen_off        = false;
 uint32_t s_unread            = 0;
 bool     s_battery_available = true;
@@ -147,17 +150,19 @@ void ledTask(void*) {
         uint32_t      unread;
         bool          power_on, radio_on, battery, charging, radio_up, message_ok, stop;
         ui::LedColour chosen;
+        uint32_t      preview_until;
         portENTER_CRITICAL(&s_mux);
-        off        = s_screen_off;
-        unread     = s_unread;
-        power_on   = s_power_on;
-        radio_on   = s_radio_on;
-        chosen     = s_colour;
-        battery    = s_battery_available;
-        charging   = s_charging;
-        radio_up   = s_radio_up;
-        message_ok = s_message_ok;
-        stop       = s_stop;
+        off           = s_screen_off;
+        unread        = s_unread;
+        power_on      = s_power_on;
+        radio_on      = s_radio_on;
+        chosen        = s_colour;
+        preview_until = s_preview_until;
+        battery       = s_battery_available;
+        charging      = s_charging;
+        radio_up      = s_radio_up;
+        message_ok    = s_message_ok;
+        stop          = s_stop;
         portEXIT_CRITICAL(&s_mux);
         if (stop) {
             vTaskDelete(nullptr);
@@ -173,6 +178,7 @@ void ledTask(void*) {
         in.power               = ui::powerState(battery, charging);
         in.radio_up            = radio_up;
         in.message_register_ok = message_ok;
+        in.preview_until_ms    = preview_until;
         const ui::LedFrame f = rule.step(now, in);
         if (f.changed) applyFrame(f);
 
@@ -293,8 +299,12 @@ bool setColour(ui::LedColour colour) {
     return true;
 }
 
-void publish(bool screen_off, uint32_t unread, bool battery_available, bool charging, bool radio_up) {
+void publish(bool screen_off, bool settings_open, uint32_t unread, bool battery_available, bool charging,
+             bool radio_up) {
     portENTER_CRITICAL(&s_mux);
+    // S516/EST-479: any way OUT of Settings ends a running colour preview (Esc, a page key, a page change).
+    // The deadline is only ever future while the user is on the Settings page, so this is the whole lifecycle.
+    if (!settings_open) s_preview_until = 0;
     s_screen_off        = screen_off;
     s_unread            = unread;
     s_battery_available = battery_available;
@@ -303,15 +313,26 @@ void publish(bool screen_off, uint32_t unread, bool battery_available, bool char
     portEXIT_CRITICAL(&s_mux);
 }
 
+void previewColour() {
+    // S516/EST-479: set (or RESTART) the 3 s window on the LIVE colour. The rule does the rest; the task sees
+    // this within one 25 ms step.
+    portENTER_CRITICAL(&s_mux);
+    s_preview_until = (uint32_t)(esp_timer_get_time() / 1000) + ui::kMessageLedPreviewMs;
+    portEXIT_CRITICAL(&s_mux);
+}
+
 void setScreenOff(bool off) {
     portENTER_CRITICAL(&s_mux);
     s_screen_off = off;
+    // S516/EST-479: locking the screen ends a running colour preview; there is no Settings while locked.
+    if (off) s_preview_until = 0;
     portEXIT_CRITICAL(&s_mux);
 }
 
 void restoreAutomatic() {
     portENTER_CRITICAL(&s_mux);
-    s_stop = true;
+    s_stop          = true;
+    s_preview_until = 0;   // S516/EST-479: leaving the app ends a running colour preview
     portEXIT_CRITICAL(&s_mux);
     // All dark, register 146 cleared, then automatic mode, BEFORE the handover (the task stops on its next
     // tick; this call is made on the main task and waits for any in-flight write).

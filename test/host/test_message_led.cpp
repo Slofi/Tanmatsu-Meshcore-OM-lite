@@ -41,7 +41,7 @@ int g_failures = 0;
 om::ui::LedIn in(bool locked, bool power, bool radio, uint32_t unread,
                  om::ui::LedColour colour = om::ui::kMessageColourDefault,
                  om::ui::PowerState power_state = om::ui::PowerState::Battery,
-                 bool radio_up = true, bool message_ok = true) {
+                 bool radio_up = true, bool message_ok = true, uint32_t preview_until_ms = 0) {
   om::ui::LedIn i;
   i.locked              = locked;
   i.power_on            = power;
@@ -51,6 +51,7 @@ om::ui::LedIn in(bool locked, bool power, bool radio, uint32_t unread,
   i.power               = power_state;
   i.radio_up            = radio_up;
   i.message_register_ok = message_ok;
+  i.preview_until_ms    = preview_until_ms;
   return i;
 }
 
@@ -369,9 +370,159 @@ void testPollIndependence() {
   CHECK_EQ(lit_stop, 125);   // the 120 ms on window ends at the first 25 ms sample past it
 }
 
+// ---- 10. the Settings colour preview: 3 s STEADY in the NEW colour, then the normal rule (S516/EST-479) -----
+void testColourPreview() {
+  // The deadline helper and the steady register byte: colour A only, NO fade bit.
+  CHECK_EQ(om::ui::kMessageLedPreviewMs, 3000);
+  CHECK(om::ui::ledPreviewActive(0, 1));
+  CHECK(om::ui::ledPreviewActive(1000, 4000));
+  CHECK(!om::ui::ledPreviewActive(3000, 3000));
+  CHECK(!om::ui::ledPreviewActive(3001, 3000));
+  CHECK(!om::ui::ledPreviewActive(0, 0));
+  CHECK(om::ui::ledPreviewActive(0xFFFFFF00u, 0x00000100u));    // wraps 2^32
+  CHECK(!om::ui::ledPreviewActive(0x00000100u, 0xFFFFFF00u));
+
+  struct Steady {
+    om::ui::LedColour colour;
+    uint8_t           bits;
+  };
+  const Steady steady[] = {
+      {om::ui::LedColour::Red, 0x01},   {om::ui::LedColour::Green, 0x02},
+      {om::ui::LedColour::Blue, 0x04},  {om::ui::LedColour::Yellow, 0x03},
+      {om::ui::LedColour::Cyan, 0x06},  {om::ui::LedColour::Magenta, 0x05},
+      {om::ui::LedColour::White, 0x07},
+  };
+  for (const Steady& s : steady) {
+    CHECK_EQ(om::ui::messageRegisterSteady(s.colour), s.bits);
+    CHECK_EQ(om::ui::messageRegister(s.colour), s.bits | 0x08);   // the breathing one always fades
+  }
+
+  // AUTOMATIC + unread 0: the preview LIGHTS LED 3 (register 146, steady, NO fade) and returns to off at 3 s.
+  {
+    om::ui::LedRule rule;
+    const om::ui::LedIn p =
+        in(false, true, true, 0, om::ui::LedColour::Red, om::ui::PowerState::Battery, true, true, 3000);
+    const om::ui::LedFrame f = rule.step(0, p);
+    CHECK(f.automatic);
+    CHECK_EQ(f.message, 0x01);
+    CHECK(f.message_changed);
+    CHECK(f.changed);
+    CHECK_EQ(f.message & 0x08, 0);   // steady: the fade bit is OFF
+    for (int i = 0; i < 6; i++) CHECK(pixel(f, i, 0, 0, 0));   // automatic never touches a pixel
+    CHECK(!rule.step(2999, p).changed);   // steady for the whole 3 s: no I2C between
+    const om::ui::LedFrame back = rule.step(3000, p);
+    CHECK_EQ(back.message, 0);   // unread 0 -> the normal rule says off
+    CHECK(back.message_changed);
+    CHECK(!rule.step(3025, p).changed);
+  }
+
+  // AUTOMATIC + unread > 0: the preview REPLACES the breathing, then the normal fade comes back.
+  {
+    om::ui::LedRule rule;
+    CHECK_EQ(rule.step(0, in(false, true, true, 2, om::ui::LedColour::Cyan)).message, 0x0E);   // breathing
+    const om::ui::LedIn p =
+        in(false, true, true, 2, om::ui::LedColour::Blue, om::ui::PowerState::Battery, true, true, 4000);
+    const om::ui::LedFrame f = rule.step(1000, p);
+    CHECK_EQ(f.message, 0x04);   // blue, steady
+    CHECK_EQ(f.message & 0x08, 0);
+    CHECK(f.message_changed);
+    CHECK(!rule.step(3999, p).changed);
+    const om::ui::LedFrame back = rule.step(4000, p);
+    CHECK_EQ(back.message, 0x0C);   // blue + fade again
+    CHECK(back.message_changed);
+  }
+
+  // A SECOND step RESTARTS the 3 s (and previews its own NEW colour).
+  {
+    om::ui::LedRule rule;
+    CHECK_EQ(rule.step(0, in(false, true, true, 0, om::ui::LedColour::Red,
+                             om::ui::PowerState::Battery, true, true, 3000))
+                 .message,
+             0x01);
+    const om::ui::LedIn second = in(false, true, true, 0, om::ui::LedColour::Yellow,
+                                    om::ui::PowerState::Battery, true, true, 5000);
+    const om::ui::LedFrame s = rule.step(2000, second);
+    CHECK_EQ(s.message, 0x03);
+    CHECK(s.message_changed);
+    CHECK(!rule.step(3000, second).changed);   // the FIRST window would have ended here
+    CHECK(!rule.step(4999, second).changed);
+    CHECK_EQ(rule.step(5000, second).message, 0);   // 3 s after the SECOND step
+  }
+
+  // MANUAL over the unread FADE: full brightness, steady; the fade restarts from dark afterwards.
+  {
+    om::ui::LedRule rule;
+    CHECK(!rule.step(0, in(false, false, true, 1, om::ui::LedColour::Magenta)).automatic);   // power LED off
+    CHECK(pixel(rule.step(0, in(false, false, true, 1, om::ui::LedColour::Magenta)), 2, 0, 0, 0));
+    const om::ui::LedIn p =
+        in(false, false, true, 1, om::ui::LedColour::White, om::ui::PowerState::Battery, true, true, 3000);
+    const om::ui::LedFrame f = rule.step(400, p);
+    CHECK(pixel(f, 2, 255, 255, 255));   // steady, full
+    CHECK(f.pixels_changed);
+    CHECK(!rule.step(2999, p).changed);
+    const om::ui::LedFrame back = rule.step(3000, p);
+    CHECK(pixel(back, 2, 0, 0, 0));   // a FRESH fade starts dark
+    CHECK(back.changed);
+    CHECK(pixel(rule.step(3200, p), 2, 73, 73, 73));   // and ramps as usual 200 ms later
+  }
+
+  // MANUAL over unread OFF: the preview lights LED 3, then it goes dark again — the other pixels untouched.
+  {
+    om::ui::LedRule rule;
+    const om::ui::LedIn p =
+        in(false, false, true, 0, om::ui::LedColour::Yellow, om::ui::PowerState::Battery, true, true, 3000);
+    const om::ui::LedFrame f = rule.step(0, p);
+    CHECK(!f.automatic);
+    CHECK(pixel(f, 2, 255, 255, 0));   // yellow, full
+    CHECK(pixel(f, 0, 0, 0, 0));       // Power LED Off stays off
+    CHECK(pixel(f, 1, 0, 255, 0));     // Radio LED On stays the C6 green
+    CHECK(!rule.step(2999, p).changed);
+    CHECK(pixel(rule.step(3000, p), 2, 0, 0, 0));
+  }
+
+  // LOCKED: no Settings, so NO preview. The locked blink is the only light, in the chosen colour.
+  {
+    om::ui::LedRule rule;
+    const om::ui::LedIn p =
+        in(true, true, true, 1, om::ui::LedColour::Red, om::ui::PowerState::Battery, true, true, 3000);
+    const om::ui::LedFrame f = rule.step(0, p);
+    CHECK(!f.automatic);
+    CHECK(pixel(f, 2, 51, 0, 0));   // the 20 % blink, NOT the full preview
+    CHECK(pixel(f, 0, 0, 0, 0));
+    CHECK(pixel(f, 1, 0, 0, 0));
+    CHECK(!rule.step(100, p).changed);
+    // Nothing unread and locked: the deadline must not light anything at all.
+    om::ui::LedRule idle;
+    const om::ui::LedIn q =
+        in(true, true, true, 0, om::ui::LedColour::Red, om::ui::PowerState::Battery, true, true, 3000);
+    for (int k = 0; k < 6; k++) CHECK(pixel(idle.step(0, q), k, 0, 0, 0));
+  }
+
+  // EXIT: restore() while the deadline is still ahead ends the preview with the usual dark/automatic frame.
+  {
+    om::ui::LedRule rule;
+    const om::ui::LedIn p =
+        in(false, true, true, 0, om::ui::LedColour::Red, om::ui::PowerState::Battery, true, true, 3000);
+    CHECK_EQ(rule.step(0, p).message, 0x01);
+    const om::ui::LedFrame r = rule.restore();
+    CHECK(r.automatic);
+    CHECK(r.changed);
+    CHECK_EQ(r.message, 0);
+    for (int k = 0; k < 6; k++) CHECK(pixel(r, k, 0, 0, 0));
+  }
+}
+
 }  // namespace
 
+// S516 (Claude, review of EST-479): "no preview" (0) stays no preview after 24.8 days of uptime.
+static void testPreviewZeroAfterLongUptime() {
+    CHECK(!om::ui::ledPreviewActive(0x80000010u, 0));
+    CHECK(!om::ui::ledPreviewActive(0xF0000000u, 0));
+    CHECK(om::ui::ledPreviewActive(0x80000010u, 0x80000010u + 3000u));
+}
+
 int main() {
+    testPreviewZeroAfterLongUptime();
   testSettingValues();
   testMessageRegister();
   testModeMatrix();
@@ -381,6 +532,7 @@ int main() {
   testTimeWrap();
   testRestore();
   testPollIndependence();
+  testColourPreview();
   if (g_failures != 0) {
     printf("message-led: %d/%d checks FAILED\n", g_failures, g_checks);
     return 1;
