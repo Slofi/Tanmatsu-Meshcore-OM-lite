@@ -519,6 +519,18 @@ void drawKeyCap(Screen& s, int x, int y, int w, int h, const char* text, uint16_
     // (S513), so a chip in the bar and the composer's Enter cap cannot drift apart.
     s.fillRect(x, y, w, h, rgb565(0x232220));
     s.frame(x, y, w, h, 1, rgb565(0x3a3936));
+    // S516 (Claude; Filip: "Node page has < > in the tips bar, and Chat has l/r there.. change both to arrows
+    // pls.."): the hint font has no arrow glyphs (U+2190/2192 are not in sans_hint11), so a Left/Right chip
+    // ("l/r" or "<>", every page that uses one) is drawn as two filled triangles, the way the Enter cap draws
+    // its return arrow. 5 px tall halves, 8 px apart, centred in the cap.
+    if (text != nullptr && (strcmp(text, "l/r") == 0 || strcmp(text, "<>") == 0)) {
+        const int cx = x + w / 2, cy = y + h / 2;
+        for (int i = 0; i < 5; i++) {
+            s.vline(cx - 9 + i, cy - i, cy + i, ink);   // left-pointing: the tip at cx-9
+            s.vline(cx + 9 - i, cy - i, cy + i, ink);   // right-pointing: the tip at cx+9
+        }
+        return;
+    }
     drawTextCentred(s, Face::Hint, x + w / 2, textBaseline(s, Face::Hint, y, h), text, ink);
 }
 
