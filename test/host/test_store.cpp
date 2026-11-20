@@ -368,6 +368,41 @@ void test_dm_threads_and_unread() {
 
 }  // namespace
 
+// S516 (Claude; Filip: "when I send a MSG, the 'new MSG' icon and the LED3 are triggered if I switch the page
+// right after I send it"): our OWN messages never count as unread, on a channel or in a DM thread.
+void test_own_messages_never_unread() {
+    om::mc::MessageRing r;
+    om::mc::ReadState   rs;
+    om::mc::Message     mine;
+    mine.channel  = 0;
+    mine.outgoing = true;
+    snprintf(mine.text, sizeof(mine.text), "sent by us");
+    om::mc::messagesPush(r, mine);
+    CHECK_EQ(om::mc::unreadForChannel(r, rs, 0), 0u);
+    om::mc::Message theirs;
+    theirs.channel = 0;
+    snprintf(theirs.text, sizeof(theirs.text), "from a peer");
+    om::mc::messagesPush(r, theirs);
+    CHECK_EQ(om::mc::unreadForChannel(r, rs, 0), 1u);
+
+    om::mc::ContactStore s;
+    uint8_t              a[32];
+    pubOf(a, 0x31);
+    CHECK(om::mc::contactsUpsert(s, a, "Peer", 1, 0, 0, 100, -70, 30) == 0);
+    om::mc::DmRing    d;
+    om::mc::DmMessage out;
+    memcpy(out.peer_pub, a, 32);
+    out.outgoing = true;
+    snprintf(out.text, sizeof(out.text), "our DM");
+    om::mc::dmPush(d, out);
+    CHECK_EQ(om::mc::dmUnreadForPeer(d, s, a), 0u);
+    om::mc::DmMessage in;
+    memcpy(in.peer_pub, a, 32);
+    snprintf(in.text, sizeof(in.text), "their DM");
+    om::mc::dmPush(d, in);
+    CHECK_EQ(om::mc::dmUnreadForPeer(d, s, a), 1u);
+}
+
 int main() {
     test_contact_upsert_by_key();
     test_contact_store_limits();
@@ -376,6 +411,7 @@ int main() {
     test_per_channel_and_unread();
     test_dm_threads_and_unread();
     test_orphan_dm_thread_stays_listed();
+    test_own_messages_never_unread();
     test_ages();
 
     printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);

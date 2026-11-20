@@ -130,7 +130,9 @@ void testViewCountsAndOrder() {
 // ---- 2. the menu's rows per state ----------------------------------------------------------------
 void testMenuRowsPerState() {
   om::ui::NodeMenuRow rows[om::ui::kMaxNodeMenuRows];
-  CHECK_EQ(om::ui::kMaxNodeMenuRows, 8);   // S515/EST-466 added Map
+  // S515/EST-466 added Map (8); S516 "Save to SD" on a session-only row (9). Nine rows use 36 px
+  // (main/nodes_page.cpp): 2*16 + 64 + 9*36 = 420 px, top at 480-24-8-420 = 28 >= the 26 px status bar.
+  CHECK_EQ(om::ui::kMaxNodeMenuRows, 9);
 
   // A client in the ARCHIVE with a known route: DM, Info, Ping, Trace, Map, Add to radio, Favourite, Delete.
   om::ui::NodeMenuContext c;

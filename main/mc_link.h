@@ -189,6 +189,9 @@ void contactsAckLeave();
 // contactsPersistTick() owns, so the /int radio file (or the NVS fallback) and the SD archive are rewritten on
 // this loop's pass. Keyed by the node's PUBLIC KEY, never by a row index: the row can shift under the caller.
 om::mc::RadioResult nodeAddToRadio(const uint8_t pub[32]);
+// S516 (Claude): a session-only row becomes a saved SD-archive row (not the radio). false: no such row, or it
+// was already saved. The archive write is forced like every other user action.
+bool                nodeSaveToSd(const uint8_t pub[32]);
 om::mc::RadioResult nodeRemoveFromRadio(const uint8_t pub[32]);
 bool                nodeDeleteEverywhere(const uint8_t pub[32]);   // false: no row with that key
 size_t              nodeClearRadio();   // clears in_radio on every row; the archive keeps them all

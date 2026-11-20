@@ -15,6 +15,14 @@
 >
 > **Written by DeepSeek (S499, EST-424 ticket run), 2026-11-13.** Fenced Paperclip run: no session start/end.
 
+## S516 (Claude) v81: own messages never unread; LED 3 blinks 3x per 20 s in every mode; "Save to SD"
+
+Filip on v80 (23:4x): *"when I send a MSG, the 'new MSG' icon and the LED3 are triggered if I switch the page right after I send it.. Also, LED3 flashes constantly on new MSG, not just 3-times than nothing for 20s.."*, then *"when both save to radio and save to SD are off, the new nodes/RPTRs need a function in Nodes page, node info to add them to SD too; there is only add to radio command now"*.
+- **Own messages:** `unreadForChannel()` / `dmUnreadForPeer()` counted OUR outgoing lines after the seen point; opening/Esc moved the seen point past them, but leaving Chat with a page key (v73's keys) right after a send did not, so the send raised the top-bar icon and LED 3. Root fix: `!m->outgoing` in both counts. Tests armed separately: `test_store.cpp:381` (channel) and `:398` (DM) fail without it.
+- **LED 3:** my EST-477 spec had a continuous fade while unlocked (register 146 fade bit, app breath in manual mode); Filip's rule since S515 is 3 blinks then 20 s. The burst (3 x 120/180 ms every 20 s) is now the unread pattern in every mode: register 146 steady colour on/off in automatic mode (6 writes per 20 s), the pixel in manual and locked mode; the Settings preview pauses it. The fade tests were rewritten to pin the burst (no fade bit; 6 changes per 20 s; the burst restarts lit after a preview).
+- **Save to SD:** a session-only node's menu has "Save to SD" above "Add to radio" (`nodeSaveToSd()`: clears `session_only`, forces the archive write, notice "Saved to the SD card"). Both menu builders set the flag (the draw path in nodes_page.cpp was missing it: the row would have been selectable but not drawn). Nine rows use 36 px rows so the sheet stays under the status bar. Test armed (`test_node_menu.cpp:315`).
+Suite exit 0, build exit 0.
+
 ## S516 (Claude) v80: the page keys use the stock launcher's icon shapes
 
 Filip (23:3x): *"default launcher has a set of F-keys icons, look at those, specially the 'cloud' one, it looks better than our one.."*, then *"yes, shapes only, adjusted to our size"*. The stock icons (`tanmatsu-launcher` @ `3ceac92`, `fat/tanmatsu/icons/f1-f6.png`, 32x32, MIT) were box-filtered by their alpha to 16x16 coverage masks (`main/fkey_icons.h`, generated with Pillow, 1,536 B); `drawSymbolSigil()` blends them in our ink at the hint bar's size (r = 7, only the Launcher shows them since v78) and keeps the drawn shapes for any other size. The cloud is the stock trefoil. Suite exit 0, build exit 0.

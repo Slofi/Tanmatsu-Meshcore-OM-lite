@@ -115,13 +115,15 @@ void testMessageRegister() {
     uint8_t           reg;
   };
   const Row rows[] = {
-      {om::ui::LedColour::Red, 0x09},      // R + fade
-      {om::ui::LedColour::Green, 0x0A},    // G + fade
-      {om::ui::LedColour::Blue, 0x0C},     // B + fade
-      {om::ui::LedColour::Yellow, 0x0B},   // R+G + fade
-      {om::ui::LedColour::Cyan, 0x0E},     // G+B + fade
-      {om::ui::LedColour::Magenta, 0x0D},  // R+B + fade
-      {om::ui::LedColour::White, 0x0F},    // R+G+B + fade
+      // S516 (Claude): unread is the 3-blink burst in every mode (Filip), so the register is the STEADY colour
+      // while a blink is lit (the burst starts lit), never the fade.
+      {om::ui::LedColour::Red, 0x01},
+      {om::ui::LedColour::Green, 0x02},
+      {om::ui::LedColour::Blue, 0x04},
+      {om::ui::LedColour::Yellow, 0x03},
+      {om::ui::LedColour::Cyan, 0x06},
+      {om::ui::LedColour::Magenta, 0x05},
+      {om::ui::LedColour::White, 0x07},
   };
   for (const Row& row : rows) {
     om::ui::LedRule rule;
@@ -130,7 +132,7 @@ void testMessageRegister() {
     CHECK_EQ(f.message, row.reg);
     CHECK(f.message_changed);
     CHECK(f.changed);
-    CHECK_EQ(f.message & 0x08, 0x08);   // fade ON
+    CHECK_EQ(f.message & 0x08, 0x00);   // fade OFF: a blink, not a breath (S516)
     CHECK_EQ(f.message & 0xF0, 0x00);   // colour B OFF, fade hold OFF
     // Automatic mode never touches a pixel: the coprocessor owns indices 0-3.
     for (int i = 0; i < 6; i++) CHECK(pixel(f, i, 0, 0, 0));
@@ -142,7 +144,7 @@ void testMessageRegister() {
   om::ui::LedRule rule;
   CHECK(!rule.step(0, in(false, true, true, 0)).changed);   // boot state is already 0 and automatic
   const om::ui::LedFrame on = rule.step(25, in(false, true, true, 2));
-  CHECK_EQ(on.message, 0x0E);
+  CHECK_EQ(on.message, 0x06);   // S516: the burst starts lit, steady cyan
   CHECK(on.changed);
   const om::ui::LedFrame off = rule.step(50, in(false, true, true, 0));
   CHECK_EQ(off.message, 0);
@@ -151,7 +153,7 @@ void testMessageRegister() {
 
   // An out-of-range colour byte is the default (cyan), never a crash.
   om::ui::LedRule bad;
-  CHECK_EQ(bad.step(0, in(false, true, true, 1, (om::ui::LedColour)99)).message, 0x0E);
+  CHECK_EQ(bad.step(0, in(false, true, true, 1, (om::ui::LedColour)99)).message, 0x06);
 }
 
 // ---- 3. the MODE for every combination: locked x power x radio x unread, plus the no-register fallback ----
@@ -250,41 +252,40 @@ void testManualEmulation() {
 
 // ---- 5. the app-driven fade: 8 steps, 200 ms each, nothing between steps --------------------------------
 void testManualFade() {
+  // S516 (Claude; Filip: "LED3 flashes constantly on new MSG, not just 3-times than nothing for 20s"): the
+  // manual (unlocked) unread pattern is the SAME burst as the locked one: 3 x (120 ms on, 180 ms off), then
+  // dark until the next 20 s group. It replaced a continuous 8-step breath.
   const om::ui::LedIn i = in(false, false, true, 1, om::ui::LedColour::White);
+  const uint8_t L = om::ui::kMessageLedBlinkLevel;
   om::ui::LedRule rule;
   const om::ui::LedFrame first = rule.step(0, i);
   CHECK(!first.automatic);
   CHECK(first.changed);             // automatic -> manual
-  CHECK(pixel(first, 2, 0, 0, 0));  // the fade starts dark
+  CHECK(pixel(first, 2, L, L, L));  // the burst starts lit
+  CHECK(pixel(rule.step(119, i), 2, L, L, L));
+  CHECK(pixel(rule.step(120, i), 2, 0, 0, 0));
+  CHECK(pixel(rule.step(300, i), 2, L, L, L));
+  CHECK(pixel(rule.step(420, i), 2, 0, 0, 0));
+  CHECK(pixel(rule.step(600, i), 2, L, L, L));
+  CHECK(pixel(rule.step(720, i), 2, 0, 0, 0));
+  CHECK(pixel(rule.step(900, i), 2, 0, 0, 0));      // three blinks only
+  CHECK(pixel(rule.step(19999, i), 2, 0, 0, 0));    // dark for the rest of the 20 s
+  CHECK(pixel(rule.step(20000, i), 2, L, L, L));    // the next group
 
-  // The expected 8-step ramp, sampled exactly on its 200 ms boundaries.
-  CHECK(pixel(rule.step(200, i), 2, 73, 73, 73));
-  CHECK(pixel(rule.step(400, i), 2, 146, 146, 146));
-  CHECK(pixel(rule.step(600, i), 2, 219, 219, 219));
-  CHECK(pixel(rule.step(800, i), 2, 255, 255, 255));
-  CHECK(pixel(rule.step(1000, i), 2, 219, 219, 219));
-  CHECK(pixel(rule.step(1200, i), 2, 146, 146, 146));
-  CHECK(pixel(rule.step(1400, i), 2, 73, 73, 73));
-  CHECK(pixel(rule.step(1600, i), 2, 0, 0, 0));
-
-  // At the task's 25 ms poll: EXACTLY five changed frames per second while breathing.
+  // At the task's 25 ms poll: exactly 6 changed frames per 20 s group (3 on + 3 off), nothing else.
   om::ui::LedRule polled;
-  CHECK(polled.step(0, i).changed);   // the mode change itself
+  CHECK(polled.step(0, i).changed);   // the mode change itself (lit)
   int changes = 0;
-  for (uint32_t t = 25; t <= 3200; t += 25) {
+  for (uint32_t t = 25; t < 20000; t += 25) {
     if (polled.step(t, i).changed) ++changes;
   }
-  CHECK_EQ(changes, 16);   // 3.2 s of ramp / 0.2 s per step
+  CHECK_EQ(changes, 5);   // off, on, off, on, off (the first "on" was the mode change)
 
-  // Light the ramp again, then Unread 0: dark at once, then silence.
-  CHECK(pixel(polled.step(3400, i), 2, 73, 73, 73));
-  const om::ui::LedFrame stop = polled.step(3425, in(false, false, true, 0));
-  CHECK(pixel(stop, 2, 0, 0, 0));
-  CHECK(stop.changed);
-  CHECK(!polled.step(3450, in(false, false, true, 0)).changed);
+  // Unread 0: dark at once.
+  const om::ui::LedIn none = in(false, false, true, 0, om::ui::LedColour::White);
+  CHECK(pixel(polled.step(20000, none), 2, 0, 0, 0));
 }
 
-// ---- 6. locked: ALL off except LED 3, three blinks every 20 s, in the chosen colour ---------------------
 void testLockedBlink() {
   const om::ui::LedIn i = in(true, true, true, 1);   // both switches On: locked still means manual
   om::ui::LedRule rule;
@@ -419,7 +420,7 @@ void testColourPreview() {
   // AUTOMATIC + unread > 0: the preview REPLACES the breathing, then the normal fade comes back.
   {
     om::ui::LedRule rule;
-    CHECK_EQ(rule.step(0, in(false, true, true, 2, om::ui::LedColour::Cyan)).message, 0x0E);   // breathing
+    CHECK_EQ(rule.step(0, in(false, true, true, 2, om::ui::LedColour::Cyan)).message, 0x06);   // burst lit (S516)
     const om::ui::LedIn p =
         in(false, true, true, 2, om::ui::LedColour::Blue, om::ui::PowerState::Battery, true, true, 4000);
     const om::ui::LedFrame f = rule.step(1000, p);
@@ -428,8 +429,9 @@ void testColourPreview() {
     CHECK(f.message_changed);
     CHECK(!rule.step(3999, p).changed);
     const om::ui::LedFrame back = rule.step(4000, p);
-    CHECK_EQ(back.message, 0x0C);   // blue + fade again
-    CHECK(back.message_changed);
+    CHECK_EQ(back.message, 0x04);   // S516: the burst restarts after the preview, lit, steady blue
+    CHECK_EQ(rule.step(4120, p).message, 0);   // then its first "off"
+    CHECK_EQ(rule.step(4300, p).message, 0x04);
   }
 
   // A SECOND step RESTARTS the 3 s (and previews its own NEW colour).
@@ -453,7 +455,8 @@ void testColourPreview() {
   {
     om::ui::LedRule rule;
     CHECK(!rule.step(0, in(false, false, true, 1, om::ui::LedColour::Magenta)).automatic);   // power LED off
-    CHECK(pixel(rule.step(0, in(false, false, true, 1, om::ui::LedColour::Magenta)), 2, 0, 0, 0));
+    CHECK(pixel(rule.step(0, in(false, false, true, 1, om::ui::LedColour::Magenta)), 2, om::ui::kMessageLedBlinkLevel, 0,
+                om::ui::kMessageLedBlinkLevel));   // S516: the burst starts lit
     const om::ui::LedIn p =
         in(false, false, true, 1, om::ui::LedColour::White, om::ui::PowerState::Battery, true, true, 3000);
     const om::ui::LedFrame f = rule.step(400, p);
@@ -461,9 +464,10 @@ void testColourPreview() {
     CHECK(f.pixels_changed);
     CHECK(!rule.step(2999, p).changed);
     const om::ui::LedFrame back = rule.step(3000, p);
-    CHECK(pixel(back, 2, 0, 0, 0));   // a FRESH fade starts dark
+    CHECK(pixel(back, 2, om::ui::kMessageLedBlinkLevel, om::ui::kMessageLedBlinkLevel,
+                om::ui::kMessageLedBlinkLevel));   // S516: a FRESH burst starts lit
     CHECK(back.changed);
-    CHECK(pixel(rule.step(3200, p), 2, 73, 73, 73));   // and ramps as usual 200 ms later
+    CHECK(pixel(rule.step(3120, p), 2, 0, 0, 0));   // and its first "off" 120 ms later
   }
 
   // MANUAL over unread OFF: the preview lights LED 3, then it goes dark again — the other pixels untouched.

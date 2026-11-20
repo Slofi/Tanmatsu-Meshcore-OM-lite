@@ -2445,6 +2445,7 @@ extern "C" void app_main(void) {
         ctx.hasKey       = !om::mc::contactKeyIncomplete(cs.c[store_index].pub);
         ctx.favourite    = cs.c[store_index].favourite;
         ctx.in_radio     = cs.c[store_index].in_radio;
+        ctx.session_only = cs.c[store_index].session_only;   // S516: "Save to SD"
         ctx.pathKnown    = om::mc::contactHasOutPath(cs.c[store_index]);
         ctx.pingPending  = om::mc::nodePingPendingFor(cs.c[store_index].pub);
         ctx.tracePending = om::mc::nodeTracePendingFor(cs.c[store_index].pub);
@@ -4612,6 +4613,16 @@ extern "C" void app_main(void) {
                                         } else {
                                             om::ui::noticeSet(om::ui::nodeNoPositionNotice(), 3000);
                                         }
+                                    }
+                                    break;
+                                }
+                                case om::ui::NodeAction::SaveToSd: {
+                                    // S516 (Claude): a session-only node to the SD archive only; the sheet stays up
+                                    // and the row's "Save to SD" disappears on the next frame.
+                                    uint8_t pub[32];
+                                    if (nodeMenuPub(pub)) {
+                                        if (om::mc::nodeSaveToSd(pub)) om::ui::noticeSet("Saved to the SD card", 2500);
+                                        else om::ui::noticeSet("Already saved", 2500);
                                     }
                                     break;
                                 }

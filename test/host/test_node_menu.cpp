@@ -303,7 +303,30 @@ void test_focus_follows() {
 
 }  // namespace
 
+// S516 (Claude): "Save to SD" only on a session-only row, above "Add to radio"; nine rows fit the array.
+static void testSaveToSdRow() {
+    om::ui::NodeMenuContext c;
+    c.advType = om::ui::kNodeMenuAdvChat;
+    c.hasKey = true;
+    c.pathKnown = true;
+    c.session_only = true;
+    om::ui::NodeMenuRow rows[om::ui::kMaxNodeMenuRows];
+    const int n = om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows);
+    CHECK(n == 9);
+    int save = -1, add = -1;
+    for (int i = 0; i < n; ++i) {
+        if (rows[i].action == om::ui::NodeAction::SaveToSd) save = i;
+        if (rows[i].action == om::ui::NodeAction::AddToRadio) add = i;
+    }
+    CHECK(save >= 0 && add == save + 1);
+    c.session_only = false;
+    const int m = om::ui::nodeMenuRows(c, rows, om::ui::kMaxNodeMenuRows);
+    CHECK(m == 8);
+    for (int i = 0; i < m; ++i) CHECK(rows[i].action != om::ui::NodeAction::SaveToSd);
+}
+
 int main() {
+    testSaveToSdRow();
   test_rows_per_type();
   test_focus_and_action();
   test_notice();

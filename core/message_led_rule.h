@@ -220,9 +220,20 @@ class LedRule {
         const bool    automatic = !in.locked && in.power_on && in.radio_on && in.message_register_ok;
         // Rule 5: the Settings preview, only while unlocked. It overrides unread-off and unread-fade.
         const bool    preview   = !in.locked && ledPreviewActive(now_ms, in.preview_until_ms);
-        const uint8_t message   = automatic ? (preview ? messageRegisterSteady(colour)
-                                                       : (in.unread > 0 ? messageRegister(colour) : 0))
-                                            : 0;
+        // S516 (Claude; Filip: "LED3 flashes constantly on new MSG, not just 3-times than nothing for 20s"):
+        // the unread pattern is the 3-blink burst every 20 s in EVERY mode (it was a continuous fade while
+        // unlocked, which was Claude's spec, not his). One timer for all modes; the preview pauses it.
+        bool burst_on = false;
+        if (in.unread > 0 && !preview) {
+            if (!blink_active_) {
+                blink_active_ = true;
+                blink_start_  = now_ms;
+            }
+            burst_on = burstLit((uint32_t)(now_ms - blink_start_) % kMessageLedGroupMs);
+        } else {
+            blink_active_ = false;
+        }
+        const uint8_t message   = automatic ? ((preview || burst_on) ? messageRegisterSteady(colour) : 0) : 0;
 
         LedFrame f;
         f.automatic = automatic;
@@ -242,35 +253,17 @@ class LedRule {
                 // Rule 5: full brightness, steady, whatever unread says. The breath restarts after the preview.
                 setScaled(&f.rgb[kMessageLedIndex][0], colour, 255);
                 breath_active_ = false;
-            } else if (in.unread > 0) {
-                if (!breath_active_) {
-                    breath_active_ = true;
-                    breath_start_  = now_ms;
-                }
-                setScaled(&f.rgb[kMessageLedIndex][0], colour,
-                          messageFadeLevel((uint32_t)(now_ms - breath_start_)));
-            } else {
-                breath_active_ = false;
+            } else if (burst_on) {
+                setScaled(&f.rgb[kMessageLedIndex][0], colour, kMessageLedBlinkLevel);
             }
+            breath_active_ = false;
         } else {
             breath_active_ = false;
         }
 
         if (!automatic && in.locked) {
             // Rule 3: all off; index 2 blinks three times every 20 s in the chosen colour.
-            if (in.unread > 0) {
-                if (!blink_active_) {
-                    blink_active_ = true;
-                    blink_start_  = now_ms;
-                }
-                if (burstLit((uint32_t)(now_ms - blink_start_) % kMessageLedGroupMs)) {
-                    setScaled(&f.rgb[kMessageLedIndex][0], colour, kMessageLedBlinkLevel);
-                }
-            } else {
-                blink_active_ = false;
-            }
-        } else {
-            blink_active_ = false;
+            if (burst_on) setScaled(&f.rgb[kMessageLedIndex][0], colour, kMessageLedBlinkLevel);
         }
 
         f.message_changed = (automatic != prev_automatic_) || (message != prev_message_);

@@ -51,11 +51,12 @@ enum class NodeAction : uint8_t {
     Favourite,
     DeleteEverywhere,   // S515/EST-465: one table, so this is the old Remove contact, named honestly
     RemoveContact,      // kept for the Settings › NODES list's own confirm path (EST-447)
+    SaveToSd,           // S516 (Claude): a session-only row ("Save heard nodes to SD" Off) saved to the SD only
 };
 
 // Eight is the real maximum (a client with a route: DM, Info, Ping, Trace, Map, the store row, Favourite,
 // Delete everywhere). Kept as a bound so a future action cannot silently overrun a caller's array.
-constexpr int kMaxNodeMenuRows = 8;
+constexpr int kMaxNodeMenuRows = 9;   // S516: + "Save to SD" on a session-only row
 
 struct NodeMenuRow {
     NodeAction  action      = NodeAction::None;
@@ -76,6 +77,7 @@ struct NodeMenuContext {
     // S515/EST-465: which store the row is in. The menu says "Add to radio" or, S515/EST-468,
     // "Remove from radio (stays on SD)", never both.
     bool    in_radio  = false;
+    bool    session_only = false;   // S516: heard while saving was Off: shown, usable, saved nowhere
     // S514/EST-456: ContactInfo::out_path_len != OUT_PATH_UNKNOWN (core/mc_store.h contactHasOutPath).
     bool    pathKnown = false;
     // S515/EST-466: the advert carried a drawable position (core/map_nodes.h positionDrawable).
@@ -113,6 +115,10 @@ inline int nodeMenuRows(const NodeMenuContext& c, NodeMenuRow* out, int max) {
         // S515/EST-465: one store row, worded by where the node is now. The action is never both.
         // S515/EST-468: the row is in the radio AND on the SD card, so the action takes it out of the radio and
         // says that the SD copy stays (Filip: "I think it should be on both").
+        // S516 (Claude; Filip: "when both save to radio and save to SD are off, the new nodes/RPTRs need a function in
+        // Nodes page, node info to add them to SD too; there is only add to radio command now"): an unsaved row
+        // gets "Save to SD" (the SD archive only); "Add to radio" still saves it to both.
+        if (c.session_only) add(NodeAction::SaveToSd, "Save to SD");
         if (c.in_radio) add(NodeAction::MoveToArchive, "Remove from radio (stays on SD)");
         else add(NodeAction::AddToRadio, "Add to radio");
         add(NodeAction::Favourite, "Favourite", c.favourite ? "on" : "off", c.favourite);

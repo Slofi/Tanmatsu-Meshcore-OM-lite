@@ -1160,6 +1160,18 @@ size_t radioCapacity() { return radioCapFor(g_int_mounted); }
 // S515 (Claude, review): the four user actions below FORCE the archive write. A structural change already writes
 // radio.bin on the next pass, but the SD archive waited its 30 s floor, so a power-off inside that window brought a
 // deleted node back from the card on the next boot (the merge adds archive rows). They are rare and deliberate.
+bool nodeSaveToSd(const uint8_t pub[32]) {
+    if (g_store_mutex == nullptr) return false;
+    StoreLock l;
+    const int idx = contactsFind(g_contacts, pub);
+    if (idx < 0 || !g_contacts.c[idx].session_only) return false;
+    g_contacts.c[idx].session_only = false;
+    markContactsDirty(true);
+    g_archive_force = true;   // a user action: the SD copy follows at once (Claude, S515 review rule)
+    ESP_LOGI(TAG, "nodes: a session-only node saved to the SD archive");
+    return true;
+}
+
 om::mc::RadioResult nodeAddToRadio(const uint8_t pub[32]) {
     if (g_store_mutex == nullptr) return om::mc::RadioResult::NotFound;
     StoreLock l;

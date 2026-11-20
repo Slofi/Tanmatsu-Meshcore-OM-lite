@@ -293,7 +293,10 @@ uint32_t unreadForChannel(const MessageRing& r, const ReadState& rs, uint8_t ch)
     uint32_t n = 0;
     for (size_t i = 0; i < r.count; i++) {
         const Message* m = messagesAt(r, i);
-        if (m->channel == ch && m->seq > rs.seen[ch]) n++;
+        // S516 (Claude; Filip: "when I send a MSG, the 'new MSG' icon and the LED3 are triggered if I switch the
+        // page right after I send it"): our OWN messages are never unread. Before, only opening/Esc moved the
+        // seen point past them, so leaving Chat with a page key right after a send counted the send as unread.
+        if (m->channel == ch && !m->outgoing && m->seq > rs.seen[ch]) n++;
     }
     return n;
 }
@@ -393,7 +396,7 @@ uint32_t dmUnreadForPeer(const DmRing& r, const ContactStore& s, const uint8_t p
     uint32_t n = 0;
     for (size_t i = 0; i < r.count; i++) {
         const DmMessage* m = dmAt(r, i);
-        if (samePub(m->peer_pub, pub) && m->seq > s.c[idx].dm_seen) n++;
+        if (samePub(m->peer_pub, pub) && !m->outgoing && m->seq > s.c[idx].dm_seen) n++;   // S516: own DMs never unread
     }
     return n;
 }

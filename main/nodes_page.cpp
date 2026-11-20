@@ -330,6 +330,7 @@ void drawNodeMenu(Screen& s, const mc::Contact& c, int focus, uint32_t now, bool
     ctx.hasKey       = !mc::contactKeyIncomplete(c.pub);
     ctx.favourite    = c.favourite;
     ctx.in_radio     = c.in_radio;   // S515/EST-465: Add to radio / Move to archive
+    ctx.session_only = c.session_only;   // S516: "Save to SD" (main.cpp's nodeMenuRowCount sets it too)
     ctx.pathKnown    = mc::contactHasOutPath(c);
     // S515/EST-466: the Map row needs a position the map can actually draw (core/map_nodes.h owns the rule).
     ctx.hasPosition  = om::map::positionDrawable(c.has_position, c.lat_e6, c.lon_e6);
@@ -392,7 +393,7 @@ void drawNodeMenu(Screen& s, const mc::Contact& c, int focus, uint32_t now, bool
     for (int y = 0; y < H; y += 2) s.fillRect(0, y, W, 1, kBg);
 
     const int sheet_w = 560;
-    const int row_h   = 42;
+    const int row_h   = row_count > 8 ? 36 : 42;   // S516: 9 rows at 42 px would leave the screen
     const int head_h  = 64;
     const int pad     = 16;
     const int sheet_h = 2 * pad + head_h + row_count * row_h;
