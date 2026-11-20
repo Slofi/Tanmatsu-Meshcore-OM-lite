@@ -654,26 +654,39 @@ void testConfirmWords() {
 }
 
 void testCliPending() {
-    // ONE line in flight: nothing else may be sent while it is used, and a lost answer clears it.
+    // ONE line in flight: nothing else may be sent while it is used.
     om::rptr::CliPending p;
     CHECK(!p.used);
+    CHECK(p.canSend());
+    CHECK(p.tick(0) == om::rptr::CliEvent::Idle);
     p.begin("set tx 20", (uint8_t)om::rptr::SetRow::TxPower, false, 1000, 8000);
     CHECK(p.used);
+    CHECK(!p.canSend());
     CHECK_EQ(p.row, (uint8_t)om::rptr::SetRow::TxPower);
     CHECK(!p.isRead);
     CHECK_STR(p.line, "set tx 20");
-    CHECK(!p.timedOut(8999));
-    CHECK(p.timedOut(9000));   // the deadline is inclusive, exactly 8 s after it went out
-    CHECK(!p.timedOut(8999));
-    p.clear();
+    CHECK(!p.late);
+    CHECK(p.tick(8999) == om::rptr::CliEvent::Waiting);
+    // S516 (EST-474): the deadline does NOT release the line. It opens ONE more deadline of the same length.
+    CHECK(p.tick(9000) == om::rptr::CliEvent::TimedOut);   // the deadline is inclusive, exactly 8 s after it went out
+    CHECK(p.late);
+    CHECK(p.used);
+    CHECK(!p.canSend());
+    CHECK_EQ(p.deadlineMs, 17000u);
+    CHECK(p.tick(16999) == om::rptr::CliEvent::Waiting);
+    CHECK(p.tick(17000) == om::rptr::CliEvent::Closed);    // the window's end is inclusive too
     CHECK(!p.used);
+    CHECK(!p.late);
+    CHECK(p.canSend());
     CHECK_STR(p.line, "");
     // The 32-bit wrap is a signed difference, like every other window in this tree.
     om::rptr::CliPending q;
     q.begin("get tx", (uint8_t)om::rptr::SetRow::TxPower, true, 0xFFFFFF00u, 8000);
-    CHECK(!q.timedOut(0x1000u));    // 0xFFFFFF00 + 8000 wraps to 0x1E40: 0x1000 is still before it
-    CHECK(q.timedOut(0x2000u));     // past the wrapped deadline
-    CHECK(!q.timedOut(0xFFFFF000u));
+    CHECK(q.tick(0x1000u) == om::rptr::CliEvent::Waiting);   // 0xFFFFFF00 + 8000 wraps to 0x1E40
+    CHECK(q.tick(0x2000u) == om::rptr::CliEvent::TimedOut);  // past the wrapped deadline
+    CHECK_EQ(q.deadlineMs, 0x3D80u);                         // 0x1E40 + 8000, one more deadline
+    CHECK(q.tick(0x3000u) == om::rptr::CliEvent::Waiting);
+    CHECK(q.tick(0x4000u) == om::rptr::CliEvent::Closed);
     CHECK(om::rptr::setRowIsText((int)om::rptr::SetRow::Position));
     CHECK(!om::rptr::setRowIsText((int)om::rptr::SetRow::Repeat));
     CHECK(om::rptr::setRowIsToggle((int)om::rptr::SetRow::PowerSave));
@@ -681,6 +694,126 @@ void testCliPending() {
     CHECK(om::rptr::setRowIsAction((int)om::rptr::SetRow::Reboot));
     CHECK_STR(om::rptr::setRowLabel((int)om::rptr::SetRow::Owner), "Owner info");
     CHECK_STR(om::rptr::setRowLabel(99), "");
+}
+
+// S516 (EST-474): a repeater's LATE answer must not fill the wrong row. Every instant below is exact, and the
+// routing is the shell's own: `settingsApplyRead(&s, p.line, reply)` is the call onCliAnswer makes with the slot
+// that holds the line, so these cases pin the real code path, not a copy of it.
+void testLateAnswerWindow() {
+    using om::rptr::CliEvent;
+    using om::rptr::CliPending;
+    using om::rptr::SetRow;
+
+    // (1) THE CASE EST-473 § 6a FOUND: "get tx" times out, its answer "> 14" arrives INSIDE the window. It fills TX
+    // power, Position is untouched, and only then may the held "get lat" go out.
+    {
+        CliPending p;
+        om::rptr::Settings s;
+        p.begin("get tx", (uint8_t)SetRow::TxPower, true, 1000, 8000);
+        CHECK(p.tick(9000) == CliEvent::TimedOut);
+        CHECK(!p.canSend());   // "get lat" is HELD: the slot is still the timed-out line's
+        CHECK(p.used);
+        CHECK(p.late);
+        CHECK_STR(p.line, "get tx");
+        CHECK_EQ(p.row, (uint8_t)SetRow::TxPower);
+        CHECK(p.isRead);
+        // The slow answer, at 12000, is still inside the window -> the TIMED-OUT line's row.
+        CHECK(om::rptr::settingsApplyRead(&s, p.line, "> 14"));
+        CHECK(s.txOk);
+        CHECK_EQ(s.tx, 14);
+        CHECK(!s.latOk);   // Position untouched
+        CHECK(!s.lonOk);
+        CHECK(p.tick(12000) == CliEvent::Waiting);   // the window is still open after the answer arrived
+        p.clear();                                    // what onCliAnswer does with the line it answered
+        CHECK(p.canSend());                           // and only now ...
+        p.begin("get lat", (uint8_t)SetRow::Position, true, 12000, 8000);   // ... the held line goes out
+        CHECK_STR(p.line, "get lat");
+        CHECK_EQ(p.sentMs, 12000u);
+        CHECK_EQ(p.deadlineMs, 20000u);   // its OWN deadline starts when it is sent, never at the old window
+    }
+    // (1b) a late answer to a CHANGE still knows it is a change: the shell shows its notice and re-reads the row.
+    {
+        CliPending p;
+        p.begin("set tx 20", (uint8_t)SetRow::TxPower, false, 1000, 8000);
+        CHECK(p.tick(9000) == CliEvent::TimedOut);
+        CHECK(!p.isRead);
+        CHECK_STR(p.line, "set tx 20");
+        CHECK_EQ(p.row, (uint8_t)SetRow::TxPower);
+        p.clear();
+    }
+
+    // (2) the window closes with NO answer: the held line goes at the window's end and the timed-out row stays
+    // "no answer" (nothing applied, still unread).
+    {
+        CliPending p;
+        om::rptr::Settings s;
+        p.begin("get tx", (uint8_t)SetRow::TxPower, true, 1000, 8000);
+        CHECK(p.tick(9000) == CliEvent::TimedOut);
+        CHECK(p.tick(12000) == CliEvent::Waiting);
+        CHECK(p.tick(16999) == CliEvent::Waiting);
+        CHECK(!p.canSend());
+        CHECK(p.tick(17000) == CliEvent::Closed);   // exactly one more deadline, then release
+        CHECK(!p.used);
+        CHECK(p.canSend());                          // the held "get lat" may go NOW
+        CHECK(!s.txOk);                              // the row keeps "no answer" (nothing was applied)
+        CHECK(!s.latOk);
+        CHECK_STR(p.line, "");
+        p.begin("get lat", (uint8_t)SetRow::Position, true, 17000, 8000);
+        CHECK_STR(p.line, "get lat");
+    }
+
+    // (3) an answer AFTER the window, while the held line is in flight, is the HELD line's (unchanged behaviour).
+    {
+        CliPending p;
+        om::rptr::Settings s;
+        p.begin("get tx", (uint8_t)SetRow::TxPower, true, 1000, 8000);
+        CHECK(p.tick(9000) == CliEvent::TimedOut);
+        CHECK(p.tick(17000) == CliEvent::Closed);
+        p.begin("get lat", (uint8_t)SetRow::Position, true, 17000, 8000);
+        CHECK_STR(p.line, "get lat");
+        CHECK(om::rptr::settingsApplyRead(&s, p.line, "> 46.25000"));   // the held line's answer
+        CHECK(s.latOk);
+        CHECK_EQ(s.latE6, 46250000);
+        CHECK(!s.txOk);   // TX's row keeps saying nothing
+    }
+
+    // (4) logout / leaving the repeater clears the window: no stale answer can land in a later session.
+    {
+        CliPending p;
+        p.begin("get tx", (uint8_t)SetRow::TxPower, true, 1000, 8000);
+        CHECK(p.tick(9000) == CliEvent::TimedOut);
+        CHECK(p.late);
+        p.clear();   // logout()
+        CHECK(!p.used);
+        CHECK(!p.late);
+        CHECK(p.canSend());
+        CHECK_STR(p.line, "");
+        CHECK(p.tick(9000) == CliEvent::Idle);
+        p.begin("get name", (uint8_t)SetRow::Name, true, 9000, 8000);   // a fresh session, a fresh deadline
+        CHECK_EQ(p.deadlineMs, 17000u);
+        CHECK(p.tick(17000) == CliEvent::TimedOut);
+    }
+
+    // (5) TWO timeouts in a row: one window per timed-out line, never stacked, and each keeps that line's identity.
+    {
+        CliPending p;
+        om::rptr::Settings s;
+        p.begin("get tx", (uint8_t)SetRow::TxPower, true, 1000, 8000);
+        CHECK(p.tick(9000) == CliEvent::TimedOut);
+        CHECK(p.tick(17000) == CliEvent::Closed);
+        p.begin("get lat", (uint8_t)SetRow::Position, true, 17000, 8000);   // the held line
+        CHECK(p.tick(25000) == CliEvent::TimedOut);                          // its OWN deadline
+        CHECK_EQ(p.deadlineMs, 33000u);                                      // ONE estimate, never two stacked
+        CHECK(p.late);
+        CHECK_STR(p.line, "get lat");
+        CHECK_EQ(p.row, (uint8_t)SetRow::Position);
+        CHECK(om::rptr::settingsApplyRead(&s, p.line, "> 46.25000"));        // the SECOND line's own answer
+        CHECK(s.latOk);
+        CHECK(!s.txOk);   // the first line's row is still the untrusted one
+        p.clear();
+        CHECK(p.canSend());
+        CHECK(p.tick(33000) == CliEvent::Idle);
+    }
 }
 
 // --------------------------------------------------------------------------------------------- junk pass
@@ -756,6 +889,7 @@ int main() {
     testCliTypedPosition();
     testConfirmWords();
     testCliPending();
+    testLateAnswerWindow();
     testJunk();
 
     printf("%d checks, %d failure(s)\n", g_checks, g_failures);

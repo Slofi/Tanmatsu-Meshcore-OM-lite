@@ -709,6 +709,6 @@ constexpr bool advertScheduleDue(uint32_t interval_s, uint32_t elapsed_s, bool e
 }
 
 // The image's version, shown in General > DEVICE. One constant: the next ticket bumps this line.
-constexpr const char* kAppVersion = "67";   // S516/EST-473: bug sweep round 2 (frozen order, pop-up count, rptr text)
+constexpr const char* kAppVersion = "68";   // S516/EST-474: a late CLI answer holds the next line one more deadline
 
 }  // namespace tm

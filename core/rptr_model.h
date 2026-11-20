@@ -306,9 +306,22 @@ bool cliParseTypedPosition(const char* typed, int32_t* latE6, int32_t* lonE6);
 int confirmWriteText(char* out, size_t cap, const char* line, const char* current);
 int confirmRebootText(char* out, size_t cap, const char* name);   // "Reboot X? It is off the mesh for ~10 s."
 
+// What CliPending::tick() saw. Idle means nothing is in flight, so the next line may go now; Waiting means the
+// line is still inside its own deadline or its late window (the next line is held); TimedOut means this call
+// opened the late window; Closed means the late window ended with no answer and the slot is free again.
+enum class CliEvent : uint8_t { Idle = 0, Waiting, TimedOut, Closed };
+
 // ------------------------------------------------------------------------ one line on the air at a time
-// A queue of ONE pending CLI line (EST-470 item 4). Nothing else is sent while `used`; a timeout clears it and
-// leaves every row as it was READ, because a lost answer means "we do not know", never "it worked".
+// A queue of ONE pending CLI line (EST-470 item 4). Nothing else is sent while `used`; a lost answer changes
+// nothing on the repeater's side, so every row keeps the value it was READ as.
+//
+// S516 (EST-474): meeting the deadline does NOT release the next line. The line stays `used` for ONE MORE
+// DEADLINE (the same estimate it was sent with, its own `deadlineMs - sentMs`) because the repeater's answer may
+// still be on its way and must not land in the NEXT line's row. While that window is open every send is refused,
+// which is exactly what holds the next line; a late answer still finds THIS line's `line`/`row`/`isRead`, so the
+// shell routes it to the row that asked. When the window closes with nothing the line is cleared like a plain
+// timeout ("no answer") and the held line goes out. One window per timed-out line, never stacked (the slot is
+// released before the next line is sent); clear() — logout, leaving the repeater — drops the window too.
 struct CliPending {
   bool     used = false;
   bool     isRead = false;   // a read (the answer becomes a value) or a change (the answer becomes a notice)
@@ -316,10 +329,17 @@ struct CliPending {
   char     line[64] = "";
   uint32_t sentMs = 0;
   uint32_t deadlineMs = 0;
+  bool     late = false;     // S516: its deadline passed and the late-answer window is open
 
   void begin(const char* l, uint8_t r, bool read, uint32_t nowMs, uint32_t deadline);
   void clear() { *this = CliPending(); }
-  bool timedOut(uint32_t nowMs) const { return used && (int32_t)(nowMs - deadlineMs) >= 0; }
+  // S516: the one place time moves this line. Idle (nothing in flight), Waiting (still in its own deadline or in
+  // its late window), TimedOut (this call opened the late window — the caller drops a paired second half and
+  // keeps every row as it was), Closed (the late window ended with no answer — the line is cleared, so the line
+  // held behind it may go NOW). One call per pass; the window is never opened twice and never stacked.
+  CliEvent tick(uint32_t nowMs);
+  // The "one line at a time" rule: false while a line waits for its answer OR its late window is open.
+  bool canSend() const { return !used; }
 };
 
 }  // namespace rptr

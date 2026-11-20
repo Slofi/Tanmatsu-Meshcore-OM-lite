@@ -58,6 +58,8 @@ bool forgetAllPasswords();
 // ------------------------------------------------------------------- EST-470: the safe settings (part 2a)
 // ONE line in flight: every request here goes through settingsSend, which refuses while another is pending, so
 // repeater never sees two commands at once and a lost answer can never be mistaken for the next one's.
+// S516 (EST-474): a line that misses its deadline keeps its slot for one more deadline (rptr::CliPending::tick),
+// so a SLOW answer still lands on its own row and the next line is held until that window closes.
 // `r` (settingsReadStart) runs the read ladder again, and a successful login runs it once by itself - every row
 // shows a value the repeater itself answered, never a placeholder (a row not read yet draws "…").
 //

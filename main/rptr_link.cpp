@@ -252,18 +252,23 @@ void tick() {
         s_statusPending = false;   // one honest "no answer yet" on the page; r tries again
         ESP_LOGW("rptr", "status: no answer within %lu ms", (unsigned long)(s_statusDeadlineMs - s_statusSentMs));
     }
-    // EST-470 item 4: ONE line at a time. A lost answer changes NOTHING on the repeater's side, so the row keeps
-    // the value it was READ as and the page says "no answer"; the next line then goes out (a read that timed out
-    // is skipped, never retried in a loop).
+    // EST-470 item 4 / S516 (EST-474): ONE line at a time. A lost answer changes NOTHING on the repeater's side,
+    // so the row keeps the value it was READ as. S516 adds the late window: a line that meets its deadline stays
+    // in its slot for one more deadline, which HOLDS the next line and lets a slow answer land on the row that
+    // asked (the model owns that rule; this loop only feeds it time). The held line goes out on the pass where the
+    // window closes with nothing - or on the next pass after a late answer clears the slot.
     const uint32_t now = nowMs();
-    if (s_cli.used && s_cli.timedOut(now)) {
-        ESP_LOGW("rptr", "cli: no answer to \"%s\" within %lu ms", s_cli.line,
-                 (unsigned long)(s_cli.deadlineMs - s_cli.sentMs));
-        s_cli.clear();
-        // A lost answer changes NOTHING on the repeater's side, so the row keeps the value it was READ as and the
-        // page says "no answer". The step already moved past the line when it went out, so the next pass sends the
-        // next read instead of sitting on this one. A paired change stops here: its first half is unproven.
+    const uint32_t cli_est_ms = s_cli.used ? (s_cli.deadlineMs - s_cli.sentMs) : 0;
+    const rptr::CliEvent cli_event = s_cli.tick(now);
+    if (cli_event == rptr::CliEvent::TimedOut) {
+        // The same estimate the line was sent with is how long the next line is held (the model already moved the
+        // deadline on; tick() is the only place that does).
+        ESP_LOGW("rptr", "cli: no answer to \"%s\" within %lu ms yet; holding the next line %lu ms", s_cli.line,
+                 (unsigned long)cli_est_ms, (unsigned long)cli_est_ms);
+        // A paired change stops here: its first half is unproven, so `set lon` is never sent after a lost `set lat`.
         s_second[0] = '\0';
+    } else if (cli_event == rptr::CliEvent::Closed) {
+        ESP_LOGW("rptr", "cli: no answer after the late window");
         noteAnswer("no answer", true);
     }
     // EST-470: `clock sync` goes out once per login, BEFORE the reads (OM sends it automatically too). Skipped

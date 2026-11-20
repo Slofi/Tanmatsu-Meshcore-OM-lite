@@ -711,6 +711,30 @@ void CliPending::begin(const char* l, uint8_t r, bool read, uint32_t nowMs, uint
   snprintf(line, sizeof(line), "%s", (l != nullptr) ? l : "");
   sentMs = nowMs;
   deadlineMs = nowMs + deadline;
+  late = false;
+}
+
+// S516 (EST-474): the whole rule in one place, so the shell only asks "what happened" and the host test can drive
+// every instant exactly. The late window is the SAME length as the line's own estimate and is measured from the
+// original deadline, so a late main-loop pass shortens nothing - it can only make the window close on the first
+// pass after it.
+CliEvent CliPending::tick(uint32_t nowMs) {
+  if (!used) return CliEvent::Idle;
+  if (!late) {
+    if ((int32_t)(nowMs - deadlineMs) < 0) return CliEvent::Waiting;
+    // Its deadline passed but it is NOT released: an answer may still be on its way. Keeping `used` true is what
+    // holds the next line; keeping line/row/isRead is what makes a late answer land on the row that asked.
+    const uint32_t estMs = deadlineMs - sentMs;
+    late = true;
+    sentMs = deadlineMs;
+    deadlineMs = deadlineMs + estMs;
+    return CliEvent::TimedOut;
+  }
+  if ((int32_t)(nowMs - deadlineMs) < 0) return CliEvent::Waiting;
+  // One window per line, and it is over: the line becomes a plain "no answer" and the slot is free again, so the
+  // line that was held behind it can go out on this same pass.
+  clear();
+  return CliEvent::Closed;
 }
 
 }  // namespace rptr
